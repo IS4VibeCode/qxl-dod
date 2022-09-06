@@ -4920,7 +4920,7 @@ NTSTATUS QxlDevice::SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION* pS
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    if (pSetPointerPosition->X < 0 || !pSetPointerPosition->Flags.Visible) {
+    if (!pSetPointerPosition->Flags.Visible) {
         cursor_cmd->type = QXL_CURSOR_HIDE;
     } else {
         cursor_cmd->type = QXL_CURSOR_MOVE;
