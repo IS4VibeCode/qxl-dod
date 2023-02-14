@@ -3869,7 +3869,7 @@ void QxlDevice::ResetDevice(void)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
     m_RamHdr->int_mask = ~0;
-    WRITE_PORT_UCHAR(m_IoBase + QXL_IO_MEMSLOT_ADD, 0);
+    WRITE_PORT_UCHAR(m_IoBase + QXL_IO_RESET, 0);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
