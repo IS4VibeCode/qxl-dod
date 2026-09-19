@@ -1,3 +1,4 @@
+/* $Id: swab.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VBox storage devices:
@@ -14,25 +15,35 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef _VBOX_LINUX_SWAB_H
-#define _VBOX_LINUX_SWAB_H
+#ifndef VBOX_INCLUDED_SRC_Storage_swab_h
+#define VBOX_INCLUDED_SRC_Storage_swab_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-# define _LINUX_BYTEORDER_SWAB_H
+#define _LINUX_BYTEORDER_SWAB_H
+#define _LINUX_BYTEORDER_SWABB_H
 
 #include <asm/types.h>
 
@@ -60,4 +71,4 @@ static __inline__ __u64 __swab64p(const __u64 *px)
            | ((x >> 40) & 0xff00) | ((x >> 56) & 0xff);
 }
 
-#endif /* _VBOX_LINUX_SWAB_H */
+#endif /* !VBOX_INCLUDED_SRC_Storage_swab_h */

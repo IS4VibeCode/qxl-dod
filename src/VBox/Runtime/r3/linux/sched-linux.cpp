@@ -1,28 +1,43 @@
-/* $Id: sched-linux.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: sched-linux.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Scheduling, POSIX.
+ * IPRT - Scheduling, POSIX.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 /*
  * !WARNING!
  *
- * When talking about lowering and raising priority, we do *NOT* refere to
+ * When talking about lowering and raising priority, we do *NOT* refer to
  * the common direction priority values takes on unix systems (lower means
  * higher). So, when we raise the priority of a linux thread the nice
  * value will decrease, and when we lower the priority the nice value
@@ -37,17 +52,18 @@
  * Be very careful with enabling this, it may cause deadlocks when combined
  * with the 'thread' logging prefix.
  */
-#ifdef __DOXYGEN__
+#ifdef DOXYGEN_RUNNING
 # define THREAD_LOGGING
 #endif
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_THREAD
 #include <errno.h>
 #include <pthread.h>
+#include <limits.h>
 #include <sched.h>
 #include <unistd.h>
 #include <sys/resource.h>
@@ -58,14 +74,14 @@
 #include <iprt/string.h>
 #include <iprt/assert.h>
 #include <iprt/log.h>
-#include <iprt/err.h>
+#include <iprt/errcore.h>
 #include "internal/sched.h"
 #include "internal/thread.h"
 
 
-/*******************************************************************************
-*   Structures and Typedefs                                                    *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Structures and Typedefs                                                                                                      *
+*********************************************************************************************************************************/
 
 /** Array scheduler attributes corresponding to each of the thread types.
  * @internal */
@@ -116,14 +132,27 @@ typedef struct
 } SAVEDPRIORITY, *PSAVEDPRIORITY;
 
 
-/*******************************************************************************
-*   Global Variables                                                           *
-*******************************************************************************/
+/**
+ * Priorities for checking by separate thread
+ * @internal
+ */
+typedef struct
+{
+    /** The current thread priority to assume first. */
+    int                 iCurrent;
+    /** The thread priority to try set afterwards. */
+    int                 iNew;
+} VALIDATORPRIORITYPAIR, *PVALIDATORPRIORITYPAIR;
+
+
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
 /**
  * Deltas for a process in which we are not restricted
  * to only be lowering the priority.
  */
-static const PROCPRIORITYTYPE g_aTypesLinuxFree[RTTHREADTYPE_LAST] =
+static const PROCPRIORITYTYPE g_aTypesLinuxFree[RTTHREADTYPE_END] =
 {
     { RTTHREADTYPE_INVALID,                 -999999999 },
     { RTTHREADTYPE_INFREQUENT_POLLER,       +3 },
@@ -142,7 +171,7 @@ static const PROCPRIORITYTYPE g_aTypesLinuxFree[RTTHREADTYPE_LAST] =
 /**
  * Deltas for a process in which we are restricted and can only lower the priority.
  */
-static const PROCPRIORITYTYPE g_aTypesLinuxRestricted[RTTHREADTYPE_LAST] =
+static const PROCPRIORITYTYPE g_aTypesLinuxRestricted[RTTHREADTYPE_END] =
 {
     { RTTHREADTYPE_INVALID,                 -999999999 },
     { RTTHREADTYPE_INFREQUENT_POLLER,       +3 },
@@ -161,10 +190,10 @@ static const PROCPRIORITYTYPE g_aTypesLinuxRestricted[RTTHREADTYPE_LAST] =
 /**
  * All threads have the same priority.
  *
- * This is typically choosen when we find that we can't raise the priority
+ * This is typically chosen when we find that we can't raise the priority
  * to the process default of a thread created by a low priority thread.
  */
-static const PROCPRIORITYTYPE g_aTypesLinuxFlat[RTTHREADTYPE_LAST] =
+static const PROCPRIORITYTYPE g_aTypesLinuxFlat[RTTHREADTYPE_END] =
 {
     { RTTHREADTYPE_INVALID,                 -999999999 },
     { RTTHREADTYPE_INFREQUENT_POLLER,        0 },
@@ -257,9 +286,9 @@ static bool g_fInitialized = false;
 
 
 
-/*******************************************************************************
-*   Internal Functions                                                         *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Internal Functions                                                                                                           *
+*********************************************************************************************************************************/
 
 
 /**
@@ -300,48 +329,54 @@ static void rtSchedNativeRestore(PSAVEDPRIORITY pSave)
 
 
 /**
+ * Called on the priority proxy thread if requested running, otherwise
+ * rtSchedRunThread() calls it directly.
+ */
+static DECLCALLBACK(int) rtSchedRunThreadCallback(pthread_t *pThread, void *(*pfnThread)(void *pvArg), void *pvArg)
+{
+    int rc = pthread_create(pThread, NULL, pfnThread, pvArg);
+    if (!rc)
+        return VINF_SUCCESS;
+    return RTErrConvertFromErrno(rc);
+}
+
+
+/**
  * Starts a worker thread and wait for it to complete.
+ *
  * We cannot use RTThreadCreate since we're already owner of the RW lock.
  */
-static int rtSchedRunThread(void *(*pfnThread)(void *pvArg), void *pvArg)
+static int rtSchedRunThread(void *(*pfnThread)(void *pvArg), void *pvArg, bool fUsePriorityProxy)
 {
     /*
-     * Setup thread attributes.
+     * Create the thread.
      */
-    pthread_attr_t  ThreadAttr;
-    int rc = pthread_attr_init(&ThreadAttr);
-    if (!rc)
+    pthread_t Thread;
+    int rc;
+#ifndef RTTHREAD_POSIX_WITH_CREATE_PRIORITY_PROXY
+    RT_NOREF(fUsePriorityProxy);
+#else
+    if (   fUsePriorityProxy
+        && rtThreadPosixPriorityProxyStart())
+        rc = rtThreadPosixPriorityProxyCall(NULL, (PFNRT)rtSchedRunThreadCallback, 3, &Thread, pfnThread, pvArg);
+    else
+#endif
+        rc = rtSchedRunThreadCallback(&Thread, pfnThread, pvArg);
+    if (RT_SUCCESS(rc))
     {
-        rc = pthread_attr_setdetachstate(&ThreadAttr, PTHREAD_CREATE_JOINABLE);
-        if (!rc)
+        /*
+         * Wait for the thread to finish.
+         */
+        void *pvRet = (void *)-1;
+        do
         {
-            rc = pthread_attr_setstacksize(&ThreadAttr, 128*1024);
-            if (!rc)
-            {
-                /*
-                 * Create the thread.
-                 */
-                pthread_t Thread;
-                rc = pthread_create(&Thread, &ThreadAttr, pfnThread, pvArg);
-                if (!rc)
-                {
-                    /*
-                     * Wait for the thread to finish.
-                     */
-                    void *pvRet = (void *)-1;
-                    do
-                    {
-                        rc = pthread_join(Thread, &pvRet);
-                    } while (errno == EINTR);
-                    if (rc)
-                        return RTErrConvertFromErrno(rc);
-                    return (int)(uintptr_t)pvRet;
-                }
-            }
-        }
-        pthread_attr_destroy(&ThreadAttr);
+            rc = pthread_join(Thread, &pvRet);
+        } while (rc == EINTR);
+        if (rc)
+            return RTErrConvertFromErrno(rc);
+        return (int)(uintptr_t)pvRet;
     }
-    return RTErrConvertFromErrno(rc);
+    return rc;
 }
 
 
@@ -400,6 +435,7 @@ static void *rtSchedNativeSubProberThread(void *pvUser)
  */
 static void *rtSchedNativeProberThread(void *pvUser)
 {
+    NOREF(pvUser);
     SAVEDPRIORITY SavedPriority;
     rtSchedNativeSave(&SavedPriority);
 
@@ -445,7 +481,7 @@ static void *rtSchedNativeProberThread(void *pvUser)
         &&  !setpriority(PRIO_PROCESS, 0, g_iMinPriority)
         &&  iStart != g_iMinPriority)
     {
-        if (rtSchedRunThread(rtSchedNativeSubProberThread, (void *)iStart) == 0)
+        if (rtSchedRunThread(rtSchedNativeSubProberThread, (void *)(intptr_t)iStart, false /*fUsePriorityProxy*/) == 0)
             g_fScrewedUpMaxPriorityLimitInheritance = false;
     }
 
@@ -462,9 +498,9 @@ static void *rtSchedNativeProberThread(void *pvUser)
  * @returns iprt status code.
  * @param   enmType     The thread type to be assumed for the current thread.
  */
-int rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
+DECLHIDDEN(int) rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
 {
-    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_LAST);
+    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_END);
 
     /*
      * First figure out what's we're allowed to do in this process.
@@ -475,7 +511,7 @@ int rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
 #ifdef RLIMIT_RTPRIO
         /** @todo */
 #endif
-        int rc = rtSchedRunThread(rtSchedNativeProberThread, NULL);
+        int rc = rtSchedRunThread(rtSchedNativeProberThread, NULL, false /*fUsePriorityProxy*/);
         if (RT_FAILURE(rc))
             return rc;
         Assert(getpriority(PRIO_PROCESS, 0) == iPriority); NOREF(iPriority);
@@ -509,74 +545,115 @@ int rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
  */
 static void *rtSchedNativeValidatorThread(void *pvUser)
 {
-    const PROCPRIORITY *pCfg = (const PROCPRIORITY *)pvUser;
+    PVALIDATORPRIORITYPAIR pPrioPair = (PVALIDATORPRIORITYPAIR)pvUser;
     SAVEDPRIORITY SavedPriority;
     rtSchedNativeSave(&SavedPriority);
 
-    /*
-     * Try out the priorities from the top and down.
-     */
     int rc = VINF_SUCCESS;
-    int i = RTTHREADTYPE_LAST;
-    while (--i > RTTHREADTYPE_INVALID)
-    {
-        int iPriority = pCfg->paTypes[i].iPriority + pCfg->iDelta;
-        if (setpriority(PRIO_PROCESS, 0, iPriority))
-        {
+
+    /*
+     * Set the priority to the current value for specified thread type, but
+     * only if we have any threads of this type (caller checked - INT_MAX).
+     */
+    if (pPrioPair->iCurrent != INT_MAX)
+        if (setpriority(PRIO_PROCESS, 0, pPrioPair->iCurrent))
             rc = RTErrConvertFromErrno(errno);
-            break;
-        }
-    }
+
+    /*
+     * Try set the new priority.
+     */
+    if (RT_SUCCESS(rc) && setpriority(PRIO_PROCESS, 0, pPrioPair->iNew))
+        rc = RTErrConvertFromErrno(errno);
 
     /* done */
     rtSchedNativeRestore(&SavedPriority);
-    return (void *)rc;
+    return (void *)(intptr_t)rc;
 }
 
 
 /**
- * Validates and sets the process priority.
+ * Validates the ability to apply suggested priority scheme.
  *
- * This will check that all rtThreadNativeSetPriority() will success for all the
- * thread types when applied to the current thread.
+ * The function checks that we're able to apply all the thread types in the
+ * suggested priority scheme.
  *
  * @returns iprt status code.
- * @param   enmPriority     The priority to validate and set.
+ * @param   pCfg                The priority scheme to validate.
+ * @param   fHavePriorityProxy  Set if we've got a priority proxy thread,
+ *                              otherwise clear.
  */
-int rtProcNativeSetPriority(RTPROCPRIORITY enmPriority)
+static int rtSchedNativeCheckThreadTypes(const PROCPRIORITY *pCfg, bool fHavePriorityProxy)
+{
+    int i = RTTHREADTYPE_END;
+    while (--i > RTTHREADTYPE_INVALID)
+    {
+        VALIDATORPRIORITYPAIR PrioPair;
+        PrioPair.iCurrent = g_pProcessPriority->paTypes[i].iPriority + g_pProcessPriority->iDelta;
+        PrioPair.iNew     = pCfg->paTypes[i].iPriority               + pCfg->iDelta;
+        if (g_acRTThreadTypeStats[i] == 0)
+            PrioPair.iCurrent = INT_MAX;
+
+#ifdef RT_STRICT
+        int const iPriority = getpriority(PRIO_PROCESS, 0);
+#endif
+        int rc = rtSchedRunThread(rtSchedNativeValidatorThread, &PrioPair, fHavePriorityProxy /*fUsePriorityProxy*/);
+        Assert(getpriority(PRIO_PROCESS, 0) == iPriority);
+
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+    return VINF_SUCCESS;
+}
+
+
+DECLHIDDEN(int) rtProcNativeSetPriority(RTPROCPRIORITY enmPriority)
 {
     Assert(enmPriority > RTPROCPRIORITY_INVALID && enmPriority < RTPROCPRIORITY_LAST);
 
-    int rc = VINF_SUCCESS;
+#ifdef RTTHREAD_POSIX_WITH_CREATE_PRIORITY_PROXY
+    /*
+     * Make sure the proxy creation thread is started so we don't 'lose' our
+     * initial priority if it's lowered.
+     */
+    bool const fHavePriorityProxy = rtThreadPosixPriorityProxyStart();
+#else
+    bool const fHavePriorityProxy = false;
+#endif
+
+    int rc;
     if (enmPriority == RTPROCPRIORITY_DEFAULT)
-        g_pProcessPriority = &g_aDefaultPriority;
+    {
+        /*
+         * If we've lowered priority since the process started, it may be impossible
+         * to raise it again for existing thread (new threads will work fine).
+         */
+        rc = rtSchedNativeCheckThreadTypes(&g_aDefaultPriority, fHavePriorityProxy);
+        if (RT_SUCCESS(rc))
+            g_pProcessPriority = &g_aDefaultPriority;
+    }
     else
     {
         /*
          * Find a configuration which matches and can be applied.
          */
-        rc = VERR_FILE_NOT_FOUND;
-        for (unsigned i = 0; i < ELEMENTS(g_aUnixConfigs); i++)
-        {
+        rc = VERR_NOT_FOUND;
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aUnixConfigs); i++)
             if (g_aUnixConfigs[i].enmPriority == enmPriority)
             {
-                int iPriority = getpriority(PRIO_PROCESS, 0);
-                int rc3 = rtSchedRunThread(rtSchedNativeValidatorThread, (void *)&g_aUnixConfigs[i]);
-                Assert(getpriority(PRIO_PROCESS, 0) == iPriority); NOREF(iPriority);
-                if (RT_SUCCESS(rc3))
+                int rc2 = rtSchedNativeCheckThreadTypes(&g_aUnixConfigs[i], fHavePriorityProxy);
+                if (RT_SUCCESS(rc2))
                 {
                     g_pProcessPriority = &g_aUnixConfigs[i];
                     rc = VINF_SUCCESS;
                     break;
                 }
-                if (rc == VERR_FILE_NOT_FOUND)
-                    rc = rc3;
+                if (rc == VERR_NOT_FOUND || rc == VERR_ACCESS_DENIED)
+                    rc = rc2;
             }
-        }
     }
 
 #ifdef THREAD_LOGGING
-    LogFlow(("rtProcNativeSetPriority: returns %Vrc enmPriority=%d\n", rc, enmPriority));
+    LogFlow(("rtProcNativeSetPriority: returns %Rrc enmPriority=%d\n", rc, enmPriority));
     rtSchedDumpPriority();
 #endif
     return rc;
@@ -584,42 +661,47 @@ int rtProcNativeSetPriority(RTPROCPRIORITY enmPriority)
 
 
 /**
- * Sets the priority of the thread according to the thread type
- * and current process priority.
- *
- * The RTTHREADINT::enmType member has not yet been updated and will be updated by
- * the caller on a successful return.
- *
- * @returns iprt status code.
- * @param   pThread     The thread in question.
- * @param   enmType     The thread type.
+ * Called on the priority proxy thread if it's running, otherwise
+ * rtThreadNativeSetPriority calls it directly.
  */
-int rtThreadNativeSetPriority(PRTTHREADINT pThread, RTTHREADTYPE enmType)
+static DECLCALLBACK(int) rtThreadLinuxSetPriorityCallback(PRTTHREADINT pThread, int iPriority)
+{
+    if (!setpriority(PRIO_PROCESS, pThread->tid, iPriority))
+    {
+        AssertMsg(iPriority == getpriority(PRIO_PROCESS, pThread->tid),
+                  ("iPriority=%d getpriority()=%d\n", iPriority, getpriority(PRIO_PROCESS, pThread->tid)));
+#ifdef THREAD_LOGGING
+        Log(("rtThreadNativeSetPriority: Thread=%p enmType=%d iPriority=%d pid=%d tid=%d\n",
+             pThread->Core.Key, enmType, iPriority, getpid(), pThread->tid));
+#endif
+        return VINF_SUCCESS;
+    }
+    AssertMsgFailed(("setpriority(,, %d) -> errno=%d rc=%Rrc\n", iPriority, errno, RTErrConvertFromErrno(errno)));
+    return VINF_SUCCESS; //non-fatal for now.
+}
+
+
+DECLHIDDEN(int) rtThreadNativeSetPriority(PRTTHREADINT pThread, RTTHREADTYPE enmType)
 {
     /* sanity */
-    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_LAST);
+    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_END);
     Assert(enmType == g_pProcessPriority->paTypes[enmType].enmType);
-    Assert((pthread_t)pThread->Core.Key == pthread_self());
 
     /*
-     * Calculate the thread priority and apply it.
+     * The thread ID is zero for alien threads, so skip these or we'd risk
+     * modifying our own priority.
      */
-    int rc = VINF_SUCCESS;
-    int iPriority = g_pProcessPriority->paTypes[enmType].iPriority + g_pProcessPriority->iDelta;
-    if (!setpriority(PRIO_PROCESS, 0, iPriority))
-    {
-        AssertMsg(iPriority == getpriority(PRIO_PROCESS, 0), ("iPriority=%d getpriority()=%d\n", iPriority, getpriority(PRIO_PROCESS, 0)));
-#ifdef THREAD_LOGGING
-        Log(("rtThreadNativeSetPriority: Thread=%p enmType=%d iPriority=%d pid=%d\n", pThread->Core.Key, enmType, iPriority, getpid()));
-#endif
-    }
-    else
-    {
-        rc = RTErrConvertFromErrno(errno);
-        AssertMsgFailed(("setpriority(,, %d) -> errno=%d rc=%Vrc\n", iPriority, errno, rc));
-        rc = VINF_SUCCESS; //non-fatal for now.
-    }
+    if (!pThread->tid)
+        return VINF_SUCCESS;
 
-    return rc;
+    /*
+     * Calculate the thread priority and apply it, preferrably via the priority proxy thread.
+     */
+    int const iPriority = g_pProcessPriority->paTypes[enmType].iPriority + g_pProcessPriority->iDelta;
+#ifdef RTTHREAD_POSIX_WITH_CREATE_PRIORITY_PROXY
+    if (rtThreadPosixPriorityProxyStart())
+        return rtThreadPosixPriorityProxyCall(pThread, (PFNRT)rtThreadLinuxSetPriorityCallback, 2, pThread, iPriority);
+#endif
+    return rtThreadLinuxSetPriorityCallback(pThread, iPriority);
 }
 

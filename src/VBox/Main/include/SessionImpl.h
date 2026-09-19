@@ -1,124 +1,204 @@
+/* $Id: SessionImpl.h 114362 2026-06-15 18:31:38Z andreas.loeffler@oracle.com $ */
 /** @file
- *
  * VBox Client Session COM Class definition
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_SESSIONIMPL
-#define ____H_SESSIONIMPL
+#ifndef MAIN_INCLUDED_SessionImpl_h
+#define MAIN_INCLUDED_SessionImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
+#include "SessionWrap.h"
 #include "ConsoleImpl.h"
 
-#ifdef __WIN__
-#include "win32/resource.h"
+#ifdef RT_OS_WINDOWS
+# include "win/resource.h"
 #endif
 
-class ATL_NO_VTABLE Session :
-    public VirtualBoxBaseNEXT,
-    public VirtualBoxSupportErrorInfoImpl <Session, ISession>,
-    public VirtualBoxSupportTranslation <Session>,
-#ifdef __WIN__
-    public IDispatchImpl<ISession, &IID_ISession, &LIBID_VirtualBox,
-                         kTypeLibraryMajorVersion, kTypeLibraryMinorVersion>,
-    public CComCoClass<Session, &CLSID_Session>,
-#else
-    public ISession,
+#if defined(RT_OS_WINDOWS) && !RT_MSC_PREREQ(RT_MSC_VER_VC140)
+[threading(free)]
 #endif
-    public IInternalSessionControl
+class ATL_NO_VTABLE Session :
+    public SessionWrap
+#ifdef RT_OS_WINDOWS
+    , public ATL::CComCoClass<Session, &CLSID_Session>
+#endif
 {
 public:
 
     DECLARE_CLASSFACTORY()
 
-    DECLARE_REGISTRY_RESOURCEID(IDR_VIRTUALBOX)
+    // Do not use any ATL registry support.
+    //DECLARE_REGISTRY_RESOURCEID(IDR_VIRTUALBOX)
+
     DECLARE_NOT_AGGREGATABLE(Session)
 
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(Session)
-        COM_INTERFACE_ENTRY(IDispatch)
-        COM_INTERFACE_ENTRY(IInternalSessionControl)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(ISession)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS(Session)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializers/uninitializers only for internal purposes
     HRESULT init();
-    void uninit (bool aFinalRelease);
-
-    // ISession properties
-    STDMETHOD(COMGETTER(State)) (SessionState_T *aState);
-    STDMETHOD(COMGETTER(Type)) (SessionType_T *aType);
-    STDMETHOD(COMGETTER(Machine)) (IMachine **aMachine);
-    STDMETHOD(COMGETTER(Console)) (IConsole **aConsole);
-
-    // ISession methods
-    STDMETHOD(Close)();
-
-    // IInternalSessionControl methods
-    STDMETHOD(GetPID) (ULONG *aPid);
-    STDMETHOD(GetRemoteConsole) (IConsole **aConsole);
-    STDMETHOD(AssignMachine) (IMachine *aMachine);
-    STDMETHOD(AssignRemoteMachine) (IMachine *aMachine, IConsole *aConsole);
-    STDMETHOD(UpdateMachineState) (MachineState_T aMachineState);
-    STDMETHOD(Uninitialize)();
-    STDMETHOD(OnDVDDriveChange)();
-    STDMETHOD(OnFloppyDriveChange)();
-    STDMETHOD(OnNetworkAdapterChange)(INetworkAdapter *networkAdapter);
-    STDMETHOD(OnVRDPServerChange)();
-    STDMETHOD(OnUSBControllerChange)();
-    STDMETHOD(OnUSBDeviceAttach) (IUSBDevice *aDevice);
-    STDMETHOD(OnUSBDeviceDetach) (INPTR GUIDPARAM aId);
-
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"Session"; }
+    void uninit();
 
 private:
 
-    HRESULT close (bool aFinalRelease, bool aFromServer);
-    HRESULT grabIPCSemaphore();
-    void releaseIPCSemaphore();
+    // Wrapped ISession properties
+    HRESULT getState(SessionState_T *aState);
+    HRESULT getType(SessionType_T *aType);
+    HRESULT getName(com::Utf8Str &aName);
+    HRESULT setName(const com::Utf8Str &aName);
+    HRESULT getMachine(ComPtr<IMachine> &aMachine);
+    HRESULT getConsole(ComPtr<IConsole> &aConsole);
+
+    // Wrapped ISession methods
+    HRESULT unlockMachine();
+
+    // Wrapped IInternalSessionControl properties
+    HRESULT getPID(ULONG *aPid);
+    HRESULT getRemoteConsole(ComPtr<IConsole> &aRemoteConsole);
+    HRESULT getNominalState(MachineState_T *aNominalState);
+
+    // Wrapped IInternalSessionControl methods
+#ifndef VBOX_WITH_GENERIC_SESSION_WATCHER
+    HRESULT assignMachine(const ComPtr<IMachine> &aMachine,
+                          LockType_T aLockType,
+                          const com::Utf8Str &aTokenId);
+#else
+    HRESULT assignMachine(const ComPtr<IMachine> &aMachine,
+                          LockType_T aLockType,
+                          const ComPtr<IToken> &aToken);
+#endif /* !VBOX_WITH_GENERIC_SESSION_WATCHER */
+    HRESULT assignRemoteMachine(const ComPtr<IMachine> &aMachine,
+                                const ComPtr<IConsole> &aConsole);
+    HRESULT updateMachineState(MachineState_T aMachineState);
+    HRESULT uninitialize();
+    HRESULT onNetworkAdapterChange(const ComPtr<INetworkAdapter> &aNetworkAdapter,
+                                   BOOL aChangeAdapter);
+    HRESULT onAudioAdapterChange(const ComPtr<IAudioAdapter> &aAudioAdapter);
+    HRESULT onHostAudioDeviceChange(const ComPtr<IHostAudioDevice> &aDevice,
+                                    BOOL aNew, AudioDeviceState_T aState,
+                                    const ComPtr<IVirtualBoxErrorInfo> &aErrInfo);
+    HRESULT onSerialPortChange(const ComPtr<ISerialPort> &aSerialPort);
+    HRESULT onParallelPortChange(const ComPtr<IParallelPort> &aParallelPort);
+    HRESULT onStorageControllerChange(const Guid &aMachineId, const com::Utf8Str& aControllerName);
+    HRESULT onMediumChange(const ComPtr<IMediumAttachment> &aMediumAttachment,
+                           BOOL aForce);
+    HRESULT onStorageDeviceChange(const ComPtr<IMediumAttachment> &aMediumAttachment,
+                                  BOOL aRemove,
+                                  BOOL aSilent);
+    HRESULT onVMProcessPriorityChange(VMProcPriority_T priority);
+    HRESULT onClipboardModeChange(ClipboardMode_T aClipboardMode);
+    HRESULT onClipboardFileTransferModeChange(BOOL aEnabled);
+    HRESULT clipboardReadData(ClipboardAction_T aAction,
+                              ClipboardSource_T *aSource,
+                              com::Utf8Str &aMimeType,
+                              std::vector<BYTE> &aBuffer);
+    HRESULT clipboardReadFormats(std::vector<com::Utf8Str> &aFormats);
+    HRESULT clipboardWriteData(ClipboardAction_T aAction,
+                               ClipboardSource_T aSource,
+                               const com::Utf8Str &aMimeType,
+                               const std::vector<BYTE> &aBuffer,
+                               ClipboardSource_T *aWrittenSource,
+                               com::Utf8Str &aWrittenMimeType,
+                               std::vector<BYTE> &aWrittenBuffer);
+    HRESULT clipboardWriteFormats(const std::vector<com::Utf8Str> &aFormats);
+    HRESULT clipboardReset();
+    HRESULT clipboardTransferCancel(ULONG aTransferId);
+    HRESULT onDnDModeChange(DnDMode_T aDndMode);
+    HRESULT onCPUChange(ULONG aCpu,
+                        BOOL aAdd);
+    HRESULT onCPUExecutionCapChange(ULONG aExecutionCap);
+    HRESULT onVRDEServerChange(BOOL aRestart);
+    HRESULT onRecordingStateChange(RecordingState_T aState, ComPtr<IProgress> &aProgress);
+    HRESULT onRecordingScreenStateChange(RecordingState_T aState, ULONG aScreen);
+    HRESULT onUSBControllerChange();
+    HRESULT onSharedFolderChange(BOOL aGlobal);
+    HRESULT onGuestDebugControlChange(const ComPtr<IGuestDebugControl> &aGuestDebugControl);
+    HRESULT onUSBDeviceAttach(const ComPtr<IUSBDevice> &aDevice,
+                              const ComPtr<IVirtualBoxErrorInfo> &aError,
+                              ULONG aMaskedInterfaces,
+                              const com::Utf8Str &aCaptureFilename);
+    HRESULT onUSBDeviceDetach(const com::Guid &aId,
+                              const ComPtr<IVirtualBoxErrorInfo> &aError);
+    HRESULT onShowWindow(BOOL aCheck,
+                         BOOL *aCanShow,
+                         LONG64 *aWinId);
+    HRESULT onBandwidthGroupChange(const ComPtr<IBandwidthGroup> &aBandwidthGroup);
+    HRESULT accessGuestProperty(const com::Utf8Str &aName,
+                                const com::Utf8Str &aValue,
+                                const com::Utf8Str &aFlags,
+                                ULONG aAccessMode,
+                                com::Utf8Str &aRetValue,
+                                LONG64 *aRetTimestamp,
+                                com::Utf8Str &aRetFlags);
+    HRESULT enumerateGuestProperties(const com::Utf8Str &aPatterns,
+                                     std::vector<com::Utf8Str> &aKeys,
+                                     std::vector<com::Utf8Str> &aValues,
+                                     std::vector<LONG64> &aTimestamps,
+                                     std::vector<com::Utf8Str> &aFlags);
+    HRESULT onlineMergeMedium(const ComPtr<IMediumAttachment> &aMediumAttachment,
+                              ULONG aSourceIdx,
+                              ULONG aTargetIdx,
+                              const ComPtr<IProgress> &aProgress);
+    HRESULT reconfigureMediumAttachments(const std::vector<ComPtr<IMediumAttachment> > &aAttachments);
+    HRESULT enableVMMStatistics(BOOL aEnable);
+    HRESULT pauseWithReason(Reason_T aReason);
+    HRESULT resumeWithReason(Reason_T aReason);
+    HRESULT saveStateWithReason(Reason_T aReason,
+                                const ComPtr<IProgress> &aProgress,
+                                const ComPtr<ISnapshot> &aSnapshot,
+                                const Utf8Str &aStateFilePath,
+                                BOOL aPauseVM,
+                                BOOL *aLeftPaused);
+    HRESULT cancelSaveStateWithReason();
+
+
+    HRESULT i_unlockMachine(bool aFinalRelease, bool aFromServer, AutoWriteLock &aLockW);
 
     SessionState_T mState;
     SessionType_T mType;
+    Utf8Str mName;
 
-    ComPtr <IInternalMachineControl> mControl;
+    ComPtr<IInternalMachineControl> mControl;
 
-    ComObjPtr <Console> mConsole;
-
-    ComPtr <IMachine> mRemoteMachine;
-    ComPtr <IConsole> mRemoteConsole;
-
-    ComPtr <IVirtualBox> mVirtualBox;
-
-    // the interprocess semaphore handle (id) for the opened machine
-#if defined(__WIN__)
-    HANDLE mIPCSem;
-    HANDLE mIPCThreadSem;
-#elif defined(__LINUX__)
-    int mIPCSem;
+#ifndef VBOX_COM_INPROC_API_CLIENT
+    ComObjPtr<Console> mConsole;
 #endif
+
+    ComPtr<IMachine> mRemoteMachine;
+    ComPtr<IConsole> mRemoteConsole;
+
+    ComPtr<IVirtualBox> mVirtualBox;
+
+    class ClientTokenHolder;
+
+    ClientTokenHolder *mClientTokenHolder;
 };
 
-#endif // ____H_SESSIONIMPL
+#endif /* !MAIN_INCLUDED_SessionImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

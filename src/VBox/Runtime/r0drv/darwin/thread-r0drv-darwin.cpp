@@ -1,160 +1,92 @@
-/* $Id: thread-r0drv-darwin.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: thread-r0drv-darwin.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Threads, Ring-0 Driver, Darwin.
+ * IPRT - Threads, Ring-0 Driver, Darwin.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include "the-darwin-kernel.h"
+#include "internal/iprt.h"
 #include <iprt/thread.h>
-#include <iprt/err.h>
+
 #include <iprt/assert.h>
-#include "r0drv/thread-r0drv.h"
+#include <iprt/errcore.h>
 
 
-RTDECL(RTTHREAD) RTThreadSelf(void)
+
+RTDECL(RTNATIVETHREAD) RTThreadNativeSelf(void)
 {
-    return (RTTHREAD)current_thread();
+    return (RTNATIVETHREAD)current_thread();
 }
 
 
-RTDECL(int)   RTThreadSleep(unsigned cMillies)
+static int rtR0ThreadDarwinSleepCommon(RTMSINTERVAL cMillies)
 {
+    RT_ASSERT_PREEMPTIBLE();
+    IPRT_DARWIN_SAVE_EFL_AC();
+
     uint64_t u64Deadline;
     clock_interval_to_deadline(cMillies, kMillisecondScale, &u64Deadline);
     clock_delay_until(u64Deadline);
+
+    IPRT_DARWIN_RESTORE_EFL_AC();
     return VINF_SUCCESS;
+}
+
+
+RTDECL(int) RTThreadSleep(RTMSINTERVAL cMillies)
+{
+    return rtR0ThreadDarwinSleepCommon(cMillies);
+}
+
+
+RTDECL(int) RTThreadSleepNoLog(RTMSINTERVAL cMillies)
+{
+    return rtR0ThreadDarwinSleepCommon(cMillies);
 }
 
 
 RTDECL(bool) RTThreadYield(void)
 {
+    RT_ASSERT_PREEMPTIBLE();
+    IPRT_DARWIN_SAVE_EFL_AC();
+
     thread_block(THREAD_CONTINUE_NULL);
+
+    IPRT_DARWIN_RESTORE_EFL_AC();
     return true; /* this is fishy */
-}
-
-
-int rtThreadNativeSetPriority(RTTHREAD Thread, RTTHREADTYPE enmType)
-{
-    /*
-     * Convert the priority type to scheduling policies.
-     */
-    bool                            fSetExtended = false;
-    thread_extended_policy          Extended = { true };
-    bool                            fSetTimeContstraint = false;
-    thread_time_constraint_policy   TimeConstraint = { 0, 0, 0, true };
-    thread_precedence_policy        Precedence = { 0 };
-    switch (enmType)
-    {
-        case RTTHREADTYPE_INFREQUENT_POLLER:
-            Precedence.importance = 1;
-            break;
-
-        case RTTHREADTYPE_EMULATION:
-            Precedence.importance = 30;
-            break;
-
-        case RTTHREADTYPE_DEFAULT:
-            Precedence.importance = 31;
-            break;
-
-        case RTTHREADTYPE_MSG_PUMP:
-            Precedence.importance = 34;
-            break;
-
-        case RTTHREADTYPE_IO:
-            Precedence.importance = 98;
-            break;
-
-        case RTTHREADTYPE_TIMER:
-            Precedence.importance = 0x7fffffff;
-
-            fSetExtended = true;
-            Extended.timeshare = FALSE;
-
-            fSetTimeContstraint = true;
-            TimeConstraint.period = 0; /* not really true for a real timer thread, but we've really no idea. */
-            TimeConstraint.computation = rtDarwinAbsTimeFromNano(100000); /* 100 us*/
-            TimeConstraint.constraint = rtDarwinAbsTimeFromNano(500000);  /* 500 us */
-            TimeConstraint.preemptible = FALSE;
-            break;
-
-        default:
-            AssertMsgFailed(("enmType=%d\n", enmType));
-            return VERR_INVALID_PARAMETER;
-    }
-
-    /*
-     * Do the actual modification.
-     */
-    kern_return_t rc = thread_policy_set((thread_t)Thread, THREAD_PRECEDENCE_POLICY,
-                                         (thread_policy_t)&Precedence, THREAD_PRECEDENCE_POLICY_COUNT);
-    AssertMsg(rc == KERN_SUCCESS, ("%rc\n", rc)); NOREF(rc);
-
-    if (fSetExtended)
-    {
-        rc = thread_policy_set((thread_t)Thread, THREAD_EXTENDED_POLICY,
-                               (thread_policy_t)&Extended, THREAD_EXTENDED_POLICY_COUNT);
-        AssertMsg(rc == KERN_SUCCESS, ("%rc\n", rc));
-    }
-
-    if (fSetTimeContstraint)
-    {
-        rc = thread_policy_set((thread_t)Thread, THREAD_TIME_CONSTRAINT_POLICY,
-                               (thread_policy_t)&TimeConstraint, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-        AssertMsg(rc == KERN_SUCCESS, ("%rc\n", rc));
-    }
-
-    return VINF_SUCCESS; /* ignore any errors for now */
-}
-
-
-/**
- * Native kernel thread wrapper function.
- *
- * This will forward to rtThreadMain and do termination upon return.
- *
- * @param pvArg         Pointer to the argument package.
- * @param Ignored       Wait result, which we ignore.
- */
-static void rtThreadNativeMain(void *pvArg, wait_result_t Ignored)
-{
-    const thread_t Self = current_thread();
-
-    rtThreadMain((RTNATIVETHREAD)Self, (PRTR0THREADARGS)pvArg);
-
-    kern_return_t rc = thread_terminate(Self);
-    AssertFatalMsgFailed(("rc=%d\n", rc));
-}
-
-
-int rtThreadNativeCreate(PRTR0THREADARGS pArgs, PRTNATIVETHREAD pNativeThread)
-{
-    thread_t NativeThread;
-    kern_return_t rc = kernel_thread_start(rtThreadNativeMain, pArgs, &NativeThread);
-    if (rc == KERN_SUCCESS)
-    {
-        *pNativeThread = (RTNATIVETHREAD)NativeThread;
-        thread_deallocate(NativeThread);
-        return VINF_SUCCESS;
-    }
-    return RTErrConvertFromMachKernReturn(rc);
 }
 

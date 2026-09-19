@@ -39,7 +39,7 @@
 
 /* XXX This exists because we don't want to drag in NSPR. It *seemed*
 *  to make more sense to write a quick and dirty arena than to clone
-*  plarena (like js/src did). This is not optimal, but it works. 
+*  plarena (like js/src did). This is not optimal, but it works.
 *  Half of the code here is instrumentation.
 */
 
@@ -47,6 +47,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <iprt/mem.h>
+
 
 /*************************/
 /* logging stats support */
@@ -91,10 +94,10 @@ static void xpt_DebugPrintArenaStats(XPTArena *arena);
 
 #define LOG_MALLOC(_a, _req, _used)   ((void)0)
 #define LOG_REAL_MALLOC(_a, _size)    ((void)0)
-#define LOG_FREE(_a)                  ((void)0)
+#define LOG_FREE(_a)                  RT_NOREF(_a)
 
-#define LOG_DONE_LOADING(_a)          ((void)0)        
-#define PRINT_STATS(_a)               ((void)0)
+#define LOG_DONE_LOADING(_a)          ((void)0)
+#define PRINT_STATS(_a)               RT_NOREF(_a)
 
 #endif /* XPT_ARENA_LOGGING */
 
@@ -136,7 +139,7 @@ struct XPTArena
 XPT_PUBLIC_API(XPTArena *)
 XPT_NewArena(PRUint32 block_size, size_t alignment, const char* name)
 {
-    XPTArena *arena = calloc(1, sizeof(XPTArena));
+    XPTArena *arena = RTMemAllocZ(sizeof(XPTArena));
     if (arena) {
         XPT_ASSERT(alignment);
         if (alignment > sizeof(double))
@@ -148,12 +151,12 @@ XPT_NewArena(PRUint32 block_size, size_t alignment, const char* name)
         arena->block_size = ALIGN_RND(block_size, alignment);
 
         /* must have room for at least one item! */
-        XPT_ASSERT(arena->block_size >= 
+        XPT_ASSERT(arena->block_size >=
                    ALIGN_RND(sizeof(BLK_HDR), alignment) +
                    ALIGN_RND(1, alignment));
 
         if (name) {
-            arena->name = XPT_STRDUP(arena, name);           
+            arena->name = XPT_STRDUP(arena, name);
 #ifdef XPT_ARENA_LOGGING
             /* fudge the stats since we are using space in the arena */
             arena->LOG_MallocCallCount = 0;
@@ -162,7 +165,7 @@ XPT_NewArena(PRUint32 block_size, size_t alignment, const char* name)
 #endif /* XPT_ARENA_LOGGING */
         }
     }
-    return arena;        
+    return arena;
 }
 
 XPT_PUBLIC_API(void)
@@ -170,25 +173,25 @@ XPT_DestroyArena(XPTArena *arena)
 {
     BLK_HDR* cur;
     BLK_HDR* next;
-        
+
     cur = arena->first;
     while (cur) {
         next = cur->next;
-        free(cur);
+        RTMemFree(cur);
         cur = next;
     }
-    free(arena);
+    RTMemFree(arena);
 }
 
 XPT_PUBLIC_API(void)
 XPT_DumpStats(XPTArena *arena)
 {
     PRINT_STATS(arena);
-}        
+}
 
 
-/* 
-* Our alignment rule is that we always round up the size of each allocation 
+/*
+* Our alignment rule is that we always round up the size of each allocation
 * so that the 'arena->next' pointer one will point to properly aligned space.
 */
 
@@ -207,19 +210,18 @@ XPT_ArenaMalloc(XPTArena *arena, size_t size)
     }
 
     bytes = ALIGN_RND(size, arena->alignment);
-    
+
     LOG_MALLOC(arena, size, bytes);
 
     if (bytes > arena->space) {
         BLK_HDR* new_block;
         size_t block_header_size = ALIGN_RND(sizeof(BLK_HDR), arena->alignment);
         size_t new_space = arena->block_size;
-         
+
         if (bytes > new_space - block_header_size)
             new_space += bytes;
 
-        new_block = (BLK_HDR*) calloc(new_space/arena->alignment, 
-                                      arena->alignment);
+        new_block = (BLK_HDR*) RTMemAllocZ(new_space/arena->alignment * (size_t)arena->alignment);
         if (!new_block) {
             arena->next = NULL;
             arena->space = 0;
@@ -243,25 +245,25 @@ XPT_ArenaMalloc(XPTArena *arena, size_t size)
         /* mark block for corruption check */
         memset(arena->next, 0xcd, arena->space);
 #endif
-    } 
-    
+    }
+
 #ifdef DEBUG
     {
         /* do corruption check */
         size_t i;
         for (i = 0; i < bytes; ++i) {
-            XPT_ASSERT(arena->next[i] == 0xcd);        
+            XPT_ASSERT(arena->next[i] == 0xcd);
         }
         /* we guarantee that the block will be filled with zeros */
         memset(arena->next, 0, bytes);
-    }        
+    }
 #endif
 
     cur = arena->next;
     arena->next  += bytes;
     arena->space -= bytes;
-    
-    return cur;    
+
+    return cur;
 }
 
 
@@ -285,14 +287,17 @@ XPT_NotifyDoneLoading(XPTArena *arena)
 {
 #ifdef XPT_ARENA_LOGGING
     if (arena) {
-        LOG_DONE_LOADING(arena);        
+        LOG_DONE_LOADING(arena);
     }
+#else
+    RT_NOREF(arena);
 #endif
 }
 
 XPT_PUBLIC_API(void)
 XPT_ArenaFree(XPTArena *arena, void *block)
 {
+    RT_NOREF(block);
     LOG_FREE(arena);
 }
 
@@ -300,29 +305,29 @@ XPT_ArenaFree(XPTArena *arena, void *block)
 static void xpt_DebugPrintArenaStats(XPTArena *arena)
 {
     printf("()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()\n");
-    printf("Start xpt arena stats for \"%s\"\n", 
+    printf("Start xpt arena stats for \"%s\"\n",
             arena->name ? arena->name : "unnamed arena");
     printf("\n");
-    printf("%d times arena malloc called\n", (int) arena->LOG_MallocCallCount);       
-    printf("%d total bytes requested from arena malloc\n", (int) arena->LOG_MallocTotalBytesRequested);       
+    printf("%d times arena malloc called\n", (int) arena->LOG_MallocCallCount);
+    printf("%d total bytes requested from arena malloc\n", (int) arena->LOG_MallocTotalBytesRequested);
     printf("%d average bytes requested per call to arena malloc\n", (int)arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesRequested/arena->LOG_MallocCallCount) : 0);
     printf("%d average bytes used per call (accounts for alignment overhead)\n", (int)arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesUsed/arena->LOG_MallocCallCount) : 0);
     printf("%d average bytes used per call (accounts for all overhead and waste)\n", (int)arena->LOG_MallocCallCount ? (arena->LOG_RealMallocTotalBytesRequested/arena->LOG_MallocCallCount) : 0);
     printf("\n");
-    printf("%d during loading times arena free called\n", (int) arena->LOG_LoadingFreeCallCount);       
-    printf("%d during loading approx total bytes not freed\n", (int) arena->LOG_LoadingFreeCallCount * (int) (arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesUsed/arena->LOG_MallocCallCount) : 0));       
+    printf("%d during loading times arena free called\n", (int) arena->LOG_LoadingFreeCallCount);
+    printf("%d during loading approx total bytes not freed\n", (int) arena->LOG_LoadingFreeCallCount * (int) (arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesUsed/arena->LOG_MallocCallCount) : 0));
     printf("\n");
-    printf("%d total times arena free called\n", (int) arena->LOG_FreeCallCount);       
-    printf("%d approx total bytes not freed until arena destruction\n", (int) arena->LOG_FreeCallCount * (int) (arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesUsed/arena->LOG_MallocCallCount) : 0 ));       
+    printf("%d total times arena free called\n", (int) arena->LOG_FreeCallCount);
+    printf("%d approx total bytes not freed until arena destruction\n", (int) arena->LOG_FreeCallCount * (int) (arena->LOG_MallocCallCount ? (arena->LOG_MallocTotalBytesUsed/arena->LOG_MallocCallCount) : 0 ));
     printf("\n");
-    printf("%d times arena called system malloc\n", (int) arena->LOG_RealMallocCallCount);       
-    printf("%d total bytes arena requested from system\n", (int) arena->LOG_RealMallocTotalBytesRequested);       
-    printf("%d byte block size specified at arena creation time\n", (int) arena->block_size);       
-    printf("%d byte block alignment specified at arena creation time\n", (int) arena->alignment);       
+    printf("%d times arena called system malloc\n", (int) arena->LOG_RealMallocCallCount);
+    printf("%d total bytes arena requested from system\n", (int) arena->LOG_RealMallocTotalBytesRequested);
+    printf("%d byte block size specified at arena creation time\n", (int) arena->block_size);
+    printf("%d byte block alignment specified at arena creation time\n", (int) arena->alignment);
     printf("\n");
     printf("End xpt arena stats\n");
     printf("()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()\n");
-}        
+}
 #endif
 
 /***************************************************************************/
@@ -334,5 +339,5 @@ XPT_AssertFailed(const char *s, const char *file, PRUint32 lineno)
     fprintf(stderr, "Assertion failed: %s, file %s, line %d\n",
             s, file, lineno);
     abort();
-}        
+}
 #endif

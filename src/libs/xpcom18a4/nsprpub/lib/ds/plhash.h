@@ -43,6 +43,24 @@
 #include <stdio.h>
 #include "prtypes.h"
 
+#ifdef VBOX_WITH_XPCOM_NAMESPACE_CLEANUP
+#define PL_CompareStrings VBoxNsplPL_CompareStrings
+#define PL_CompareValues VBoxNsplPL_CompareValues
+#define PL_HashString VBoxNsplPL_HashString
+#define PL_HashTableAdd VBoxNsplPL_HashTableAdd
+#define PL_HashTableDestroy VBoxNsplPL_HashTableDestroy
+#define PL_HashTableLookup VBoxNsplPL_HashTableLookup
+#define PL_HashTableRemove VBoxNsplPL_HashTableRemove
+#define PL_NewHashTable VBoxNsplPL_NewHashTable
+#define PL_HashTableDump VBoxNsplPL_HashTableDump
+#define PL_HashTableEnumerateEntries VBoxNsplPL_HashTableEnumerateEntries
+#define PL_HashTableLookupConst VBoxNsplPL_HashTableLookupConst
+#define PL_HashTableRawAdd VBoxNsplPL_HashTableRawAdd
+#define PL_HashTableRawLookup VBoxNsplPL_HashTableRawLookup
+#define PL_HashTableRawLookupConst VBoxNsplPL_HashTableRawLookupConst
+#define PL_HashTableRawRemove VBoxNsplPL_HashTableRawRemove
+#endif /* VBOX_WITH_XPCOM_NAMESPACE_CLEANUP */
+
 PR_BEGIN_EXTERN_C
 
 typedef struct PLHashEntry  PLHashEntry;
@@ -51,15 +69,7 @@ typedef PRUint32 PLHashNumber;
 #define PL_HASH_BITS 32  /* Number of bits in PLHashNumber */
 typedef PLHashNumber (PR_CALLBACK *PLHashFunction)(const void *key);
 typedef PRIntn (PR_CALLBACK *PLHashComparator)(const void *v1, const void *v2);
-
-#if defined(XP_OS2_VACPP) && defined(VACPP_FLIP) /* for nsSpaceManager.cpp */
-PR_END_EXTERN_C                                  /* and nsHTMLDocument.cpp */
-#endif
 typedef PRIntn (PR_CALLBACK *PLHashEnumerator)(PLHashEntry *he, PRIntn i, void *arg);
-
-#if defined(XP_OS2_VACPP) && defined(VACPP_FLIP)
-PR_BEGIN_EXTERN_C
-#endif
 
 /* Flag bits in PLHashEnumerator's return value */
 #define HT_ENUMERATE_NEXT       0       /* continue enumerating entries */
@@ -93,12 +103,6 @@ struct PLHashTable {
     PLHashComparator    valueCompare;   /* value comparison function */
     const PLHashAllocOps *allocOps;     /* allocation operations */
     void                *allocPriv;     /* allocation private data */
-#ifdef HASHMETER
-    PRUint32              nlookups;       /* total number of lookups */
-    PRUint32              nsteps;         /* number of hash chains traversed */
-    PRUint32              ngrows;         /* number of table expansions */
-    PRUint32              nshrinks;       /* number of table contractions */
-#endif
 };
 
 /*

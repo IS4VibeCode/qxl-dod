@@ -1,37 +1,55 @@
+/* $Id: DrvHostBase.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox storage devices:
- * Host base drive access driver
+ * DrvHostBase - Host base drive access driver.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __HostDrvBase_h__
-#define __HostDrvBase_h__
+#ifndef VBOX_INCLUDED_SRC_Storage_DrvHostBase_h
+#define VBOX_INCLUDED_SRC_Storage_DrvHostBase_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
+#include <iprt/assert.h>
+#include <iprt/err.h>
+#include <iprt/critsect.h>
+#include <iprt/log.h>
+#include <iprt/semaphore.h>
 #include <VBox/cdefs.h>
+#include <VBox/vmm/pdmdrv.h>
+#include <VBox/vmm/pdmstorageifs.h>
 
-__BEGIN_DECLS
+RT_C_DECLS_BEGIN
 
 
 /** Pointer to host base drive access driver instance data. */
 typedef struct DRVHOSTBASE *PDRVHOSTBASE;
 /**
  * Host base drive access driver instance data.
+ *
+ * @implements PDMIMOUNT
+ * @implements PDMIMEDIA
  */
 typedef struct DRVHOSTBASE
 {
@@ -41,13 +59,17 @@ typedef struct DRVHOSTBASE
     /** Pointer driver instance. */
     PPDMDRVINS              pDrvIns;
     /** Drive type. */
-    PDMBLOCKTYPE            enmType;
+    PDMMEDIATYPE            enmType;
     /** Visible to the BIOS. */
     bool                    fBiosVisible;
     /** The configuration readonly value. */
     bool                    fReadOnlyConfig;
     /** The current readonly status. */
     bool                    fReadOnly;
+    /** Flag whether failure to attach is an error or not. */
+    bool                    fAttachFailError;
+    /** Flag whether to keep instance working (as unmounted though). */
+    bool                    fKeepInstance;
     /** Device name (MMHeap). */
     char                   *pszDevice;
     /** Device name to open (RTStrFree). */
@@ -55,14 +77,16 @@ typedef struct DRVHOSTBASE
     /** Uuid of the drive. */
     RTUUID                  Uuid;
 
-    /** Pointer to the block port interface above us. */
-    PPDMIBLOCKPORT          pDrvBlockPort;
+    /** Pointer to the media port interface above us. */
+    PPDMIMEDIAPORT          pDrvMediaPort;
+    /** Pointer to the extended media port interface above us. */
+    PPDMIMEDIAEXPORT        pDrvMediaExPort;
     /** Pointer to the mount notify interface above us. */
     PPDMIMOUNTNOTIFY        pDrvMountNotify;
-    /** Our block interface. */
-    PDMIBLOCK               IBlock;
-    /** Our block interface. */
-    PDMIBLOCKBIOS           IBlockBios;
+    /** Our media interface. */
+    PDMIMEDIA               IMedia;
+    /** Our extended media interface. */
+    PDMIMEDIAEX             IMediaEx;
     /** Our mountable interface. */
     PDMIMOUNT               IMount;
 
@@ -73,38 +97,44 @@ typedef struct DRVHOSTBASE
     /** The size of the media currently in the drive.
      * This is invalid if no drive is in the drive. */
     uint64_t volatile       cbSize;
-    /** The filehandle of the device. */
-    RTFILE                  FileDevice;
 
     /** Handle of the poller thread. */
     RTTHREAD                ThreadPoller;
-#ifndef __WIN__
     /** Event semaphore the thread will wait on. */
     RTSEMEVENT              EventPoller;
-#endif
     /** The poller interval. */
-    unsigned                cMilliesPoller;
+    RTMSINTERVAL            cMilliesPoller;
     /** The shutdown indicator. */
     bool volatile           fShutdownPoller;
 
-    /** Whether or not enmTranslation is valid. */
-    bool                    fTranslationSet;
-    /** BIOS Geometry: Translation mode. */
-    PDMBIOSTRANSLATION      enmTranslation;
-    /** BIOS Geometry: Cylinders. */
-    uint32_t                cCylinders;
-    /** BIOS Geometry: Heads. */
-    uint32_t                cHeads;
-    /** BIOS Geometry: Sectors. */
-    uint32_t                cSectors;
+    /** BIOS PCHS geometry. */
+    PDMMEDIAGEOMETRY        PCHSGeometry;
+    /** BIOS LCHS geometry. */
+    PDMMEDIAGEOMETRY        LCHSGeometry;
 
-#ifdef __WIN__
-    /** Handle to the window we use to catch the device change broadcast messages. */
-    volatile HWND           hwndDeviceChange;
-    /** The unit mask. */
-    DWORD                   fUnitMask;
-#endif
+    /** Pointer to the current buffer holding data. */
+    void                    *pvBuf;
+    /** Size of the buffer. */
+    size_t                  cbBuf;
+    /** Size of the I/O request to allocate. */
+    size_t                  cbIoReqAlloc;
 
+    /** Release statistics: number of bytes written. */
+    STAMCOUNTER              StatBytesWritten;
+    /** Release statistics: number of bytes read. */
+    STAMCOUNTER              StatBytesRead;
+    /** Release statistics: Number of requests submitted. */
+    STAMCOUNTER              StatReqsSubmitted;
+    /** Release statistics: Number of requests failed. */
+    STAMCOUNTER              StatReqsFailed;
+    /** Release statistics: Number of requests succeeded. */
+    STAMCOUNTER              StatReqsSucceeded;
+    /** Release statistics: Number of flush requests. */
+    STAMCOUNTER              StatReqsFlush;
+    /** Release statistics: Number of write requests. */
+    STAMCOUNTER              StatReqsWrite;
+    /** Release statistics: Number of read requests. */
+    STAMCOUNTER              StatReqsRead;
 
     /**
      * Performs the locking / unlocking of the device.
@@ -115,43 +145,58 @@ typedef struct DRVHOSTBASE
      * @param   pThis       Pointer to the instance data.
      * @param   fLock       Set if locking, clear if unlocking.
      */
-    DECLCALLBACKMEMBER(int, pfnDoLock)(PDRVHOSTBASE pThis, bool fLock);
+    DECLCALLBACKMEMBER(int, pfnDoLock,(PDRVHOSTBASE pThis, bool fLock));
 
-    /**
-     * Queries the media size.
-     * Can also be used to perform actions on media change.
-     *
-     * This callback pointer should be set to NULL if the default action is fine for this device.
-     *
-     * @returns VBox status code.
-     * @param   pThis       Pointer to the instance data.
-     * @param   pcb         Where to store the media size in bytes.
-     */
-    DECLCALLBACKMEMBER(int, pfnGetMediaSize)(PDRVHOSTBASE pThis, uint64_t *pcb);
-
-    /***
-     * Performs the polling operation.
-     *
-     * @returns VBox status code. (Failure means retry.)
-     * @param   pThis       Pointer to the instance data.
-     */
-    DECLCALLBACKMEMBER(int, pfnPoll)(PDRVHOSTBASE pThis);
+    union
+    {
+#ifdef DRVHOSTBASE_OS_INT_DECLARED
+        DRVHOSTBASEOS       Os;
+#endif
+        uint8_t             abPadding[64];
+    };
 } DRVHOSTBASE;
 
 
-int DRVHostBaseInitData(PPDMDRVINS pDrvIns, PCFGMNODE pCfgHandle, PDMBLOCKTYPE enmType);
-int DRVHostBaseInitFinish(PDRVHOSTBASE pThis);
-int DRVHostBaseMediaPresent(PDRVHOSTBASE pThis);
-void DRVHostBaseMediaNotPresent(PDRVHOSTBASE pThis);
+/**
+ * Request structure fo a request.
+ */
+typedef struct DRVHOSTBASEREQ
+{
+    /** Transfer size. */
+    size_t                   cbReq;
+    /** Amount of residual data. */
+    size_t                   cbResidual;
+    /** Start of the request data for the device above us. */
+    uint8_t                  abAlloc[1];
+} DRVHOSTBASEREQ;
+/** Pointer to a request structure. */
+typedef DRVHOSTBASEREQ *PDRVHOSTBASEREQ;
+
+DECLHIDDEN(int) DRVHostBaseInit(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, const char *pszCfgValid, PDMMEDIATYPE enmType);
+DECLHIDDEN(int) DRVHostBaseMediaPresent(PDRVHOSTBASE pThis);
+DECLHIDDEN(void) DRVHostBaseMediaNotPresent(PDRVHOSTBASE pThis);
 DECLCALLBACK(void) DRVHostBaseDestruct(PPDMDRVINS pDrvIns);
 
+DECLHIDDEN(int) drvHostBaseScsiCmdOs(PDRVHOSTBASE pThis, const uint8_t *pbCmd, size_t cbCmd, PDMMEDIATXDIR enmTxDir,
+                                     void *pvBuf, uint32_t *pcbBuf, uint8_t *pbSense, size_t cbSense, uint32_t cTimeoutMillies);
+DECLHIDDEN(size_t) drvHostBaseScsiCmdGetBufLimitOs(PDRVHOSTBASE pThis);
+DECLHIDDEN(int) drvHostBaseGetMediaSizeOs(PDRVHOSTBASE pThis, uint64_t *pcb);
+DECLHIDDEN(int) drvHostBaseReadOs(PDRVHOSTBASE pThis, uint64_t off, void *pvBuf, size_t cbRead);
+DECLHIDDEN(int) drvHostBaseWriteOs(PDRVHOSTBASE pThis, uint64_t off, const void *pvBuf, size_t cbWrite);
+DECLHIDDEN(int) drvHostBaseFlushOs(PDRVHOSTBASE pThis);
+DECLHIDDEN(int) drvHostBaseDoLockOs(PDRVHOSTBASE pThis, bool fLock);
+DECLHIDDEN(int) drvHostBaseEjectOs(PDRVHOSTBASE pThis);
 
-/** Makes a PDRVHOSTBASE out of a PPDMIMOUNT. */
-#define PDMIMOUNT_2_DRVHOSTBASE(pInterface)        ( (PDRVHOSTBASE)((uintptr_t)pInterface - RT_OFFSETOF(DRVHOSTBASE, IMount)) )
+DECLHIDDEN(void) drvHostBaseInitOs(PDRVHOSTBASE pThis);
+DECLHIDDEN(int) drvHostBaseOpenOs(PDRVHOSTBASE pThis, bool fReadOnly);
+DECLHIDDEN(int) drvHostBaseMediaRefreshOs(PDRVHOSTBASE pThis);
+DECLHIDDEN(int) drvHostBaseQueryMediaStatusOs(PDRVHOSTBASE pThis, bool *pfMediaChanged, bool *pfMediaPresent);
+DECLHIDDEN(bool) drvHostBaseIsMediaPollingRequiredOs(PDRVHOSTBASE pThis);
+DECLHIDDEN(void) drvHostBaseDestructOs(PDRVHOSTBASE pThis);
 
-/** Makes a PDRVHOSTBASE out of a PPDMIBLOCK. */
-#define PDMIBLOCK_2_DRVHOSTBASE(pInterface)        ( (PDRVHOSTBASE)((uintptr_t)pInterface - RT_OFFSETOF(DRVHOSTBASE, IBlock)) )
+DECLHIDDEN(int) drvHostBaseBufferRetain(PDRVHOSTBASE pThis, PDRVHOSTBASEREQ pReq, size_t cbBuf, bool fWrite, void **ppvBuf);
+DECLHIDDEN(int) drvHostBaseBufferRelease(PDRVHOSTBASE pThis, PDRVHOSTBASEREQ pReq, size_t cbBuf, bool fWrite, void *pvBuf);
 
-__END_DECLS
+RT_C_DECLS_END
 
-#endif
+#endif /* !VBOX_INCLUDED_SRC_Storage_DrvHostBase_h */

@@ -1,26 +1,35 @@
+/* $Id: tstMicro.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * Micro Testcase, profiling special CPU operations.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __tstMicro_h__
-#define __tstMicro_h__
+#ifndef VMM_INCLUDED_SRC_testcase_tstMicro_h
+#define VMM_INCLUDED_SRC_testcase_tstMicro_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 /**
  * The testcase identifier.
@@ -74,10 +83,10 @@ typedef struct TSTMICRORESULT
  */
 typedef struct TSTMICRO
 {
-    /** The GC address of this structure. */
-    RTGCPTR     GCPtr;
+    /** The RC address of this structure. */
+    RTRCPTR     RCPtr;
     /** Just for proper alignment. */
-    RTGCPTR     GCPtrStack;
+    RTRCPTR     RCPtrStack;
 
     /** TSC sampled right before leaving R0. */
     uint64_t    u64TSCR0Start;
@@ -117,7 +126,7 @@ typedef struct TSTMICRO
 } TSTMICRO, *PTSTMICRO;
 
 
-__BEGIN_DECLS
+RT_C_DECLS_BEGIN
 
 DECLASM(void) idtOnly42(PTSTMICRO pTst);
 
@@ -142,6 +151,6 @@ DECLASM(void) tstTrapHandlerNoErr(void);
 DECLASM(void) tstTrapHandler(void);
 DECLASM(void) tstInterrupt42(void);
 
-__END_DECLS
+RT_C_DECLS_END
 
-#endif
+#endif /* !VMM_INCLUDED_SRC_testcase_tstMicro_h */

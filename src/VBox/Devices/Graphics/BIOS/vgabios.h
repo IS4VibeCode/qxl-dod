@@ -1,10 +1,14 @@
-#ifndef vgabios_h_included
-#define vgabios_h_included
+
+#ifndef VBOX_INCLUDED_SRC_Graphics_BIOS_vgabios_h
+#define VBOX_INCLUDED_SRC_Graphics_BIOS_vgabios_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 /* Types */
-typedef unsigned char  Bit8u;
-typedef unsigned short Bit16u;
-typedef unsigned long  Bit32u;
+//typedef unsigned char  Bit8u;
+//typedef unsigned short Bit16u;
+//typedef unsigned long  Bit32u;
 typedef unsigned short Boolean;
 
 /* Defines */
@@ -40,8 +44,21 @@ typedef unsigned short Boolean;
 #define NO_ATTR     2
 #define WITH_ATTR   3
 
-#define SCREEN_SIZE(x,y) (((x*y*2)|0x00ff)+1)
-#define SCREEN_MEM_START(x,y,p) ((((x*y*2)|0x00ff)+1)*p)
-#define SCREEN_IO_START(x,y,p) ((((x*y)|0x00ff)+1)*p)
+/* Macro for stack-based pointers. */
+#define STACK_BASED _based(_segname("_STACK"))
 
+/* Output. */
+extern void __cdecl printf(char *s, ...);
+
+/* VGA BIOS routines called by VBE. */
+extern void biosfn_set_video_mode(uint8_t mode);
+extern uint16_t biosfn_read_video_state_size2(uint16_t state);
+extern uint16_t biosfn_save_video_state(uint16_t CX, uint16_t ES, uint16_t BX);
+extern uint16_t biosfn_restore_video_state(uint16_t CX, uint16_t ES, uint16_t BX);
+
+/* Allow stand-alone compilation. */
+#ifndef VBOX_VERSION_STRING
+#include <VBox/version.h>
 #endif
+
+#endif /* !VBOX_INCLUDED_SRC_Graphics_BIOS_vgabios_h */

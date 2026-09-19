@@ -1,100 +1,94 @@
+/* $Id: AudioAdapterImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
+
 /** @file
  *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_AUDIOADAPTER
-#define ____H_AUDIOADAPTER
+#ifndef MAIN_INCLUDED_AudioAdapterImpl_h
+#define MAIN_INCLUDED_AudioAdapterImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
+class AudioSettings;
 
-class Machine;
+#include "AudioAdapterWrap.h"
+namespace settings
+{
+    struct AudioAdapter;
+}
 
 class ATL_NO_VTABLE AudioAdapter :
-    public VirtualBoxSupportErrorInfoImpl <AudioAdapter, IAudioAdapter>,
-    public VirtualBoxSupportTranslation <AudioAdapter>,
-    public VirtualBoxBase,
-    public IAudioAdapter
+    public AudioAdapterWrap
 {
 public:
 
-    struct Data
-    {
-        Data() {
-            mEnabled = false;
-            mAudioDriver = AudioDriverType_NullAudioDriver;
-        }
-
-        bool operator== (const Data &that) const
-        {
-            return this == &that ||
-                   (mEnabled == that.mEnabled &&
-                    mAudioDriver == that.mAudioDriver);
-        }
-
-        BOOL mEnabled;
-        AudioDriverType_T mAudioDriver;
-    };
-
-    DECLARE_NOT_AGGREGATABLE(AudioAdapter)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(AudioAdapter)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IAudioAdapter)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS (AudioAdapter)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT init (Machine *parent);
-    HRESULT init (Machine *parent, AudioAdapter *that);
-    HRESULT initCopy (Machine *parent, AudioAdapter *that);
+    HRESULT init(AudioSettings *aParent);
+    HRESULT init(AudioSettings *aParent, AudioAdapter *aThat);
+    HRESULT initCopy(AudioSettings *aParent, AudioAdapter *aThat);
     void uninit();
 
-    STDMETHOD(COMGETTER(Enabled))(BOOL *enabled);
-    STDMETHOD(COMSETTER(Enabled))(BOOL enabled);
-    STDMETHOD(COMGETTER(AudioDriver)) (AudioDriverType_T *audioDriverType);
-    STDMETHOD(COMSETTER(AudioDriver)) (AudioDriverType_T audioDriverType);
-
     // public methods only for internal purposes
+    HRESULT i_loadSettings(const settings::AudioAdapter &data);
+    HRESULT i_saveSettings(settings::AudioAdapter &data);
 
-    const Backupable <Data> &data() const { return mData; }
-
-    bool isModified() { AutoLock alock (this); return mData.isBackedUp(); }
-    bool isReallyModified() { AutoLock alock (this); return mData.hasActualChanges(); }
-    void rollback() { AutoLock alock (this); mData.rollback(); }
-    void commit();
-    void copyFrom (AudioAdapter *aThat);
-
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"AudioAdapter"; }
+    void i_rollback();
+    void i_commit();
+    void i_copyFrom(AudioAdapter *aThat);
 
 private:
 
-    ComObjPtr <Machine, ComWeakRef> mParent;
-    ComObjPtr <AudioAdapter> mPeer;
-    Backupable <Data> mData;
+    // wrapped IAudioAdapter properties
+    HRESULT getEnabled(BOOL *aEnabled);
+    HRESULT setEnabled(BOOL aEnabled);
+    HRESULT getEnabledIn(BOOL *aEnabled);
+    HRESULT setEnabledIn(BOOL aEnabled);
+    HRESULT getEnabledOut(BOOL *aEnabled);
+    HRESULT setEnabledOut(BOOL aEnabled);
+    HRESULT getAudioDriver(AudioDriverType_T *aAudioDriver);
+    HRESULT setAudioDriver(AudioDriverType_T aAudioDriver);
+    HRESULT getAudioController(AudioControllerType_T *aAudioController);
+    HRESULT setAudioController(AudioControllerType_T aAudioController);
+    HRESULT getAudioCodec(AudioCodecType_T *aAudioCodec);
+    HRESULT setAudioCodec(AudioCodecType_T aAudioCodec);
+    HRESULT getPropertiesList(std::vector<com::Utf8Str>& aProperties);
+    HRESULT getProperty(const com::Utf8Str &aKey, com::Utf8Str &aValue);
+    HRESULT setProperty(const com::Utf8Str &aKey, const com::Utf8Str &aValue);
+
+private:
+
+    struct Data;
+    Data *m;
 };
 
-#endif // ____H_AUDIOADAPTER
+#endif /* !MAIN_INCLUDED_AudioAdapterImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

@@ -45,11 +45,13 @@
 #include "nsISupportsBase.h"
 #endif
 
-#include "prthread.h" /* needed for thread-safety checks */
-#include "pratom.h"   /* needed for PR_AtomicIncrement and PR_AtomicDecrement */
-
 #include "nsDebug.h"
-#include "nsTraceRefcnt.h" 
+#include "nsTraceRefcnt.h"
+#ifdef VBOX
+# include <iprt/asm.h>
+# include <iprt/assert.h>
+# include <iprt/thread.h>
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // Macros to help detect thread-safety:
@@ -58,7 +60,7 @@
 
 class nsAutoOwningThread {
 public:
-    nsAutoOwningThread() { mThread = PR_GetCurrentThread(); }
+    nsAutoOwningThread() { mThread = RTThreadSelf(); }
     void *GetThread() const { return mThread; }
 
 private:
@@ -79,21 +81,37 @@ private:
 class nsAutoRefCnt {
 
  public:
-    nsAutoRefCnt() : mValue(0) {}
-    nsAutoRefCnt(nsrefcnt aValue) : mValue(aValue) {}
+    nsAutoRefCnt() : mValue(0)
+#ifdef VBOX
+        , mState(0)
+#endif
+    {}
+    nsAutoRefCnt(nsrefcnt aValue) : mValue(aValue)
+#ifdef VBOX
+        , mState(0)
+#endif
+    {}
 
     // only support prefix increment/decrement
     nsrefcnt operator++() { return ++mValue; }
     nsrefcnt operator--() { return --mValue; }
-    
+
     nsrefcnt operator=(nsrefcnt aValue) { return (mValue = aValue); }
     operator nsrefcnt() const { return mValue; }
     nsrefcnt get() const { return mValue; }
+#ifdef VBOX
+    nsrefcnt *ref() { return &mValue; }
+    PRUint32 getState() const { return mState; }
+    PRUint32 *refState() { return &mState; }
+#endif
  private:
     // do not define these to enforce the faster prefix notation
     nsrefcnt operator++(int);
     nsrefcnt operator--(int);
     nsrefcnt mValue;
+#ifdef VBOX
+    PRUint32 mState;
+#endif
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -106,9 +124,9 @@ class nsAutoRefCnt {
 #define NS_DECL_ISUPPORTS                                                     \
 public:                                                                       \
   NS_IMETHOD QueryInterface(REFNSIID aIID,                                    \
-                            void** aInstancePtr);                             \
-  NS_IMETHOD_(nsrefcnt) AddRef(void);                                         \
-  NS_IMETHOD_(nsrefcnt) Release(void);                                        \
+                            void** aInstancePtr) NS_OVERRIDE;                 \
+  NS_IMETHOD_(nsrefcnt) AddRef(void) NS_OVERRIDE;                             \
+  NS_IMETHOD_(nsrefcnt) Release(void) NS_OVERRIDE;                            \
 protected:                                                                    \
   nsAutoRefCnt mRefCnt;                                                       \
   NS_DECL_OWNINGTHREAD                                                        \
@@ -491,9 +509,9 @@ NS_IMETHODIMP _class::QueryInterface(REFNSIID aIID, void** aInstancePtr)      \
 #define NS_DECL_ISUPPORTS_INHERITED                                           \
 public:                                                                       \
   NS_IMETHOD QueryInterface(REFNSIID aIID,                                    \
-                            void** aInstancePtr);                             \
-  NS_IMETHOD_(nsrefcnt) AddRef(void);                                         \
-  NS_IMETHOD_(nsrefcnt) Release(void);                                        \
+                            void** aInstancePtr) NS_OVERRIDE;                 \
+  NS_IMETHOD_(nsrefcnt) AddRef(void) NS_OVERRIDE;                             \
+  NS_IMETHOD_(nsrefcnt) Release(void) NS_OVERRIDE;                            \
 
 /**
  * These macros can be used in conjunction with NS_DECL_ISUPPORTS_INHERITED
@@ -684,27 +702,99 @@ NS_IMETHODIMP_(nsrefcnt) Class::Release(void)                                 \
  * @param _class The name of the class implementing the method
  */
 
+#ifdef VBOX
+#define NS_IMPL_THREADSAFE_ADDREF(_class)                                     \
+NS_IMETHODIMP_(nsrefcnt) _class::AddRef(void)                                 \
+{                                                                             \
+  nsrefcnt count = mRefCnt.get();                                             \
+  PRUint32 state = mRefCnt.getState();                                        \
+  AssertReleaseMsg(   state <= 1                                              \
+                   && (   (state == 0 && count == 0)                          \
+                       || (state == 1 && count < PR_UINT32_MAX/2)),           \
+                   ("AddRef: illegal refcnt=%u state=%d\n", count, state));   \
+  switch (state)                                                              \
+  {                                                                           \
+    case 0:                                                                   \
+      if (!ASMAtomicCmpXchgU32(mRefCnt.refState(), 1, 0))                     \
+        AssertReleaseMsgFailed(("AddRef: racing for first increment\n"));     \
+      count = ASMAtomicIncU32(mRefCnt.ref());                                 \
+      AssertReleaseMsg(count == 1,                                            \
+                       ("AddRef: unexpected refcnt=%u\n", count));            \
+      break;                                                                  \
+    case 1:                                                                   \
+      count = ASMAtomicIncU32(mRefCnt.ref());                                 \
+      AssertReleaseMsg(count <= PR_UINT32_MAX/2,                              \
+                       ("AddRef: unexpected refcnt=%u\n", count));            \
+      break;                                                                  \
+    case 2:                                                                   \
+      AssertReleaseMsgFailed(("AddRef: freed object\n"));                     \
+      break;                                                                  \
+    default:                                                                  \
+      AssertReleaseMsgFailed(("AddRef: garbage object\n"));                   \
+  }                                                                           \
+  NS_LOG_ADDREF(this, count, #_class, sizeof(*this));                         \
+  return count;                                                               \
+}
+#else
 #define NS_IMPL_THREADSAFE_ADDREF(_class)                                     \
 NS_IMETHODIMP_(nsrefcnt) _class::AddRef(void)                                 \
 {                                                                             \
   NS_PRECONDITION(PRInt32(mRefCnt) >= 0, "illegal refcnt");                   \
   nsrefcnt count;                                                             \
-  count = PR_AtomicIncrement((PRInt32*)&mRefCnt);                             \
+  count = ASMAtomicIncU32((volatile uint32_t *)&mRefCnt);                     \
   NS_LOG_ADDREF(this, count, #_class, sizeof(*this));                         \
   return count;                                                               \
 }
+#endif
 
 /**
  * Use this macro to implement the Release method for a given <i>_class</i>
  * @param _class The name of the class implementing the method
  */
 
+#ifdef VBOX
+#define NS_IMPL_THREADSAFE_RELEASE(_class)                                    \
+NS_IMETHODIMP_(nsrefcnt) _class::Release(void)                                \
+{                                                                             \
+  nsrefcnt count = mRefCnt.get();                                             \
+  PRUint32 state = mRefCnt.getState();                                        \
+  AssertReleaseMsg(state == 1 && count <= PR_UINT32_MAX/2,                    \
+                   ("Release: illegal refcnt=%u state=%d\n", count, state));  \
+  switch (state)                                                              \
+  {                                                                           \
+    case 0:                                                                   \
+      AssertReleaseMsgFailed(("Release: new object\n"));                      \
+      break;                                                                  \
+    case 1:                                                                   \
+      count = ASMAtomicDecU32(mRefCnt.ref());                                 \
+      AssertReleaseMsg(count < PR_UINT32_MAX/2,                               \
+                       ("Release: unexpected refcnt=%u\n", count));           \
+      if (count == 0)                                                         \
+      {                                                                       \
+        if (!ASMAtomicCmpXchgU32(mRefCnt.refState(), 2, 1))                   \
+          AssertReleaseMsgFailed(("Release: racing for state free\n"));       \
+        /* Use better stabilization: reserve everything with top bit set. */  \
+        if (!ASMAtomicCmpXchgU32(mRefCnt.ref(), PR_UINT32_MAX/4*3, 0))        \
+          AssertReleaseMsgFailed(("Release: racing for refcnt stabilize\n")); \
+        NS_DELETEXPCOM(this);                                                 \
+      }                                                                       \
+      break;                                                                  \
+    case 2:                                                                   \
+      AssertReleaseMsgFailed(("Release: freed object\n"));                    \
+      break;                                                                  \
+    default:                                                                  \
+      AssertReleaseMsgFailed(("Release: garbage object\n"));                  \
+  }                                                                           \
+  NS_LOG_RELEASE(this, count, #_class);                                       \
+  return count;                                                               \
+}
+#else
 #define NS_IMPL_THREADSAFE_RELEASE(_class)                                    \
 NS_IMETHODIMP_(nsrefcnt) _class::Release(void)                                \
 {                                                                             \
   nsrefcnt count;                                                             \
   NS_PRECONDITION(0 != mRefCnt, "dup release");                               \
-  count = PR_AtomicDecrement((PRInt32 *)&mRefCnt);                            \
+  count = ASMAtomicDecI32((volatile uint32_t *)&mRefCnt);                     \
   NS_LOG_RELEASE(this, count, #_class);                                       \
   if (0 == count) {                                                           \
     mRefCnt = 1; /* stabilize */                                              \
@@ -715,6 +805,7 @@ NS_IMETHODIMP_(nsrefcnt) _class::Release(void)                                \
   }                                                                           \
   return count;                                                               \
 }
+#endif
 
 #define NS_IMPL_THREADSAFE_ISUPPORTS0(_class)                                 \
   NS_IMPL_THREADSAFE_ADDREF(_class)                                           \

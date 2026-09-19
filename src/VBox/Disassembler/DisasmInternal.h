@@ -1,171 +1,218 @@
+/* $Id: DisasmInternal.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox disassembler:
- * Internal header
+ * VBox disassembler - Internal header.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __DisasmInternal_h__
-#define __DisasmInternal_h__
+#ifndef VBOX_INCLUDED_SRC_DisasmInternal_h
+#define VBOX_INCLUDED_SRC_DisasmInternal_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include <VBox/cdefs.h>
 #include <VBox/types.h>
+#include <VBox/err.h>
 #include <VBox/dis.h>
+#include <VBox/log.h>
 
-#define ExceptionMemRead          0x666
-#define ExceptionInvalidModRM     0x667
-#define ExceptionInvalidParameter 0x668
+#include <iprt/param.h>
 
-#define IDX_ParseNop                0
-#define IDX_ParseModRM              1
-#define IDX_UseModRM                2
-#define IDX_ParseImmByte            3
-#define IDX_ParseImmBRel            4
-#define IDX_ParseImmUshort          5
-#define IDX_ParseImmV               6
-#define IDX_ParseImmVRel            7
-#define IDX_ParseImmAddr            8
-#define IDX_ParseFixedReg           9
-#define IDX_ParseImmUlong           10
-#define IDX_ParseImmQword           11
-#define IDX_ParseTwoByteEsc         12
-#define IDX_ParseImmGrpl            13
-#define IDX_ParseShiftGrp2          14
-#define IDX_ParseGrp3               15
-#define IDX_ParseGrp4               16
-#define IDX_ParseGrp5               17
-#define IDX_Parse3DNow              18
-#define IDX_ParseGrp6               19
-#define IDX_ParseGrp7               20
-#define IDX_ParseGrp8               21
-#define IDX_ParseGrp9               22
-#define IDX_ParseGrp10              23
-#define IDX_ParseGrp12              24
-#define IDX_ParseGrp13              25
-#define IDX_ParseGrp14              26
-#define IDX_ParseGrp15              27
-#define IDX_ParseGrp16              28
-#define IDX_ParseModFence           29
-#define IDX_ParseYv                 30
-#define IDX_ParseYb                 31
-#define IDX_ParseXv                 32
-#define IDX_ParseXb                 33
-#define IDX_ParseEscFP              34
-#define IDX_ParseNopPause           35
-#define IDX_ParseImmByteSX          36
-#define IDX_ParseMax                (IDX_ParseImmByteSX+1)
 
-#ifdef IN_RING0
-#define DIS_THROW(a)                /* Not available. */
-#elif  __L4ENV__
-#define DIS_THROW(a)                longjmp(*pCpu->pJumpBuffer, a)
-#else
-#define DIS_THROW(a)                throw(a)
+/** @defgroup grp_dis_int Internals.
+ * @ingroup grp_dis
+ * @{
+ */
+
+/** This must be less or equal to DISSTATE::Instr.ab.
+ * See Vol3A/Table 6-2 and Vol3B/Section22.25 for instance.  */
+#define DIS_MAX_INSTR_LENGTH    15
+
+/** Whether we can do unaligned access. */
+#if defined(RT_ARCH_X86) || defined(RT_ARCH_AMD64)
+# define DIS_HOST_UNALIGNED_ACCESS_OK
 #endif
 
 
-extern PFNDISPARSE  pfnFullDisasm[IDX_ParseMax];
-extern PFNDISPARSE  pfnCalcSize[IDX_ParseMax];
+/** @def OP
+ * Wrapper which initializes an DISOPCODE.
+ * We must use this so that we can exclude unused fields in order
+ * to save precious bytes in the GC version.
+ *
+ * @internal
+ */
+#if DISOPCODE_FORMAT == 0
+# define OP(pszOpcode, idxParse1, idxParse2, idxParse3, opcode, param1, param2, param3, optype) \
+    { pszOpcode, idxParse1, idxParse2, idxParse3, 0, opcode, param1, param2, param3, 0, 0, optype }
+# define OPVEX(pszOpcode, idxParse1, idxParse2, idxParse3, idxParse4, opcode, param1, param2, param3, param4, optype) \
+    { pszOpcode, idxParse1, idxParse2, idxParse3, idxParse4, opcode, param1, param2, param3, param4, 0, optype | DISOPTYPE_X86_SSE }
 
+#elif DISOPCODE_FORMAT == 16
+# define OP(pszOpcode, idxParse1, idxParse2, idxParse3, opcode, param1, param2, param3, optype) \
+    { optype,                 opcode, idxParse1, idxParse2, param1, param2, idxParse3, param3, 0,      0         }
+# define OPVEX(pszOpcode, idxParse1, idxParse2, idxParse3, idxParse4, opcode, param1, param2, param3, param4, optype) \
+    { optype | DISOPTYPE_X86_SSE, opcode, idxParse1, idxParse2, param1, param2, idxParse3, param3, param4, idxParse4 }
 
-__BEGIN_DECLS
-
-int ParseInstruction(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, PDISCPUSTATE pCpu);
-
-int ParseIllegal(RTUINTPTR lpszCodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseModRM(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseModRM_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int UseModRM(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmByte(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmByte_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmByteSX(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmByteSX_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmBRel(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmBRel_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmUshort(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmUshort_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmV(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmV_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmVRel(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmVRel_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-
-int ParseImmAddr(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmAddr_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseFixedReg(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmUlong(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmUlong_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmQword(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmQword_SizeOnly(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-
-int ParseTwoByteEsc(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseImmGrpl(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseShiftGrp2(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp3(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp4(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp5(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int Parse3DNow(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp6(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp7(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp8(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp9(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp10(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp12(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp13(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp14(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp15(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseGrp16(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseModFence(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseNopPause(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-
-int ParseYv(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseYb(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseXv(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-int ParseXb(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-
-/* Floating point parsing */
-int ParseEscFP(RTUINTPTR pu8CodeBlock, PCOPCODE pOp, POP_PARAMETER pParam, PDISCPUSTATE pCpu);
-
-/* Disassembler printf */
-void disasmSprintf(char *pszOutput, RTUINTPTR pu8Instruction, PDISCPUSTATE pCpu, POP_PARAMETER pParam1, POP_PARAMETER pParam2, POP_PARAMETER pParam3 = NULL);
-void disasmGetPtrString(PDISCPUSTATE pCpu, PCOPCODE pOp, POP_PARAMETER pParam);
-void disasmModRMReg(PDISCPUSTATE pCpu, PCOPCODE pOp, int idx, POP_PARAMETER pParam, int fRegAddr);
-void disasmModRMReg16(PDISCPUSTATE pCpu, PCOPCODE pOp, int idx, POP_PARAMETER pParam);
-void disasmModRMSReg(PDISCPUSTATE pCpu, PCOPCODE pOp, int idx, POP_PARAMETER pParam);
-void disasmPrintAbs32(POP_PARAMETER pParam);
-void disasmPrintDisp32(POP_PARAMETER pParam);
-void disasmPrintDisp8(POP_PARAMETER pParam);
-void disasmPrintDisp16(POP_PARAMETER pParam);
-
-
-#ifdef IN_GC
-#define  DISReadByte(pCpu,  pAddress) (*(uint8_t *)(pAddress))
-#define  DISReadWord(pCpu,  pAddress) (*(uint16_t *)(pAddress))
-#define  DISReadDWord(pCpu, pAddress) (*(uint32_t *)(pAddress))
-#define  DISReadQWord(pCpu, pAddress) (*(uint64_t *)(pAddress))
+#elif DISOPCODE_FORMAT == 15
+# define OP(pszOpcode, idxParse1, idxParse2, idxParse3, opcode, param1, param2, param3, optype) \
+    { opcode, idxParse1, idxParse2, idxParse3, param1, param2, param3, optype,                 0,      0         }
+# define OPVEX(pszOpcode, idxParse1, idxParse2, idxParse3, idxParse4, opcode, param1, param2, param3, param4, optype) \
+    { opcode, idxParse1, idxParse2, idxParse3, param1, param2, param3, optype | DISOPTYPE_X86_SSE, param4, idxParse4 }
 #else
-/* Read functions */
-uint8_t  DISReadByte(PDISCPUSTATE pCpu, RTUINTPTR pAddress);
-uint16_t DISReadWord(PDISCPUSTATE pCpu, RTUINTPTR pAddress);
-uint32_t DISReadDWord(PDISCPUSTATE pCpu, RTUINTPTR pAddress);
-uint64_t DISReadQWord(PDISCPUSTATE pCpu, RTUINTPTR pAddress);
+# error Unsupported DISOPCODE_FORMAT value
 #endif
 
-__END_DECLS
 
-#endif /* !__DisasmInternal_h__ */
+/* Common */
+DECLHIDDEN(void)     disReadMore(PDISSTATE pDis, uint8_t offInstr, uint8_t cbMin);
+DECLHIDDEN(uint8_t)  disReadByteSlow(PDISSTATE pDis, size_t offInstr);
+DECLHIDDEN(uint16_t) disReadWordSlow(PDISSTATE pDis, size_t offInstr);
+DECLHIDDEN(uint32_t) disReadDWordSlow(PDISSTATE pDis, size_t offInstr);
+DECLHIDDEN(uint64_t) disReadQWordSlow(PDISSTATE pDis, size_t offInstr);
+
+
+/**
+ * Read a byte (8-bit) instruction.
+ *
+ * @returns The requested byte.
+ * @param   pDis                The disassembler state.
+ * @param   uAddress            The address.
+ */
+DECL_FORCE_INLINE(uint8_t) disReadByte(PDISSTATE pDis, size_t offInstr)
+{
+    if (offInstr >= pDis->cbCachedInstr)
+        return disReadByteSlow(pDis, offInstr);
+    return pDis->Instr.ab[offInstr];
+}
+
+
+/**
+ * Read a word (16-bit) instruction.
+ *
+ * @returns The requested word.
+ * @param   pDis                The disassembler state.
+ * @param   offInstr            The offset of the qword relative to the
+ *                              instruction.
+ */
+DECL_FORCE_INLINE(uint16_t) disReadWord(PDISSTATE pDis, size_t offInstr)
+{
+    if (offInstr + 2 > pDis->cbCachedInstr)
+        return disReadWordSlow(pDis, offInstr);
+
+#ifdef DIS_HOST_UNALIGNED_ACCESS_OK
+    return *(uint16_t const *)&pDis->Instr.ab[offInstr];
+#else
+    return RT_MAKE_U16(pDis->Instr.ab[offInstr], pDis->Instr.ab[offInstr + 1]);
+#endif
+}
+
+
+/**
+ * Read a dword (32-bit) instruction.
+ *
+ * @returns The requested dword.
+ * @param   pDis                The disassembler state.
+ * @param   offInstr            The offset of the qword relative to the
+ *                              instruction.
+ */
+DECL_FORCE_INLINE(uint32_t) disReadDWord(PDISSTATE pDis, size_t offInstr)
+{
+    if (offInstr + 4 > pDis->cbCachedInstr)
+        return disReadDWordSlow(pDis, offInstr);
+
+#ifdef DIS_HOST_UNALIGNED_ACCESS_OK
+    return *(uint32_t const *)&pDis->Instr.ab[offInstr];
+#else
+    return RT_MAKE_U32_FROM_U8(pDis->Instr.ab[offInstr    ], pDis->Instr.ab[offInstr + 1],
+                               pDis->Instr.ab[offInstr + 2], pDis->Instr.ab[offInstr + 3]);
+#endif
+}
+
+
+/**
+ * Read a qword (64-bit) instruction.
+ *
+ * @returns The requested qword.
+ * @param   pDis                The disassembler state.
+ * @param   uAddress            The address.
+ */
+DECL_FORCE_INLINE(uint64_t) disReadQWord(PDISSTATE pDis, size_t offInstr)
+{
+    if (offInstr + 8 > pDis->cbCachedInstr)
+        return disReadQWordSlow(pDis, offInstr);
+
+#ifdef DIS_HOST_UNALIGNED_ACCESS_OK
+    return *(uint64_t const *)&pDis->Instr.ab[offInstr];
+#else
+    return RT_MAKE_U64_FROM_U8(pDis->Instr.ab[offInstr    ], pDis->Instr.ab[offInstr + 1],
+                               pDis->Instr.ab[offInstr + 2], pDis->Instr.ab[offInstr + 3],
+                               pDis->Instr.ab[offInstr + 4], pDis->Instr.ab[offInstr + 5],
+                               pDis->Instr.ab[offInstr + 6], pDis->Instr.ab[offInstr + 7]);
+#endif
+}
+
+
+/**
+ * Reads some bytes into the cache.
+ *
+ * While this will set DISSTATE::rc on failure, the caller should disregard
+ * this since that is what would happen if we didn't prefetch bytes prior to the
+ * instruction parsing.
+ *
+ * @param   pDis                The disassembler state.
+ */
+DECL_FORCE_INLINE(void) disPrefetchBytes(PDISSTATE pDis)
+{
+    /*
+     * Read some bytes into the cache.  (If this fail we continue as nothing
+     * has gone wrong since this is what would happen if we didn't precharge
+     * the cache here.)
+     */
+    int rc = pDis->pfnReadBytes(pDis, 0, 1, sizeof(pDis->Instr.ab));
+    if (RT_SUCCESS(rc))
+    {
+        Assert(pDis->cbCachedInstr >= 1);
+        Assert(pDis->cbCachedInstr <= sizeof(pDis->Instr.ab));
+    }
+    else
+    {
+        Log(("Initial read failed with rc=%Rrc!!\n", rc));
+        pDis->rc = rc;
+    }
+}
+
+
+#if defined(VBOX_DIS_WITH_X86_AMD64)
+DECLHIDDEN(PCDISOPCODE) disInitializeStateX86(PDISSTATE pDis, DISCPUMODE enmCpuMode, uint32_t fFilter);
+DECLHIDDEN(int)         disInstrWorkerX86(PDISSTATE pDis, PCDISOPCODE paOneByteMap, uint32_t *pcbInstr);
+#endif
+#if defined(VBOX_DIS_WITH_ARMV8)
+DECLHIDDEN(PCDISOPCODE) disInitializeStateArmV8(PDISSTATE pDis, DISCPUMODE enmCpuMode, uint32_t fFilter);
+DECLHIDDEN(int)         disInstrWorkerArmV8(PDISSTATE pDis, PCDISOPCODE paOneByteMap, uint32_t *pcbInstr);
+#endif
+
+size_t disFormatBytes(PCDISSTATE pDis, char *pszDst, size_t cchDst, uint32_t fFlags);
+
+/** @} */
+#endif /* !VBOX_INCLUDED_SRC_DisasmInternal_h */
 

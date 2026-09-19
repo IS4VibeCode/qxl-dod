@@ -1,342 +1,259 @@
+/* $Id: ProgressImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_PROGRESSIMPL
-#define ____H_PROGRESSIMPL
+#ifndef MAIN_INCLUDED_ProgressImpl_h
+#define MAIN_INCLUDED_ProgressImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
+#include "ProgressWrap.h"
 #include "VirtualBoxBase.h"
-#include "Collection.h"
+#include "EventImpl.h"
 
 #include <iprt/semaphore.h>
 
-#include <vector>
-
-class VirtualBox;
-
 ////////////////////////////////////////////////////////////////////////////////
 
-class ATL_NO_VTABLE ProgressBase :
-    public VirtualBoxSupportErrorInfoImpl <ProgressBase, IProgress>,
-    public VirtualBoxSupportTranslation <ProgressBase>,
-    public VirtualBoxBase,
-    public IProgress
+/**
+ * Class for progress objects.
+ */
+class ATL_NO_VTABLE Progress :
+    public ProgressWrap
 {
-protected:
-
-    BEGIN_COM_MAP(ProgressBase)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IProgress)
-    END_COM_MAP()
+public:
+    DECLARE_NOT_AGGREGATABLE(Progress)
 
     HRESULT FinalConstruct();
+    void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT protectedInit (
-#if !defined (VBOX_COM_INPROC)
+
+    /**
+     * Simplified constructor for progress objects that have only one
+     * operation as a task.
+     * @param aParent
+     * @param aInitiator
+     * @param aDescription
+     * @param aCancelable
+     * @return
+     */
+    HRESULT init(
+#if !defined(VBOX_COM_INPROC)
                   VirtualBox *aParent,
 #endif
                   IUnknown *aInitiator,
-                  const BSTR aDescription, GUIDPARAMOUT aId = NULL);
-    HRESULT protectedInit();
-    void protectedUninit (AutoLock &alock);
+                  const Utf8Str &aDescription,
+                  BOOL aCancelable)
+    {
+        return init(
+#if !defined(VBOX_COM_INPROC)
+            aParent,
+#endif
+            aInitiator,
+            aDescription,
+            aCancelable,
+            1,      // cOperations
+            1,      // ulTotalOperationsWeight
+            aDescription, // aFirstOperationDescription
+            1);     // ulFirstOperationWeight
+    }
 
-public:
+    /**
+     * Not quite so simplified constructor for progress objects that have
+     * more than one operation, but all sub-operations are weighed the same.
+     * @param aParent
+     * @param aInitiator
+     * @param aDescription
+     * @param aCancelable
+     * @param cOperations
+     * @param aFirstOperationDescription
+     * @return
+     */
+    HRESULT init(
+#if !defined(VBOX_COM_INPROC)
+                  VirtualBox *aParent,
+#endif
+                  IUnknown *aInitiator,
+                  const Utf8Str &aDescription, BOOL aCancelable,
+                  ULONG cOperations,
+                  const Utf8Str &aFirstOperationDescription)
+    {
+        return init(
+#if !defined(VBOX_COM_INPROC)
+            aParent,
+#endif
+            aInitiator,
+            aDescription,
+            aCancelable,
+            cOperations,      // cOperations
+            cOperations,      // ulTotalOperationsWeight = cOperations
+            aFirstOperationDescription, // aFirstOperationDescription
+            1);     // ulFirstOperationWeight: weigh them all the same
+    }
 
-    // IProgress properties
-    STDMETHOD(COMGETTER(Id)) (GUIDPARAMOUT aId);
-    STDMETHOD(COMGETTER(Description)) (BSTR *aDescription);
-    STDMETHOD(COMGETTER(Initiator)) (IUnknown **aInitiator);
+    HRESULT init(
+#if !defined(VBOX_COM_INPROC)
+                  VirtualBox *aParent,
+#endif
+                  IUnknown *aInitiator,
+                  const Utf8Str &aDescription,
+                  BOOL aCancelable,
+                  ULONG cOperations,
+                  ULONG ulTotalOperationsWeight,
+                  const Utf8Str &aFirstOperationDescription,
+                  ULONG ulFirstOperationWeight);
 
-    // IProgress properties
-    STDMETHOD(COMGETTER(Cancelable)) (BOOL *aCancelable);
-    STDMETHOD(COMGETTER(Percent)) (LONG *aPercent);
-    STDMETHOD(COMGETTER(Completed)) (BOOL *aCompleted);
-    STDMETHOD(COMGETTER(Canceled)) (BOOL *aCanceled);
-    STDMETHOD(COMGETTER(ResultCode)) (HRESULT *aResultCode);
-    STDMETHOD(COMGETTER(ErrorInfo)) (IVirtualBoxErrorInfo **aErrorInfo);
-    STDMETHOD(COMGETTER(OperationCount)) (ULONG *aOperationCount);
-    STDMETHOD(COMGETTER(Operation)) (ULONG *aCount);
-    STDMETHOD(COMGETTER(OperationDescription)) (BSTR *aOperationDescription);
-    STDMETHOD(COMGETTER(OperationPercent)) (LONG *aOperationPercent);
+    HRESULT init(BOOL aCancelable,
+                 ULONG aOperationCount,
+                 const Utf8Str &aOperationDescription);
+
+    void uninit();
+
 
     // public methods only for internal purposes
+    HRESULT i_notifyComplete(HRESULT aResultCode);
+    HRESULT i_notifyComplete(HRESULT aResultCode,
+                             const GUID &aIID,
+                             const char *pcszComponent,
+                             const char *aText,
+                             ...);
+    HRESULT i_notifyCompleteV(HRESULT aResultCode,
+                              const GUID &aIID,
+                              const char *pcszComponent,
+                              const char *aText,
+                              va_list va);
+    HRESULT i_notifyCompleteBoth(HRESULT aResultCode,
+                                 int vrc,
+                                 const GUID &aIID,
+                                 const char *pcszComponent,
+                                 const char *aText,
+                                 ...);
+    HRESULT i_notifyCompleteBothV(HRESULT aResultCode,
+                                  int vrc,
+                                  const GUID &aIID,
+                                  const char *pcszComponent,
+                                  const char *aText,
+                                  va_list va);
 
-    Guid id() { AutoLock alock (this); return mId; }
-    BOOL completed() { AutoLock alock (this); return mCompleted; }
-    HRESULT resultCode() { AutoLock alock (this); return mResultCode; }
+    bool i_setCancelCallback(void (*pfnCallback)(void *), void *pvUser);
 
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"Progress"; }
+    static DECLCALLBACK(int) i_iprtProgressCallback(unsigned uPercentage, void *pvUser);
+    static DECLCALLBACK(int) i_vdProgressCallback(void *pvUser, unsigned uPercentage);
 
 protected:
+    DECLARE_COMMON_CLASS_METHODS(Progress)
 
-#if !defined (VBOX_COM_INPROC)
-    /** weak parent */
-    ComObjPtr <VirtualBox, ComWeakRef> mParent;
+#if !defined(VBOX_COM_INPROC)
+    /** Weak parent. */
+    VirtualBox * const      mParent;
 #endif
-    ComPtr <IUnknown> mInitiator;
+    const ComObjPtr<EventSource> pEventSource;
+    const ComPtr<IUnknown>  mInitiator;
 
-    Guid mId;
-    Bstr mDescription;
+    const Guid mId;
+    const com::Utf8Str mDescription;
 
-    // the fields below are to be initalized by subclasses
+    uint64_t m_ullTimestamp;                        // progress object creation timestamp, for ETA computation
+
+    void (*m_pfnCancelCallback)(void *);
+    void *m_pvCancelUserArg;
+
+    /* The fields below are to be properly initialized by subclasses */
 
     BOOL mCompleted;
     BOOL mCancelable;
     BOOL mCanceled;
     HRESULT mResultCode;
-    ComPtr <IVirtualBoxErrorInfo> mErrorInfo;
+    ComPtr<IVirtualBoxErrorInfo> mErrorInfo;
 
-    ULONG mOperationCount;
-    ULONG mOperation;
-    Bstr mOperationDescription;
-    LONG mOperationPercent;
-};
+    ULONG m_cOperations;                            // number of operations (so that progress dialog can
+                                                    // display something like 1/3)
+    ULONG m_ulTotalOperationsWeight;                // sum of weights of all operations, given to constructor
 
-////////////////////////////////////////////////////////////////////////////////
+    ULONG m_ulOperationsCompletedWeight;            // summed-up weight of operations that have been completed; initially 0
 
-class ATL_NO_VTABLE Progress :
-    public VirtualBoxSupportTranslation <Progress>,
-    public ProgressBase
-{
-
-public:
-
-    VIRTUALBOXSUPPORTTRANSLATION_OVERRIDE(Progress)
-
-    DECLARE_NOT_AGGREGATABLE(Progress)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(Progress)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IProgress)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
-
-    HRESULT FinalConstruct();
-    void FinalRelease();
-
-    // public initializer/uninitializer for internal purposes only
-
-    HRESULT init (
-#if !defined (VBOX_COM_INPROC)
-                  VirtualBox *aParent,
-#endif
-                  IUnknown *aInitiator,
-                  const BSTR aDescription, BOOL aCancelable,
-                  GUIDPARAMOUT aId = NULL)
-    {
-        return init (
-#if !defined (VBOX_COM_INPROC)
-            aParent,
-#endif
-            aInitiator, aDescription, aCancelable, 1, aDescription, aId);
-    }
-
-    HRESULT init (
-#if !defined (VBOX_COM_INPROC)
-                  VirtualBox *aParent,
-#endif
-                  IUnknown *aInitiator,
-                  const BSTR aDescription, BOOL aCancelable,
-                  ULONG aOperationCount, const BSTR aOperationDescription,
-                  GUIDPARAMOUT aId = NULL);
-
-    HRESULT init (BOOL aCancelable, ULONG aOperationCount,
-                  const BSTR aOperationDescription);
-
-    void uninit();
-
-    // IProgress methods
-    STDMETHOD(WaitForCompletion) (LONG aTimeout);
-    STDMETHOD(WaitForOperationCompletion) (ULONG aOperation, LONG aTimeout);
-    STDMETHOD(Cancel)();
-
-    // public methods only for internal purposes
-
-    HRESULT notifyProgress (LONG aPercent);
-    HRESULT advanceOperation (const BSTR aOperationDescription);
-
-    HRESULT notifyComplete (HRESULT aResultCode);
-    HRESULT notifyComplete (HRESULT aResultCode, const GUID &aIID,
-                            const Bstr &aComponent,
-                            const char *aText, ...);
+    ULONG m_ulCurrentOperation;                     // operations counter, incremented with
+                                                    // each setNextOperation()
+    com::Utf8Str m_operationDescription;            // name of current operation; initially
+                                                    // from constructor, changed with setNextOperation()
+    ULONG m_ulCurrentOperationWeight;               // weight of current operation, given to setNextOperation()
+    ULONG m_ulOperationPercent;                     // percentage of current operation, set with setCurrentOperationProgress()
+    ULONG m_cMsTimeout;                             /**< Automatic timeout value. 0 means none. */
 
 private:
+    // wrapped IProgress properties
+    HRESULT getId(com::Guid &aId);
+    HRESULT getDescription(com::Utf8Str &aDescription);
+    HRESULT getInitiator(ComPtr<IUnknown> &aInitiator);
+    HRESULT getCancelable(BOOL *aCancelable);
+    HRESULT getPercent(ULONG *aPercent);
+    HRESULT getTimeRemaining(LONG *aTimeRemaining);
+    HRESULT getCompleted(BOOL *aCompleted);
+    HRESULT getCanceled(BOOL *aCanceled);
+    HRESULT getResultCode(LONG *aResultCode);
+    HRESULT getErrorInfo(ComPtr<IVirtualBoxErrorInfo> &aErrorInfo);
+    HRESULT getOperationCount(ULONG *aOperationCount);
+    HRESULT getOperation(ULONG *aOperation);
+    HRESULT getOperationDescription(com::Utf8Str &aOperationDescription);
+    HRESULT getOperationPercent(ULONG *aOperationPercent);
+    HRESULT getOperationWeight(ULONG *aOperationWeight);
+    HRESULT getTimeout(ULONG *aTimeout);
+    HRESULT setTimeout(ULONG aTimeout);
+    HRESULT getEventSource(ComPtr<IEventSource> &aEventSource);
+
+    // wrapped IProgress methods
+    HRESULT waitForCompletion(LONG aTimeout);
+    HRESULT waitForOperationCompletion(ULONG aOperation,
+                                       LONG aTimeout);
+    HRESULT cancel();
+
+    // wrapped IInternalProgressControl methods
+    HRESULT setCurrentOperationProgress(ULONG aPercent);
+    HRESULT waitForOtherProgressCompletion(const ComPtr<IProgress> &aProgressOther,
+                                           ULONG aTimeoutMS);
+    HRESULT setNextOperation(const com::Utf8Str &aNextOperationDescription,
+                             ULONG aNextOperationsWeight);
+    HRESULT notifyPointOfNoReturn();
+    HRESULT notifyComplete(LONG aResultCode,
+                           const ComPtr<IVirtualBoxErrorInfo> &aErrorInfo);
+
+    // internal helper methods
+    HRESULT i_notifyCompleteWorker(HRESULT aResultCode, const ComPtr<IVirtualBoxErrorInfo> &aErrorInfo);
+    double i_calcTotalPercent();
+    void i_checkForAutomaticTimeout(void);
 
     RTSEMEVENTMULTI mCompletedSem;
     ULONG mWaitersCount;
-};
-
-////////////////////////////////////////////////////////////////////////////////
-
-/**
- *  The CombinedProgress class allows to combine several progress objects
- *  to a single progress component. This single progress component will treat
- *  all operations of individual progress objects as a single sequence of
- *  operations, that follow each other in the same order as progress objects are
- *  passed to the #init() method.
- *
- *  Individual progress objects are sequentially combined so that this progress
- *  object:
- *
- *  -   is cancelable only if all progresses are cancelable.
- *  -   is canceled once a progress that follows next to successfully completed
- *      ones reports it was canceled.
- *  -   is completed successfully only after all progresses are completed
- *      successfully.
- *  -   is completed unsuccessfully once a progress that follows next to
- *      successfully completed ones reports it was completed unsuccessfully;
- *      the result code and error info of the unsuccessful progress
- *      will be reported as the result code and error info of this progress.
- *  -   returns N as the operation number, where N equals to the number of
- *      operations in all successfully completed progresses starting from the
- *      first one plus the operation number of the next (not yet complete)
- *      progress; the operation description of the latter one is reported as
- *      the operation description of this progress object.
- *  -   returns P as the percent value, where P equals to the sum of percents
- *      of all successfully completed progresses starting from the
- *      first one plus the percent value of the next (not yet complete)
- *      progress, normalized to 100%.
- *
- *  @note
- *      It's the respoisibility of the combined progress object creator
- *      to complete individual progresses in the right order: if, let's say,
- *      the last progress is completed before all previous ones,
- *      #WaitForCompletion(-1) will most likely give 100% CPU load because it
- *      will be in a loop calling a method that returns immediately.
- */
-class ATL_NO_VTABLE CombinedProgress :
-    public VirtualBoxSupportTranslation <CombinedProgress>,
-    public ProgressBase
-{
-
-public:
-
-    VIRTUALBOXSUPPORTTRANSLATION_OVERRIDE(CombinedProgress)
-
-    DECLARE_NOT_AGGREGATABLE(CombinedProgress)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(CombinedProgress)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IProgress)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
-
-    HRESULT FinalConstruct();
-    void FinalRelease();
-
-    // public initializer/uninitializer for internal purposes only
-
-    HRESULT init (
-#if !defined (VBOX_COM_INPROC)
-                  VirtualBox *aParent,
-#endif
-                  IUnknown *aInitiator,
-                  const BSTR aDescription,
-                  IProgress *aProgress1, IProgress *aProgress2,
-                  GUIDPARAMOUT aId = NULL)
-    {
-        AutoLock lock (this);
-        ComAssertRet (!isReady(), E_UNEXPECTED);
-
-        mProgresses.resize (2);
-        mProgresses [0] = aProgress1;
-        mProgresses [1] = aProgress2;
-
-        return protectedInit (
-#if !defined (VBOX_COM_INPROC)
-                              aParent,
-#endif
-                              aInitiator, aDescription, aId);
-    }
-
-    template <typename InputIterator>
-    HRESULT init (
-#if !defined (VBOX_COM_INPROC)
-                  VirtualBox *aParent,
-#endif
-                  IUnknown *aInitiator,
-                  const BSTR aDescription,
-                  InputIterator aFirstProgress, InputIterator aLastProgress,
-                  GUIDPARAMOUT aId = NULL)
-    {
-        AutoLock lock (this);
-        ComAssertRet (!isReady(), E_UNEXPECTED);
-
-        mProgresses = ProgressVector (aFirstProgress, aLastProgress);
-
-        return protectedInit (
-#if !defined (VBOX_COM_INPROC)
-                              aParent,
-#endif
-                              aInitiator, aDescription, aId);
-    }
-
-protected:
-
-    HRESULT protectedInit (
-#if !defined (VBOX_COM_INPROC)
-                           VirtualBox *aParent,
-#endif
-                           IUnknown *aInitiator,
-                           const BSTR aDescription, GUIDPARAMOUT aId);
-
-public:
-
-    void uninit();
-
-    // IProgress properties
-    STDMETHOD(COMGETTER(Percent)) (LONG *aPercent);
-    STDMETHOD(COMGETTER(Completed)) (BOOL *aCompleted);
-    STDMETHOD(COMGETTER(Canceled)) (BOOL *aCanceled);
-    STDMETHOD(COMGETTER(ResultCode)) (HRESULT *aResultCode);
-    STDMETHOD(COMGETTER(ErrorInfo)) (IVirtualBoxErrorInfo **aErrorInfo);
-    STDMETHOD(COMGETTER(Operation)) (ULONG *aCount);
-    STDMETHOD(COMGETTER(OperationDescription)) (BSTR *aOperationDescription);
-    STDMETHOD(COMGETTER(OperationPercent)) (LONG *aOperationPercent);
-
-    // IProgress methods
-    STDMETHOD(WaitForCompletion) (LONG aTimeout);
-    STDMETHOD(WaitForOperationCompletion) (ULONG aOperation, LONG aTimeout);
-    STDMETHOD(Cancel)();
-
-    // public methods only for internal purposes
 
 private:
-
-    HRESULT checkProgress();
-
-    typedef std::vector <ComPtr <IProgress> > ProgressVector;
-    ProgressVector mProgresses;
-
-    size_t mProgress;
-    ULONG mCompletedOperations;
+    DECLARE_CLS_COPY_CTOR_ASSIGN_NOOP(Progress); /* Shuts up MSC warning C4625. */
 };
 
-COM_DECL_READONLY_ENUM_AND_COLLECTION_AS (Progress, IProgress)
+#endif /* !MAIN_INCLUDED_ProgressImpl_h */
 
-#endif // ____H_PROGRESSIMPL

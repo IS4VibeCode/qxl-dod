@@ -1,33 +1,50 @@
 /** @file
- *
- * InnoTek Portable Runtime - Timer.
+ * IPRT - Timer.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __iprt_timer_h__
-#define __iprt_timer_h__
+#ifndef IPRT_INCLUDED_timer_h
+#define IPRT_INCLUDED_timer_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 
 #include <iprt/cdefs.h>
 #include <iprt/types.h>
 
 
-__BEGIN_DECLS
+RT_C_DECLS_BEGIN
 
 /** @defgroup grp_rt_timer      RTTimer - Timer
  *
@@ -69,8 +86,11 @@ typedef struct RTTIMER   *PRTTIMER;
  *
  * @param   pTimer      Timer handle.
  * @param   pvUser      User argument.
+ * @param   iTick       The current timer tick. This is always 1 on the first
+ *                      callback after the timer was started. For omni timers
+ *                      this will be 1 when a cpu comes back online.
  */
-typedef DECLCALLBACK(void) FNRTTIMER(PRTTIMER pTimer, void *pvUser);
+typedef DECLCALLBACKTYPE(void, FNRTTIMER,(PRTTIMER pTimer, void *pvUser, uint64_t iTick));
 /** Pointer to FNRTTIMER() function. */
 typedef FNRTTIMER *PFNRTTIMER;
 
@@ -85,7 +105,8 @@ typedef FNRTTIMER *PFNRTTIMER;
  * @param   pfnTimer            Callback function which shall be scheduled for execution
  *                              on every timer tick.
  * @param   pvUser              User argument for the callback.
- * @see     RTTimerDestroy, RTTimerStop
+ * @see     RTTimerCreateEx, RTTimerStart, RTTimerStop, RTTimerChangeInterval,
+ *          RTTimerDestroy, RTTimerGetSystemGranularity
  */
 RTDECL(int) RTTimerCreate(PRTTIMER *ppTimer, unsigned uMilliesInterval, PFNRTTIMER pfnTimer, void *pvUser);
 
@@ -93,36 +114,72 @@ RTDECL(int) RTTimerCreate(PRTTIMER *ppTimer, unsigned uMilliesInterval, PFNRTTIM
  * Create a suspended timer.
  *
  * @returns iprt status code.
+ * @retval  VERR_NOT_SUPPORTED if an unsupported flag was specfied.
+ * @retval  VERR_CPU_NOT_FOUND if the specified CPU
+ *
  * @param   ppTimer             Where to store the timer handle.
  * @param   u64NanoInterval     The interval between timer ticks specified in nanoseconds if it's
  *                              a recurring timer. This is rounded to the fit the system timer granularity.
  *                              For one shot timers, pass 0.
- * @param   fFlags              Timer flags. No flags has been defined yet, pass 0.
+ * @param   fFlags              Timer flags.
  * @param   pfnTimer            Callback function which shall be scheduled for execution
  *                              on every timer tick.
  * @param   pvUser              User argument for the callback.
- * @see     RTTimerStart, RTTimerStop, RTTimerDestroy, RTTimerGetSystemGranularity
+ * @see     RTTimerStart, RTTimerStop, RTTimerChangeInterval, RTTimerDestroy,
+ *          RTTimerGetSystemGranularity, RTTimerCanDoHighResolution
  */
-RTDECL(int) RTTimerCreateEx(PRTTIMER *ppTimer, uint64_t u64NanoInterval, unsigned fFlags, PFNRTTIMER pfnTimer, void *pvUser);
+RTDECL(int) RTTimerCreateEx(PRTTIMER *ppTimer, uint64_t u64NanoInterval, uint32_t fFlags, PFNRTTIMER pfnTimer, void *pvUser);
+
+/** @name RTTimerCreateEx flags
+ * @{ */
+/** Any CPU is fine. (Must be 0.) */
+#define RTTIMER_FLAGS_CPU_ANY       UINT32_C(0)
+/** One specific CPU */
+#define RTTIMER_FLAGS_CPU_SPECIFIC  RT_BIT(16)
+/** Omni timer, run on all online CPUs.
+ * @remarks The timer callback isn't necessarily running at the time same time on each CPU. */
+#define RTTIMER_FLAGS_CPU_ALL       ( RTTIMER_FLAGS_CPU_MASK | RTTIMER_FLAGS_CPU_SPECIFIC )
+/** CPU mask. */
+#define RTTIMER_FLAGS_CPU_MASK      UINT32_C(0xffff)
+/** Desire a high resolution timer that works with RTTimerChangeInterval and
+ * isn't subject to RTTimerGetSystemGranularity rounding.
+ * @remarks This is quietly ignored if the feature isn't supported. */
+#define RTTIMER_FLAGS_HIGH_RES      RT_BIT(17)
+/** Convert a CPU set index (0-based) to RTTimerCreateEx flags.
+ * This will automatically OR in the RTTIMER_FLAGS_CPU_SPECIFIC flag. */
+#define RTTIMER_FLAGS_CPU(iCpu)     ( (iCpu) | RTTIMER_FLAGS_CPU_SPECIFIC )
+/** Macro that validates the flags. */
+#define RTTIMER_FLAGS_ARE_VALID(fFlags) \
+    ( !((fFlags) & ((fFlags) & RTTIMER_FLAGS_CPU_SPECIFIC ? ~UINT32_C(0x3ffff) : ~UINT32_C(0x30000))) )
+/** @} */
 
 /**
  * Stops and destroys a running timer.
  *
  * @returns iprt status code.
- * @param   pTimer      Timer to stop and destroy.
+ * @retval  VERR_INVALID_CONTEXT if executing at the wrong IRQL (windows), PIL
+ *          (solaris), or similar.  Portable code does not destroy timers with
+ *          preemption (or interrupts) disabled.
+ * @param   pTimer      Timer to stop and destroy. NULL is ok.
  */
 RTDECL(int) RTTimerDestroy(PRTTIMER pTimer);
 
 /**
- * Stops an active timer.
+ * Starts a suspended timer.
  *
  * @returns IPRT status code.
- * @retval  VERR_INVALID_POINTER if pTimer isn't valid.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
  * @retval  VERR_TIMER_ACTIVE if the timer isn't suspended.
+ * @retval  VERR_CPU_OFFLINE if the CPU the timer was created to run on is not
+ *          online (this include the case where it's not present in the
+ *          system).
  *
  * @param   pTimer      The timer to activate.
- * @param   u64First    The RTTimeSystemNanoTS() for when the timer should start firing.
- *                      If 0 is specified, the timer will fire ASAP.
+ * @param   u64First    The RTTimeSystemNanoTS() for when the timer should start
+ *                      firing (relative).  If 0 is specified, the timer will
+ *                      fire ASAP.
+ * @remarks When RTTimerCanDoHighResolution returns true, this API is
+ *          callable with preemption disabled in ring-0.
  * @see     RTTimerStop
  */
 RTDECL(int) RTTimerStart(PRTTIMER pTimer, uint64_t u64First);
@@ -130,16 +187,42 @@ RTDECL(int) RTTimerStart(PRTTIMER pTimer, uint64_t u64First);
 /**
  * Stops an active timer.
  *
+ * @todo    May return while the timer callback function is being services on
+ *          some platforms (ring-0 Windows, ring-0 linux).  This needs to be
+ *          addressed at some point...
+ *
  * @returns IPRT status code.
- * @retval  VERR_INVALID_POINTER if pTimer isn't valid.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
  * @retval  VERR_TIMER_SUSPENDED if the timer isn't active.
- * @retval  VERR_NOT_SUPPORTED if the IPRT implementation doesn't support stopping a timer.
+ * @retval  VERR_NOT_SUPPORTED if the IPRT implementation doesn't support
+ *          stopping a timer.
  *
  * @param   pTimer  The timer to suspend.
+ * @remarks Can be called from the timer callback function to stop it.
  * @see     RTTimerStart
  */
 RTDECL(int) RTTimerStop(PRTTIMER pTimer);
 
+/**
+ * Changes the interval of a periodic timer.
+ *
+ * If the timer is active, it is implementation dependent whether the change
+ * takes place immediately or after the next tick.  To get defined behavior,
+ * stop the timer before calling this API.
+ *
+ * @returns IPRT status code.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
+ * @retval  VERR_NOT_SUPPORTED if not supported.
+ * @retval  VERR_INVALID_STATE if not a periodic timer.
+ *
+ * @param   pTimer              The timer to activate.
+ * @param   u64NanoInterval     The interval between timer ticks specified in
+ *                              nanoseconds.  This is rounded to the fit the
+ *                              system timer granularity.
+ * @remarks Callable from the timer callback.  Callable with preemption
+ *          disabled in ring-0.
+ */
+RTDECL(int) RTTimerChangeInterval(PRTTIMER pTimer, uint64_t u64NanoInterval);
 
 /**
  * Gets the (current) timer granularity of the system.
@@ -188,8 +271,130 @@ RTDECL(int) RTTimerRequestSystemGranularity(uint32_t u32Request, uint32_t *pu32G
  */
 RTDECL(int) RTTimerReleaseSystemGranularity(uint32_t u32Granted);
 
+/**
+ * Checks if the system support high resolution timers.
+ *
+ * The kind of support we are checking for is the kind of dynamically
+ * reprogrammable timers employed by recent Solaris and Linux kernels.  It also
+ * implies that we can specify microsecond (or even better maybe) intervals
+ * without getting into trouble.
+ *
+ * @returns true if supported, false it not.
+ *
+ * @remarks Returning true also means RTTimerChangeInterval must be implemented
+ *          and RTTimerStart be callable with preemption disabled.
+ */
+RTDECL(bool) RTTimerCanDoHighResolution(void);
+
+
+/**
+ * Timer callback function for low res timers.
+ *
+ * This is identical to FNRTTIMER except for the first parameter, so
+ * see FNRTTIMER for details.
+ *
+ * @param   hTimerLR    The low resolution timer handle.
+ * @param   pvUser      User argument.
+ * @param   iTick       The current timer tick. This is always 1 on the first
+ *                      callback after the timer was started. Will jump if we've
+ *                      skipped ticks when lagging behind.
+ */
+typedef DECLCALLBACKTYPE(void, FNRTTIMERLR,(RTTIMERLR hTimerLR, void *pvUser, uint64_t iTick));
+/** Pointer to FNRTTIMER() function. */
+typedef FNRTTIMERLR *PFNRTTIMERLR;
+
+
+/**
+ * Create a recurring low resolution timer.
+ *
+ * @returns iprt status code.
+ * @param   phTimerLR           Where to store the timer handle.
+ * @param   uMilliesInterval    Milliseconds between the timer ticks, at least 100 ms.
+ *                              If higher resolution is required use the other API.
+ * @param   pfnTimer            Callback function which shall be scheduled for execution
+ *                              on every timer tick.
+ * @param   pvUser              User argument for the callback.
+ * @see     RTTimerLRCreateEx, RTTimerLRDestroy, RTTimerLRStop
+ */
+RTDECL(int) RTTimerLRCreate(PRTTIMERLR phTimerLR, uint32_t uMilliesInterval, PFNRTTIMERLR pfnTimer, void *pvUser);
+
+/**
+ * Create a suspended low resolution timer.
+ *
+ * @returns iprt status code.
+ * @retval  VERR_NOT_SUPPORTED if an unsupported flag was specfied.
+ *
+ * @param   phTimerLR           Where to store the timer handle.
+ * @param   u64NanoInterval     The interval between timer ticks specified in nanoseconds if it's
+ *                              a recurring timer, the minimum for is 100000000 ns.
+ *                              For one shot timers, pass 0.
+ * @param   fFlags              Timer flags. Same as RTTimerCreateEx.
+ * @param   pfnTimer            Callback function which shall be scheduled for execution
+ *                              on every timer tick.
+ * @param   pvUser              User argument for the callback.
+ * @see     RTTimerLRStart, RTTimerLRStop, RTTimerLRDestroy
+ */
+RTDECL(int) RTTimerLRCreateEx(PRTTIMERLR phTimerLR, uint64_t u64NanoInterval, uint32_t fFlags, PFNRTTIMERLR pfnTimer, void *pvUser);
+
+/**
+ * Stops and destroys a running low resolution timer.
+ *
+ * @returns iprt status code.
+ * @param   hTimerLR            The low resolution timer to stop and destroy.
+ *                              NIL_RTTIMERLR is accepted.
+ */
+RTDECL(int) RTTimerLRDestroy(RTTIMERLR hTimerLR);
+
+/**
+ * Starts a low resolution timer.
+ *
+ * @returns IPRT status code.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
+ * @retval  VERR_TIMER_ACTIVE if the timer isn't suspended.
+ *
+ * @param   hTimerLR            The low resolution timer to activate.
+ * @param   u64First            The RTTimeSystemNanoTS() for when the timer should start
+ *                              firing (relative), the minimum is 100000000 ns.
+ *                              If 0 is specified, the timer will fire ASAP.
+ *
+ * @see     RTTimerLRStop
+ */
+RTDECL(int) RTTimerLRStart(RTTIMERLR hTimerLR, uint64_t u64First);
+
+/**
+ * Stops an active low resolution timer.
+ *
+ * @returns IPRT status code.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
+ * @retval  VERR_TIMER_SUSPENDED if the timer isn't active.
+ * @retval  VERR_NOT_SUPPORTED if the IPRT implementation doesn't support stopping a timer.
+ *
+ * @param   hTimerLR            The low resolution timer to suspend.
+ *
+ * @see     RTTimerLRStart
+ */
+RTDECL(int) RTTimerLRStop(RTTIMERLR hTimerLR);
+
+/**
+ * Changes the interval of a low resolution timer.
+ *
+ * If the timer is active, the next tick will occure immediately just like with
+ * RTTimerLRStart() when u64First parameter is zero.
+ *
+ * @returns IPRT status code.
+ * @retval  VERR_INVALID_HANDLE if pTimer isn't valid.
+ * @retval  VERR_NOT_SUPPORTED if not supported.
+ *
+ * @param   hTimerLR            The low resolution timer to update.
+ * @param   u64NanoInterval     The interval between timer ticks specified in
+ *                              nanoseconds.  This is rounded to the fit the
+ *                              system timer granularity.
+ * @remarks Callable from the timer callback.
+ */
+RTDECL(int) RTTimerLRChangeInterval(RTTIMERLR hTimerLR, uint64_t u64NanoInterval);
+
 /** @} */
 
-__END_DECLS
+RT_C_DECLS_END
 
-#endif
+#endif /* !IPRT_INCLUDED_timer_h */

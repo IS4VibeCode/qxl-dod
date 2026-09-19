@@ -111,7 +111,7 @@ nsInterfaceHashtable<KeyClass,Interface>::Get
   (KeyType aKey, UserDataType* pInterface) const
 {
   typename nsBaseHashtable<KeyClass, nsCOMPtr<Interface>, Interface*>::EntryType* ent =
-    GetEntry(aKey);
+    this->GetEntry(aKey);
 
   if (ent)
   {
@@ -139,7 +139,7 @@ nsInterfaceHashtable<KeyClass,Interface>::GetWeak
   (KeyType aKey, PRBool* aFound) const
 {
   typename nsBaseHashtable<KeyClass, nsCOMPtr<Interface>, Interface*>::EntryType* ent =
-    GetEntry(aKey);
+    this->GetEntry(aKey);
 
   if (ent)
   {
@@ -164,10 +164,10 @@ PRBool
 nsInterfaceHashtableMT<KeyClass,Interface>::Get
   (KeyType aKey, UserDataType* pInterface) const
 {
-  PR_Lock(this->mLock);
+  RTSemFastMutexRequest(this->mLock);
 
   typename nsBaseHashtableMT<KeyClass, nsCOMPtr<Interface>, Interface*>::EntryType* ent =
-    GetEntry(aKey);
+    this->GetEntry(aKey);
 
   if (ent)
   {
@@ -178,7 +178,7 @@ nsInterfaceHashtableMT<KeyClass,Interface>::Get
       NS_IF_ADDREF(*pInterface);
     }
 
-    PR_Unlock(this->mLock);
+    RTSemFastMutexRelease(this->mLock);
 
     return PR_TRUE;
   }
@@ -188,7 +188,7 @@ nsInterfaceHashtableMT<KeyClass,Interface>::Get
   if (pInterface)
     *pInterface = nsnull;
 
-  PR_Unlock(this->mLock);
+  RTSemFastMutexRelease(this->mLock);
 
   return PR_FALSE;
 }

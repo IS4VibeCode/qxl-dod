@@ -1,30 +1,43 @@
+/* $Id: KeyboardImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_KEYBOARDIMPL
-#define ____H_KEYBOARDIMPL
+#ifndef MAIN_INCLUDED_KeyboardImpl_h
+#define MAIN_INCLUDED_KeyboardImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
-#include "ConsoleEvents.h"
-#include <VBox/pdm.h>
+#include "KeyboardWrap.h"
+#include "EventImpl.h"
+
+#include <VBox/vmm/pdmdrv.h>
+
+/** Limit of simultaneously attached devices (just USB and/or PS/2). */
+enum { KEYBOARD_MAX_DEVICES = 2 };
 
 /** Simple keyboard event class. */
 class KeyboardEvent
@@ -32,73 +45,66 @@ class KeyboardEvent
 public:
     KeyboardEvent() : scan(-1) {}
     KeyboardEvent(int _scan) : scan(_scan) {}
-    bool isValid()
+    bool i_isValid()
     {
         return (scan & ~0x80) && !(scan & ~0xFF);
     }
     int scan;
 };
-// template instantiation
-typedef ConsoleEventBuffer<KeyboardEvent> KeyboardEventBuffer;
-
 class Console;
 
 class ATL_NO_VTABLE Keyboard :
-    public VirtualBoxSupportErrorInfoImpl <Keyboard, IKeyboard>,
-    public VirtualBoxSupportTranslation <Keyboard>,
-    public VirtualBoxBase,
-    public IKeyboard
+    public KeyboardWrap
 {
-
 public:
 
-    DECLARE_NOT_AGGREGATABLE(Keyboard)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(Keyboard)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IKeyboard)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS(Keyboard)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
-    // public methods only for internal purposes
-    HRESULT init (Console *parent);
+    // public initializer/uninitializer for internal purposes only
+    HRESULT init(Console *aParent);
     void uninit();
-
-    STDMETHOD(PutScancode)(LONG scancode);
-    STDMETHOD(PutScancodes)(LONG *scancodes,
-                            ULONG count,
-                            ULONG *codesStored);
-    STDMETHOD(PutCAD)();
-
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"Keyboard"; }
 
     static const PDMDRVREG  DrvReg;
 
-    Console *getParent()
+    Console *i_getParent() const
     {
         return mParent;
     }
 
 private:
 
-    static DECLCALLBACK(void *) drvQueryInterface(PPDMIBASE pInterface, PDMINTERFACE enmInterface);
-    static DECLCALLBACK(int)    drvConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfgHandle);
-    static DECLCALLBACK(void)   drvDestruct(PPDMDRVINS pDrvIns);
+    // Wrapped Keyboard properties
+    HRESULT getEventSource(ComPtr<IEventSource> &aEventSource);
+    HRESULT getKeyboardLEDs(std::vector<KeyboardLED_T> &aKeyboardLEDs);
 
-    ComObjPtr <Console, ComWeakRef> mParent;
-    /** Pointer to the associated keyboard driver. */
-    struct DRVMAINKEYBOARD *mpDrv;
-    /** Pointer to the device instance for the VMM Device. */
-    PPDMDEVINS              mpVMMDev;
-    /** Set after the first attempt to find the VMM Device. */
-    bool                    mfVMMDevInited;
+    // Wrapped Keyboard members
+    HRESULT putScancode(LONG aScancode);
+    HRESULT putScancodes(const std::vector<LONG> &aScancodes,
+                         ULONG *aCodesStored);
+    HRESULT putCAD();
+    HRESULT releaseKeys();
+    HRESULT putUsageCode(LONG aUsageCode, LONG aUsagePage, BOOL fKeyRelease);
+
+    static DECLCALLBACK(void)   i_keyboardLedStatusChange(PPDMIKEYBOARDCONNECTOR pInterface, PDMKEYBLEDS enmLeds);
+    static DECLCALLBACK(void)   i_keyboardSetActive(PPDMIKEYBOARDCONNECTOR pInterface, bool fActive);
+    static DECLCALLBACK(void *) i_drvQueryInterface(PPDMIBASE pInterface, const char *pszIID);
+    static DECLCALLBACK(int)    i_drvConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, uint32_t fFlags);
+    static DECLCALLBACK(void)   i_drvDestruct(PPDMDRVINS pDrvIns);
+
+    void onKeyboardLedsChange(PDMKEYBLEDS enmLeds);
+
+    Console * const         mParent;
+    /** Pointer to the associated keyboard driver(s). */
+    struct DRVMAINKEYBOARD *mpDrv[KEYBOARD_MAX_DEVICES];
+
+    /* The current guest keyboard LED status. */
+    PDMKEYBLEDS menmLeds;
+
+    const ComObjPtr<EventSource> mEventSource;
 };
 
-#endif // ____H_KEYBOARDIMPL
+#endif /* !MAIN_INCLUDED_KeyboardImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

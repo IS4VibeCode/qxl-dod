@@ -1,303 +1,206 @@
-#define COMPRESS_NONE  0
-#define COMPRESS_RLE8  1
-#define COMPRESS_RLE4  2
-
-#define BMP_HEADER_OS21  12
-#define BMP_HEADER_OS22  64
-#define BMP_HEADER_WIN3  40
-
-#define F12_SCAN_CODE  0x86
-#define F12_WAIT_TIME  3 * 1000 /* Milliseconds, used only if logo disabled */
-
-typedef struct
-{
-    Bit8u Blue;
-    Bit8u Green;
-    Bit8u Red;
-} RGBPAL;
-
-/* BMP File Format Bitmap Header. */
-typedef struct
-{
-    Bit16u      Type;           /* File Type Identifier       */
-    Bit32u      FileSize;       /* Size of File               */
-    Bit16u      Reserved1;      /* Reserved (should be 0)     */
-    Bit16u      Reserved2;      /* Reserved (should be 0)     */
-    Bit32u      Offset;         /* Offset to bitmap data      */
-} BMPINFO;
-
-/* OS/2 1.x Information Header Format. */
-typedef struct
-{
-    Bit32u      Size;           /* Size of Remianing Header   */
-    Bit16u      Width;          /* Width of Bitmap in Pixels  */
-    Bit16u      Height;         /* Height of Bitmap in Pixels */
-    Bit16u      Planes;         /* Number of Planes           */
-    Bit16u      BitCount;       /* Color Bits Per Pixel       */
-} OS2HDR;
-
-/* OS/2 2.0 Information Header Format. */
-typedef struct
-{  
-    Bit32u      Size;           /* Size of Remianing Header   */
-    Bit32u      Width;          /* Width of Bitmap in Pixels        */
-    Bit32u      Height;         /* Height of Bitmap in Pixels       */
-    Bit16u      Planes;         /* Number of Planes                 */
-    Bit16u      BitCount;       /* Color Bits Per Pixel             */
-    Bit32u      Compression;    /* Compression Scheme (0=none)      */
-    Bit32u      SizeImage;      /* Size of bitmap in bytes          */
-    Bit32u      XPelsPerMeter;  /* Horz. Resolution in Pixels/Meter */
-    Bit32u      YPelsPerMeter;  /* Vert. Resolution in Pixels/Meter */
-    Bit32u      ClrUsed;        /* Number of Colors in Color Table  */
-    Bit32u      ClrImportant;   /* Number of Important Colors       */
-    Bit16u      Units;          /* Resolution Mesaurement Used      */
-    Bit16u      Reserved;       /* Reserved FIelds (always 0)       */
-    Bit16u      Recording;      /* Orientation of Bitmap            */
-    Bit16u      Rendering;      /* Halftone Algorithm Used on Image */
-    Bit32u      Size1;          /* Halftone Algorithm Data          */
-    Bit32u      Size2;          /* Halftone Algorithm Data          */
-    Bit32u      ColorEncoding;  /* Color Table Format (always 0)    */
-    Bit32u      Identifier;     /* Misc. Field for Application Use  */
-} OS22HDR;
-
-/* Windows 3.x Information Header Format. */
-typedef struct
-{
-    Bit32u      Size;           /* Size of Remianing Header   */
-    Bit32u      Width;          /* Width of Bitmap in Pixels        */
-    Bit32u      Height;         /* Height of Bitmap in Pixels       */
-    Bit16u      Planes;         /* Number of Planes                 */
-    Bit16u      BitCount;       /* Bits Per Pixel                   */
-    Bit32u      Compression;    /* Compression Scheme (0=none)      */
-    Bit32u      SizeImage;      /* Size of bitmap in bytes          */
-    Bit32u      XPelsPerMeter;  /* Horz. Resolution in Pixels/Meter */
-    Bit32u      YPelsPerMeter;  /* Vert. Resolution in Pixels/Meter */
-    Bit32u      ClrUsed;        /* Number of Colors in Color Table  */
-    Bit32u      ClrImportant;   /* Number of Important Colors       */
-} WINHDR;
-
-// Logo settings header
-typedef struct
-{
-    Bit16u Signature;
-    Bit8u  FadeIn;
-    Bit8u  FadeOut;
-    Bit16u LogoTime;
-    Bit8u  ShowBootMenu;
-    Bit32u LogoSize;
-
-} LOGOHDR;
-
-// Width and height of the "Press F12 to select boot device." bitmap. Anything
-// that exceeds the limit of F12BootText below is filled with background.
-#define F12BOOTTEXTWIDTH 284
-#define F12BOOTTEXTHEIGHT 13
-// "Press F12 to select boot device." bitmap.
-Bit8u F12BootText[] = {
-  0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x1F, 0x0C, 0x3E, 0x00, 0x20, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x20, 0x00, 0x70, 0x00, 0x00, 0x00,
-  0x04, 0x00, 0x70, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x60, 0x06, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x98, 0xE1, 0x30, 0x06, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-  0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00, 0x60, 0x00, 0x00, 0x06,
-  0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
-  0x11, 0x0F, 0x60, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00,
-  0x30, 0x00, 0x60, 0x00, 0x00, 0x00, 0x06, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x60, 0x66, 0x87, 0x0F, 0x1F, 0x3E, 0x00, 0x58, 0xC0, 0x00, 0x03,
-  0xC0, 0x0F, 0x1F, 0x00, 0x7C, 0xF8, 0xC0, 0xE0, 0xC3, 0xC7, 0x0F, 0x00, 0x1E,
-  0x7C, 0xF8, 0xF8, 0x01, 0x80, 0x87, 0x8F, 0x61, 0x1C, 0x7C, 0xF8, 0x00, 0x3E,
-  0xDC, 0x8C, 0x19, 0x33, 0x06, 0x80, 0x07, 0x0C, 0x18, 0x00, 0x30, 0x18, 0x03,
-  0x60, 0xCC, 0x18, 0x0C, 0x63, 0xC6, 0x30, 0x00, 0x60, 0x63, 0xCC, 0x18, 0x06,
-  0x00, 0x6C, 0x8C, 0x19, 0x86, 0x61, 0xCC, 0x18, 0x60, 0xC0, 0xCC, 0x1F, 0x03,
-  0x06, 0x00, 0x58, 0xC0, 0xC0, 0x00, 0x00, 0x83, 0x31, 0x00, 0x0C, 0xFC, 0xC1,
-  0xF0, 0x67, 0x00, 0x03, 0x00, 0x66, 0xC6, 0x8C, 0x61, 0x00, 0x60, 0xC6, 0x9F,
-  0x61, 0x18, 0x06, 0xFC, 0x01, 0x06, 0x0C, 0x0C, 0xE0, 0xC0, 0x01, 0x80, 0x01,
-  0x0C, 0x06, 0x00, 0x30, 0x18, 0x03, 0x80, 0xC3, 0x00, 0x0C, 0x03, 0x06, 0x30,
-  0x00, 0x60, 0x66, 0xCC, 0x18, 0x06, 0x00, 0x66, 0x0C, 0x18, 0x86, 0x61, 0xC0,
-  0x00, 0x60, 0xC0, 0xC0, 0x00, 0x18, 0x30, 0x00, 0x18, 0xC0, 0x30, 0x00, 0x00,
-  0x83, 0x31, 0x00, 0x60, 0x0C, 0xC0, 0x30, 0x60, 0x00, 0x03, 0x00, 0x66, 0xC6,
-  0x8C, 0x61, 0x00, 0x60, 0xC6, 0x00, 0x33, 0x18, 0x06, 0x0C, 0x00, 0x06, 0x0C,
-  0x8C, 0x19, 0x33, 0x06, 0x80, 0x01, 0x0C, 0x63, 0x00, 0xB0, 0x19, 0x03, 0x60,
-  0xCC, 0x18, 0x0C, 0x63, 0xC6, 0xB0, 0x01, 0x60, 0x66, 0xCC, 0x18, 0x36, 0x00,
-  0x66, 0x8C, 0xE1, 0x81, 0x61, 0xCC, 0x18, 0xFC, 0xE0, 0x81, 0x0F, 0x1F, 0x3E,
-  0x00, 0x3C, 0xF0, 0xF3, 0x07, 0x00, 0x0E, 0x1F, 0x00, 0x7C, 0xF8, 0xE0, 0xE1,
-  0xC3, 0x07, 0x0E, 0x00, 0x3E, 0x7C, 0xF8, 0xC0, 0x01, 0xC0, 0x8D, 0x0F, 0x0C,
-  0x3C, 0x7C, 0xF8, 0xC0
-};
-
-static unsigned char get_mode();
-static void          set_mode();
-static Bit8u         wait(ms);
-static void          write_pixel();
-
-/**
- * Get current video mode (VGA).
- * @returns    Video mode.
+/* $Id: logo.c 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
+/** @file
+ * Stuff for drawing the BIOS logo.
  */
-unsigned char get_mode()
-  {
-  ASM_START
-    push bp
-    mov  bp, sp
-  
-      push bx
 
-      mov  ax, #0x0F00
-      int  #0x10
+/*
+ * Copyright (C) 2004-2026 Oracle and/or its affiliates.
+ *
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ */
 
-      pop  bx
+#include <stdint.h>
+#include "biosint.h"
+#include "inlines.h"
+#include "ebda.h"
 
-    pop  bp
-  ASM_END
-  }
+#define WAIT_HZ              64
+#define WAIT_MS              16
+
+#define F12_SCAN_CODE        0x86
+#define F12_WAIT_TIME        (3 * WAIT_HZ)   /* 3 seconds. Used only if logo disabled. */
+
+#include <VBox/bioslogo.h>
 
 /**
  * Set video mode (VGA).
- * @params    New video mode.
+ * @param   mode    New video mode.
  */
-void set_mode(mode)
-  Bit8u mode;
-  {
-  ASM_START
-    push bp
-    mov  bp, sp
-  
-      push ax
+void set_mode(uint8_t mode);
+#pragma aux set_mode =      \
+    "mov    ah, 0"          \
+    "int    10h"            \
+    parm [al] modify [ax] nomemory;
 
-      mov  ah, #0
-      mov  al, 4[bp] ; mode
-      int  #0x10
-
-      pop  ax
-  
-    pop  bp
-  ASM_END
-  }
 
 /**
  * Set VESA video mode.
- * @params    New video mode.
+ * @param   mode    New video mode.
  */
-Bit16u vesa_set_mode(mode)
-  Bit16u mode;
-  {
-  ASM_START
-    push bp
-    mov  bp, sp
-  
-      push bx
+uint16_t vesa_set_mode(uint16_t mode);
+#pragma aux vesa_set_mode = \
+    "mov    ax, 4F02h"      \
+    "int    10h"            \
+    parm [bx] modify [ax] nomemory;
 
-      mov  ax, #0x4f02
-      mov  bx, 4[bp] ; mode
-      int  #0x10
+/**
+ * Get current VESA video mode.
+ * @param   mode    New video mode.
+ */
+uint16_t vesa_get_mode(uint16_t __far *mode);
+#pragma aux vesa_get_mode = \
+    "mov    ax, 4F03h"      \
+    "int    10h"            \
+    "mov    es:[di], bx"    \
+    parm [es di] modify [ax bx] nomemory;
 
-      pop  bx
-  
-    pop  bp
-  ASM_END
-}
+
+/**
+ * Set custom video mode.
+ * @param   xres    Requested width
+ * @param   yres    Requested height
+ * @param   bpp     Requested bits per pixel
+ */
+uint16_t custom_set_mode(uint16_t xres, uint16_t yres, uint8_t bpp);
+#pragma aux custom_set_mode = \
+    "mov    ax, 5642h"      \
+    "mov    bl, 0"          \
+    "int    10h"            \
+    parm [cx] [dx] [bh] modify [ax] nomemory;
 
 /**
  * Check for keystroke.
  * @returns    True if keystroke available, False if not.
  */
-Bit8u check_for_keystroke()
-  {
-  ASM_START
-    mov  ax, #0x100
-    int  #0x16
-    jz   no_key
-    mov  al, #1
-    jmp  done
-no_key:
-    xor  al, al
-done:
-  ASM_END
-}
+/// @todo INT 16h should already be returning the right value in al; could also use setz
+uint8_t check_for_keystroke(void);
+#pragma aux check_for_keystroke =   \
+    "mov    ax, 100h"               \
+    "int    16h"                    \
+    "jz     no_key"                 \
+    "mov    al, 1"                  \
+    "jmp    done"                   \
+    "no_key:"                       \
+    "xor    al, al"                 \
+    "done:"                         \
+    modify [ax] nomemory;
+
 
 /**
  * Get keystroke.
  * @returns    BIOS scan code.
  */
-Bit8u get_keystroke()
-  {
-  ASM_START
-    mov  ax, #0x0
-    int  #0x16
-    xchg ah, al
-  ASM_END
-}
+uint8_t get_keystroke(void);
+#pragma aux get_keystroke = \
+    "xor    ax, ax"         \
+    "int    16h"            \
+    "xchg   ah, al"         \
+    modify [ax] nomemory;
 
-void wait_init()
-{
-    // The default is 18.2 ticks per second (~55ms tick interval).
-    // Set the timer to 1ms ticks (65536 / (Hz / 18.2)).
-ASM_START
-    mov al, #0x34 ; timer0: binary count, 16bit count, mode 2
-    out 0x43, al
-    mov al, #0xA9 ; Low byte
-    out 0x40, al
-    mov al, #0x04 ; High byte
-    out 0x40, al
-ASM_END
-}
 
-void wait_uninit()
-{
-ASM_START
-    pushf
-    cli
+/// @todo This whole business with reprogramming the PIT is rather suspect.
+// The BIOS already has waiting facilities in INT 15h (fn 83h, 86h) which
+// should be utilized instead.
 
-    /* Restore the timer to the default 18.2Hz. */
-    mov al, #0x34 ; timer0: binary count, 16bit count, mode 2
-    out 0x43, al
-    xor ax, ax    ; maximum count of 0000H = 18.2Hz
-    out 0x40, al
-    out 0x40, al
+// Set the timer to 16ms ticks (64K / (Hz / (PIT_HZ / 64K)) = count).
+void wait_init(void);
+#pragma aux wait_init = \
+    "mov    al, 34h"    \
+    "out    43h, al"    \
+    "mov    al, 0D3h"   \
+    "out    40h, al"    \
+    "mov    al, 048h"   \
+    "out    40h, al"    \
+    modify [ax] nomemory;
 
-    /* 
-     * Reinitialize the tick and rollover counts since we've
-     * screwed them up by running the timer at 1000HZ for a while. 
-     */
-    pushad
-    push ds
-    mov  ds, ax   ; already 0
-    call timer_tick_post
-    pop  ds
-    popad
+/// @todo using this private interface is not great
+extern void rtc_post(void);
+#pragma aux rtc_post "*";
 
-    popf
-ASM_END
-}
+/* Restore the timer to the default 18.2Hz. Reinitialize the tick
+ * and rollover counts since we've screwed them up by running the
+ * timer at WAIT_HZ for a while.
+ */
+void wait_uninit(void);
+#if VBOX_BIOS_CPU >= 80386
+# pragma aux wait_uninit =   \
+    ".386"                  \
+    "mov    al, 34h"        \
+    "out    43h, al"        \
+    "xor    ax, ax"         \
+    "out    40h, al"        \
+    "out    40h, al"        \
+    "pushad"                \
+    "push   ds"             \
+    "mov    ds, ax"         \
+    "call   rtc_post"       \
+    "pop    ds"             \
+    "popad"                 \
+    modify [ax] nomemory;
+#else
+# pragma aux wait_uninit = \
+    "mov    al, 34h" \
+    "out    43h, al" \
+    "xor    ax, ax" \
+    "out    40h, al" \
+    "out    40h, al" \
+    "push   bp" \
+    "push   ds" \
+    "mov    ds, ax" \
+    "call   rtc_post" \
+    "pop    ds" \
+    "pop    bp" \
+    modify [ax bx cx dx si di];
+#endif
+
 
 /**
- * Waits (sleeps) for the given number of milliseconds.
+ * Waits (sleeps) for the given number of ticks.
  * Checks for keystroke.
  *
  * @returns BIOS scan code if available, 0 if not.
- * @param   ms  Number of milliseconds to sleep.
+ * @param   ticks       Number of ticks to sleep.
+ * @param   stop_on_key Whether to stop immediately upon keypress.
  */
-Bit8u wait(ms)
-  Bit16u ms;
+uint8_t wait(uint16_t ticks, uint8_t stop_on_key)
 {
-    long ticks_to_wait, delta;
-    Bit32u prev_ticks, t;
-    Bit8u scan_code = 0;
+    long        ticks_to_wait, delta;
+    uint16_t    old_flags;
+    uint32_t    prev_ticks, t;
+    uint8_t     scan_code = 0;
 
-    /* 
-     * The 0:046c wraps around at 'midnight' according to a 18.2Hz clock. 
+    /*
+     * We may or may not be called with interrupts disabled. For the duration
+     * of this function, interrupts must be enabled.
+     */
+    old_flags = int_query();
+    int_enable();
+
+    /*
+     * The 0:046c wraps around at 'midnight' according to a 18.2Hz clock.
      * We also have to be careful about interrupt storms.
      */
-ASM_START
-    pushf
-    sti
-ASM_END
-    ticks_to_wait = ms;
+    ticks_to_wait = ticks;
     prev_ticks = read_dword(0x0, 0x46c);
     do
     {
-ASM_START
-        hlt
-ASM_END
+        halt();
         t = read_dword(0x0, 0x46c);
         if (t > prev_ticks)
         {
@@ -312,707 +215,235 @@ ASM_END
         {
             scan_code = get_keystroke();
             bios_printf(BIOS_PRINTF_INFO, "Key pressed: %x\n", scan_code);
+            if (stop_on_key)
+                return scan_code;
         }
     } while (ticks_to_wait > 0);
-ASM_START
-    popf
-ASM_END
+    int_restore(old_flags);
     return scan_code;
 }
 
-void write_pixel(x,y,color)
-  unsigned short x;
-  unsigned short y;
-  unsigned char color;
-  {
-  ASM_START
-    push bp
-    mov  bp, sp
-  
-      push ax
-      push bx
-      push cx
-      push dx
-
-      mov  ah, #0x0C
-      xor  bh, bh
-      mov  al, 8[bp] ; color
-      mov  cx, 4[bp] ; x
-      mov  dx, 6[bp] ; y
-      int #0x10
-
-      pop  dx
-      pop  cx
-      pop  bx
-      pop  ax
-  
-    pop  bp
-  ASM_END
-  }
-
-void read_palette(bmp_seg, pal_seg, bmp_off, size, type)
-  Bit16u bmp_seg;
-  Bit16u pal_seg;
-  Bit16u bmp_off;
-  Bit16u size;
-  Bit16u type;
-  {
-    Bit16u i;
-    RGBPAL *palette;
-
-    palette = 0;
-
-    for (i = 0; i < size; i++)
-    {
-        Bit8u pal;
-
-        pal = read_byte(bmp_seg, bmp_off);
-        write_byte(pal_seg, &palette->Blue, pal);
-        bmp_off++;
-
-        pal = read_byte(bmp_seg, bmp_off);
-        write_byte(pal_seg, &palette->Green, pal);
-        bmp_off++;
-
-        pal = read_byte(bmp_seg, bmp_off);
-        write_byte(pal_seg, &palette->Red, pal);
-        bmp_off++;
-
-        if (type != BMP_HEADER_OS21)
-        {
-            // Skip 4th byte
-            bmp_off++;
-        }
-
-        *palette++;
-    }
-}
-
-void set_dark_palette(palette_size)
-  Bit16u palette_size;
-  {
-    Bit16u i;
-
-    // Set bitmap palette (dark)
-    outb(0x03c8, palette_size);
-
-    for (i = 0; i < palette_size; i++)
-    {
-        outb(0x03c8, i);
-        outb(0x03c9, 0);
-        outb(0x03c9, 0);
-        outb(0x03c9, 0);
-    }
-}
-
-void set_bitmap_palette(palette_seg, palette_size)
-  Bit16u palette_seg;
-  Bit16u palette_size;
-  {
-    RGBPAL *palette;
-    Bit16u i;
-
-    palette = 0;
-
-    outb(0x03c6, palette_size);
-
-    for (i = 0; i < palette_size; i++)
-    {
-        Bit8u b;
-
-        outb(0x03c8, i);
-
-        b = read_byte(palette_seg, &palette->Red);
-        outb(0x03c9, b >> 2);
-        b = read_byte(palette_seg, &palette->Green);
-        outb(0x03c9, b >> 2);
-        b = read_byte(palette_seg, &palette->Blue);
-        outb(0x03c9, b >> 2);
-
-        *palette++;
-    }
-}
-
-/**
- * Fade in and check for keystroke.
- * @returns    BIOS scan code if available, 0 if not.
- */
-Bit8u fade_in(palette_seg, palette_size)
-  Bit16u palette_seg;
-  Bit16u palette_size;
-  {
-    RGBPAL *palette;
-    Bit16u i, j;
-    Bit8u  scode, scan_code = 0;
-
-    // Fade in
-    for (i = 0; i < 0x3F; i++)
-    {
-        outb(0x03c6, palette_size);
-        palette = 0;
-
-        for (j = 0; j < palette_size; j++)
-        {
-            Bit8u r, g, b;
-
-            r = read_byte(palette_seg, &palette->Red) >> 2;
-            g = read_byte(palette_seg, &palette->Green) >> 2;
-            b = read_byte(palette_seg, &palette->Blue) >> 2;
-
-            if (r > 0 && r >= i) r = i;
-            if (g > 0 && g >= i) g = i;
-            if (b > 0 && b >= i) b = i;
-
-            outb(0x03c8, j);
-            outb(0x03c9, r);
-            outb(0x03c9, g);
-            outb(0x03c9, b);
-
-            *palette++;
-        }
-        scode = wait(15);
-        if (scode)
-            scan_code = scode;
-    }
-
-    return scan_code;
-}
-
-/**
- * Fade out and check for keystroke.
- * @returns    BIOS scan code if available, 0 if not.
- */
-Bit8u fade_out(palette_seg, palette_size)
-  Bit16u palette_seg;
-  Bit16u palette_size;
-  {
-    RGBPAL *palette;
-    Bit16u i, j;
-    Bit8u  scode, scan_code = 0;
-
-    // Fade out
-    for (i = 0x3F; i > 0; i--)
-    {
-        outb(0x03c6, palette_size);
-        palette = 0;
-
-        for (j = 0; j < palette_size; j++)
-        {
-            Bit8u r, g, b;
-
-            r = read_byte(palette_seg, &palette->Red) >> 2;
-            g = read_byte(palette_seg, &palette->Green) >> 2;
-            b = read_byte(palette_seg, &palette->Blue) >> 2;
-
-            if (r > 0 && r >= i) r = i;
-            if (g > 0 && g >= i) g = i;
-            if (b > 0 && b >= i) b = i;
-
-            outb(0x03c8, j);
-            outb(0x03c9, r);
-            outb(0x03c9, g);
-            outb(0x03c9, b);
-
-            *palette++;
-        }
-        scode = wait(15);
-        if (scode)
-            scan_code = scode;
-    }
-
-    return scan_code;
-}
-
-void vesa_set_bank(bank)
-  Bit16u bank;
-  {
-  ASM_START
-    push bp
-    mov  bp, sp
-  
-      push bx
-      push dx
-
-      mov  ax, #0x4f05
-      xor  bx, bx
-      mov  dx, 4[bp]    ; bank
-      int  #0x10
-
-      pop  dx
-      pop  bx
-  
-    pop  bp
-  ASM_END
-}
-
-
-#define VID_SEG         0xA000
-#define ROM_SEG         0xD000
-#define TMP_SEG         0x1000
-
-
-void show_logo()
+uint8_t read_logo_byte(uint8_t offset)
 {
-    Bit16u ebda_seg=read_word(0x0040,0x000E);
+    outw(LOGO_IO_PORT, LOGO_CMD_SET_OFFSET | offset);
+    return inb(LOGO_IO_PORT);
+}
 
-    LOGOHDR     *logo_hdr;
-    BMPINFO     *bmp_info;
-    OS2HDR      *os2_head;
-    OS22HDR     *os22_head;
-    WINHDR      *win_head;
-    Bit16u       rom_seg, bmp_seg, pal_seg, logo_hdr_size, tmp, i;
-    Bit32u       hdr_size;
-    Bit8u        vid_mode;
+uint16_t read_logo_word(uint8_t offset)
+{
+    outw(LOGO_IO_PORT, LOGO_CMD_SET_OFFSET | offset);
+    return inw(LOGO_IO_PORT);
+}
 
-    Bit8u       is_fade_in, is_fade_out, is_logo_failed, uBootMenu;
-    Bit16u      logo_time;
+// Hide cursor, clear screen and move cursor to starting position
+void clear_screen(void);
+#pragma aux clear_screen =  \
+    "mov    ax, 100h"       \
+    "mov    cx, 1000h"      \
+    "int    10h"            \
+    "mov    ax, 700h"       \
+    "mov    bh, 7"          \
+    "xor    cx, cx"         \
+    "mov    dx, 184Fh"      \
+    "int    10h"            \
+    "mov    ax, 200h"       \
+    "xor    bx, bx"         \
+    "xor    dx, dx"         \
+    "int    10h"            \
+    modify [ax bx cx dx] nomemory;
 
-    Bit32u      offset;
-    Bit16u      bank = 0;
-    Bit8u       logo_bank = 0;
-    Bit16u      address;
+void print_detected_harddisks(void)
+{
+    uint16_t    ebda_seg=read_word(0x0040,0x000E);
+    uint8_t     hd_count;
+    uint8_t     hd_curr = 0;
+    uint8_t     ide_ctrl_printed = 0;
+    uint8_t     sata_ctrl_printed = 0;
+    uint8_t     scsi_ctrl_printed = 0;
+    uint8_t     device;
 
-    Bit8u       scode, scan_code = 0;
-    Bit8u c;
+    hd_count = read_byte(ebda_seg, (uint16_t)&EbdaData->bdisk.hdcount);
 
-    // Set PIT to 1ms ticks
+    for (hd_curr = 0; hd_curr < hd_count; hd_curr++)
+    {
+        device = read_byte(ebda_seg, (uint16_t)&EbdaData->bdisk.hdidmap[hd_curr]);
+
+#ifdef VBOX_WITH_AHCI
+        if (VBOX_IS_AHCI_DEVICE(device))
+        {
+            if (sata_ctrl_printed == 0)
+            {
+                printf("\n\n  AHCI controller:");
+                sata_ctrl_printed = 1;
+            }
+
+            printf("\n    %d) Hard disk", hd_curr+1);
+
+        }
+        else
+#endif
+#ifdef VBOX_WITH_SCSI
+        if (VBOX_IS_SCSI_DEVICE(device))
+        {
+            if (scsi_ctrl_printed == 0)
+            {
+                printf("\n\n  SCSI controller:");
+                scsi_ctrl_printed = 1;
+            }
+
+            printf("\n    %d) Hard disk", hd_curr+1);
+
+        }
+        else
+#endif
+        {
+
+            if ((device < 4) && (ide_ctrl_printed == 0))
+            {
+                printf("  IDE controller:");
+                ide_ctrl_printed = 1;
+            }
+            else if ((device >= 4) && (sata_ctrl_printed == 0))
+            {
+                printf("\n\nAHCI controller:\n");
+                sata_ctrl_printed = 1;
+            }
+
+            printf("\n    %d) ", hd_curr+1);
+
+            /*
+             * If actual_device is bigger than or equal 4
+             * this is the next controller and
+             * the positions start at the beginning.
+             */
+            if (device >= 4)
+                device -= 4;
+
+            if (device / 2)
+                printf("Secondary ");
+            else
+                printf("Primary ");
+
+            if (device % 2)
+                printf("Slave");
+            else
+                printf("Master");
+        }
+    }
+
+    if (   (ide_ctrl_printed == 0)
+        && (sata_ctrl_printed == 0)
+        && (scsi_ctrl_printed == 0))
+        printf("No hard disks found");
+
+    printf("\n");
+}
+
+uint8_t get_boot_drive(uint8_t scode)
+{
+    uint16_t    ebda_seg=read_word(0x0040,0x000E);
+
+    /* Check that the scan code is in the range of detected hard disks. */
+    uint8_t     hd_count = read_byte(ebda_seg, (uint16_t)&EbdaData->bdisk.hdcount);
+
+    /* The key '1' has scancode 0x02 which represents the first disk */
+    scode -= 2;
+
+    if (scode < hd_count)
+        return scode;
+
+    /* Scancode is higher than number of available devices */
+    return 0xff;
+}
+
+void show_logo(void)
+{
+    uint16_t    ebda_seg = read_word(0x0040,0x000E);
+    uint8_t     f12_pressed = 0;
+    uint8_t     scode;
+    uint16_t    tmp, i;
+
+    LOGOHDR     *logo_hdr = 0;
+    uint8_t     is_fade_in, is_fade_out, uBootMenu;
+    uint16_t    logo_time;
+    uint16_t    old_mode;
+
+
+    // Set PIT to 64hz.
     wait_init();
 
-    is_logo_failed = 0;
-
-    // Switch to ROM bank 0
-    write_byte(ROM_SEG, 0, logo_bank);
-
-    rom_seg = bmp_seg = ROM_SEG;
-    logo_hdr = 0;
-    logo_hdr_size = sizeof(LOGOHDR);
-
     // Get main signature
-    tmp = read_word(rom_seg, &logo_hdr->Signature);
+    tmp = read_logo_word((uint8_t)&logo_hdr->u16Signature);
     if (tmp != 0x66BB)
         goto done;
 
+    // If there is no VBE, just skip this
+    if (vesa_get_mode(&old_mode) != 0x004f )
+        goto done;
+
     // Get options
-    is_fade_in = read_byte(rom_seg, &logo_hdr->FadeIn);
-    is_fade_out = read_byte(rom_seg, &logo_hdr->FadeOut);
-    logo_time = read_word(rom_seg, &logo_hdr->LogoTime);
-    uBootMenu = read_byte(rom_seg, &logo_hdr->ShowBootMenu);
+    is_fade_in  = read_logo_byte((uint8_t)&logo_hdr->fu8FadeIn);
+    is_fade_out = read_logo_byte((uint8_t)&logo_hdr->fu8FadeOut);
+    logo_time   = read_logo_word((uint8_t)&logo_hdr->u16LogoMillies);
+    uBootMenu   = read_logo_byte((uint8_t)&logo_hdr->fu8ShowBootMenu);
 
     // Is Logo disabled?
     if (!is_fade_in && !is_fade_out && !logo_time)
         goto done;
 
-show_bmp:
+    /* Set video mode using private video BIOS interface. */
+    tmp = custom_set_mode(640, 480, 32);
+    /* If custom mode set failed, fall back to VBE. */
+    if (tmp != 0x4F)
+        vesa_set_mode(0x142);
 
-    // Set offset of bitmap header
-    bmp_info = logo_hdr_size;
-    os2_head = os22_head = win_head = logo_hdr_size + sizeof(BMPINFO);
-
-    // Check bitmap ID
-    tmp = read_word(rom_seg, &bmp_info->Type);
-    if (tmp != 0x4D42) // 'BM'
+    if (is_fade_in)
     {
-        goto error;
+        for (i = 0; i <= LOGO_SHOW_STEPS; i++)
+        {
+            outw(LOGO_IO_PORT, LOGO_CMD_SHOW_BMP | i);
+            scode = wait(16 / WAIT_MS, 0);
+            if (scode == F12_SCAN_CODE)
+            {
+                f12_pressed = 1;
+                break;
+            }
+        }
     }
     else
+        outw(LOGO_IO_PORT, LOGO_CMD_SHOW_BMP | LOGO_SHOW_STEPS);
+
+    // Wait (interval in milliseconds)
+    if (!f12_pressed)
     {
-        Bit16u scr_width, scr_height, start_x, start_y, bmp_data, j;
-        Bit16u width, height, compr, clr_used;
-        Bit16u pad_bytes, depth, planes, palette_size, palette_data;
-        Bit16u bidx, didx;
-        signed x, y;
+        scode = wait(logo_time / WAIT_MS, 1);
+        if (scode == F12_SCAN_CODE)
+            f12_pressed = 1;
+    }
 
-        // Check the size of the information header that indicates
-        // the structure type
-        hdr_size = read_dword(bmp_seg, &win_head->Size);
-        if (hdr_size == BMP_HEADER_OS21) // OS2 1.x header
+    // Fade out (only if F12 was not pressed)
+    if (is_fade_out && !f12_pressed)
+    {
+        for (i = LOGO_SHOW_STEPS; i > 0 ; i--)
         {
-            width = read_word(bmp_seg, &os2_head->Width);
-            height = read_word(bmp_seg, &os2_head->Height);
-            planes = read_word(bmp_seg, &os2_head->Planes);
-            depth = read_word(bmp_seg, &os2_head->BitCount);
-            compr = COMPRESS_NONE;
-            clr_used = 0;
-        }
-        else
-        if (hdr_size == BMP_HEADER_OS22) // OS2 2.0 header
-        {
-            width = read_word(bmp_seg, &os22_head->Width);
-            height = read_word(bmp_seg, &os22_head->Height);
-            planes = read_word(bmp_seg, &os22_head->Planes);
-            depth = read_word(bmp_seg, &os22_head->BitCount);
-            compr = read_word(bmp_seg, &os22_head->Compression);
-            clr_used = read_word(bmp_seg, &os22_head->ClrUsed);
-        }
-        else
-        if (hdr_size == BMP_HEADER_WIN3) // Windows 3.x header
-        {
-            width = read_word(bmp_seg, &win_head->Width);
-            height = read_word(bmp_seg, &win_head->Height);
-            planes = read_word(bmp_seg, &win_head->Planes);
-            depth = read_word(bmp_seg, &win_head->BitCount);
-            compr = read_word(bmp_seg, &win_head->Compression);
-            clr_used = read_word(bmp_seg, &win_head->ClrUsed);
-        }
-        else
-            goto error;
-
-        // Test some bitmap fields
-        if (width > 640 || height > 480)
-            goto error;
-
-        if (planes != 1)
-            goto error;
-
-        if (depth < 4 || depth > 8)
-            goto error;
-
-        if (clr_used > 256)
-            goto error;
-
-        // Bitmap processing
-        if (compr != COMPRESS_NONE)
-            goto error;
-
-        // Screen size
-        scr_width = 640;
-        scr_height = 480;
-
-        // Center of screen
-        start_x = (scr_width - width) / 2;
-        start_y = (scr_height - height) / 2;
-
-        // Read palette
-        if (hdr_size == BMP_HEADER_OS21)
-        {
-            palette_size = (Bit16u) (1 << (planes * depth));
-        }
-        else
-        if (hdr_size == BMP_HEADER_WIN3 || hdr_size == BMP_HEADER_OS22)
-        {
-            if (clr_used)
-                palette_size = clr_used;
-            else
-                palette_size = (Bit16u) (1 << (planes * depth));
-        }
-
-        pal_seg = TMP_SEG;
-        palette_data = logo_hdr_size + sizeof(BMPINFO) + hdr_size;
-
-        read_palette(bmp_seg, pal_seg, palette_data, palette_size, hdr_size);
-
-        //  Get current video mode
-        vid_mode = get_mode();
-
-        // Set video mode #0x101 640x480x8bpp
-        vesa_set_mode(0x101);
-
-        // Set dark/bitmap palette
-        if (is_fade_in)
-            set_dark_palette(palette_size);
-        else
-            set_bitmap_palette(pal_seg, palette_size);
-
-        // 0 bank
-        vesa_set_bank(0);
-
-        // Show bitmap
-        tmp = read_word(bmp_seg, &bmp_info->Offset);
-        bmp_data = logo_hdr_size + tmp;
-
-        switch(depth)
-        {
-            case 4:
-                // Compute padding bytes
-                if (((width % 8) == 0) || ((width % 8) > 6))
-                    pad_bytes = 0;
-                else if ((width % 8) <= 2)
-                    pad_bytes = 3;
-                else if ((width % 8) <= 4)
-                    pad_bytes = 2;
-                else
-                    pad_bytes = 1;
-
-                 // For 4 bits per pixel, each byte is two pixels.
-                 // The upper half go to the first pixel,
-                 // and the lower half to the second.
-                for (y = height; y > 0; y--)
-                {
-                    Bit8u z;
-
-                    for (x = 0; x < width; x += 2)
-                    {
-                        Bit8u c;
-
-                        c = read_byte(bmp_seg, bmp_data++);
-
-                        if (bmp_data == 0xffff)
-                        {
-                            bmp_data = 0;
-                            write_byte(ROM_SEG, 0, ++logo_bank);
-                        }
-
-                        for (z = 0; z < 2; z++)
-                        {
-                            Bit8u color;
-                            Bit16u new_bank;
-
-                            offset = (((Bit32u)start_y + (Bit32u)y) * (Bit32u)scr_width) + ((Bit32u)start_x + (Bit32u)x + (Bit32u)z);
-                            new_bank = (offset >> 16);
-                            address = (Bit16u)(offset & 0xffffL);
-
-                            if (bank != new_bank)
-                            {
-                                bank = new_bank;
-                                vesa_set_bank(bank);
-                            }
-
-                            if (z & 1)
-                                color = c & 0xF;
-                            else
-                                color = (c >> 4) & 0xF;
-
-                            write_byte(VID_SEG, address, color);
-                        }
-                    }
-
-                    for (z = 0; z < pad_bytes; z++)
-                    {
-                        if (++bmp_data == 0xffff)
-                        {
-                            bmp_data = 0;
-                            write_byte(ROM_SEG, 0, ++logo_bank);
-                        }
-                    }
-                }
-            break;
-
-            case 8:
-                // Compute padding bytes
-                pad_bytes = ((width % 4) == 0) ? 0 : (4 - (width % 4));
-
-                 // For 8 bits per pixel, each byte is one pixel.
-                for (y = height; y > 0; y--)
-                {
-                    Bit8u z;
-
-                    for (x = 0; x < width; x++)
-                    {
-                        Bit8u c, z;
-                        Bit16u new_bank;
-
-                        c = read_byte(bmp_seg, bmp_data++);
-
-                        if (bmp_data == 0xffff)
-                        {
-                            bmp_data = 0;
-                            write_byte(ROM_SEG, 0, ++logo_bank);
-                        }
-
-                        offset = (((Bit32u)start_y + (Bit32u)y) * (Bit32u)scr_width) + ((Bit32u)start_x + (Bit32u)x);
-                        new_bank = (offset >> 16);
-                        address = (Bit16u)(offset & 0xffffL);
-
-                        if (bank != new_bank)
-                        {
-                            bank = new_bank;
-                            vesa_set_bank(bank);
-                        }
-
-                        write_byte(VID_SEG, address, c);
-                    }
-
-                    for (z = 0; z < pad_bytes; z++)
-                    {
-                        if (++bmp_data == 0xffff)
-                        {
-                            bmp_data = 0;
-                            write_byte(ROM_SEG, 0, ++logo_bank);
-                        }
-                    }
-                }
-            break;
-
-#if 0 // 24bpp bitmaps are unsupported
-            case 24:
-                // Compute padding bytes
-                pad_bytes = width % 4;
-
-                // For 24 bits per pixel it's RGB structure.
-                for (y = height; y > 0; y--)
-                {
-                    Bit8u z;
-                    for (x = 0; x < width; x++)
-                    {
-                        for (z = 0; z < 3; z++)
-                        {
-                            Bit8u color;
-                            Bit16u new_bank;
-
-                            color = read_byte(bmp_seg, bmp_data++);
-
-                            if (bmp_data == 0xffff)
-                            {
-                                bmp_data = 0;
-                                write_byte(ROM_SEG, 0, ++logo_bank);
-                            }
-
-                            offset = (((Bit32u)start_y + (Bit32u)y) * (Bit32u)scr_width*3) + (((Bit32u)start_x + (Bit32u)x) * (Bit32u)3 + z);
-                            new_bank = (offset >> 16);
-                            address = (Bit16u)(offset & 0xffffL);
-
-                            if (bank != new_bank)
-                            {
-                                bank = new_bank;
-                                vesa_set_bank(bank);
-                            }
-
-                            write_byte(VID_SEG, address, color);
-                        }
-                    }
-
-                    for (z = 0; z < pad_bytes; z++)
-                    {
-                        if (++bmp_data == 0xffff)
-                        {
-                            bmp_data = 0;
-                            write_byte(ROM_SEG, 0, ++logo_bank);
-                        }
-                    }
-                }
-            break;
-#endif
-        }
-
-        // If Setup menu enabled
-        if (uBootMenu == 2 && (is_fade_in || is_fade_out || logo_time))
-        {
-            RGBPAL *palette = 0;
-            Bit16u blum, dlum;
-
-            // Get the brightest and the darkest palette indexes
-            bidx = didx = blum = 0;
-            dlum = 3 * 0xff;
-
-            for (i = 0; i < palette_size; i++)
+            outw(LOGO_IO_PORT, LOGO_CMD_SHOW_BMP | i);
+            scode = wait(16 / WAIT_MS, 0);
+            if (scode == F12_SCAN_CODE)
             {
-                Bit8u r, g, b;
-                Bit16u lum;
-
-                r = read_byte(pal_seg, &palette->Red) >> 2;
-                g = read_byte(pal_seg, &palette->Green) >> 2;
-                b = read_byte(pal_seg, &palette->Blue) >> 2;
-                lum = (Bit16u)r + (Bit16u)g + (Bit16u)b;
-
-                if (lum > blum) { blum = lum; bidx = i; }
-
-                if (lum < dlum) { dlum = lum; didx = i; }
-
-                *palette++;
-            }
-
-            // 0 bank
-            vesa_set_bank(0);
-
-            // Top-left corner of screen
-            start_x = 340;
-            start_y = 450;
-
-            // Image size
-            width = (start_x + F12BOOTTEXTWIDTH <= scr_width) ? F12BOOTTEXTWIDTH : scr_width - start_x;
-            height = (start_y + F12BOOTTEXTHEIGHT <= scr_height) ? F12BOOTTEXTHEIGHT : scr_height - start_y;
-            bmp_data = j = 0;
-
-            for (y = 0; y < height; y++)
-            {
-                for (x = 0; x < width; x++)
-                {
-                    Bit16u new_bank;
-                    Bit8u pix_idx;
-
-                    if (!j)
-                    {
-                        if (bmp_data < sizeof(F12BootText))
-                            c = read_byte(0xf000, F12BootText + bmp_data++);
-                        else
-                            c = 0;
-                    }
-
-                    offset = (((Bit32u)start_y + (Bit32u)y) * (Bit32u)scr_width) + ((Bit32u)start_x + (Bit32u)x);
-                    new_bank = (offset >> 16);
-                    address = (Bit16u)(offset & 0xffffL);
-
-                    if (bank != new_bank)
-                    {
-                        bank = new_bank;
-                        vesa_set_bank(bank);
-                    }
-
-                    pix_idx = c & 1;
-                    c >>= 1;
-
-                    if (pix_idx)
-                        pix_idx = bidx;
-                    else
-                        pix_idx = didx;
-
-                    write_byte(VID_SEG, address, pix_idx);
-
-                    if (j++ >= 7) j = 0;
-                }
+                f12_pressed = 1;
+                break;
             }
         }
-
-        // Fade in
-        if (is_fade_in)
-        {
-            scode = fade_in(pal_seg, palette_size);
-            if (scode)
-                scan_code = scode;
-        }
-
-        // Wait (interval in milliseconds)
-        scode = wait(logo_time);
-        if (scode)
-            scan_code = scode;
-
-        // Fade out
-        if (is_fade_out)
-        {
-            scode = fade_out(pal_seg, palette_size);
-            if (scode)
-                scan_code = scode;
-        }
     }
+    else if (!f12_pressed)
+        outw(LOGO_IO_PORT, LOGO_CMD_SHOW_BMP | 0);
 
-    // Clear video memory
-#if 0 // Really need to clear VESA memory?
-    for (i = 0; i < 0x9600; i += 2)
-    {
-	write_word(VID_SEG, i, 0);
-    }
-#endif
-    goto done;
-
-error:
-    if (!is_logo_failed)
-    {
-        is_logo_failed = 1;
-
-        logo_hdr_size = 0;
-
-        // Switch to ROM bank 255 (default logo)
-        write_byte(ROM_SEG, 0, 255);
-
-        goto show_bmp;
-    }
 done:
-
     // Clear forced boot drive setting.
-    write_byte(ebda_seg,&EbdaData->uForceBootDrive, 0);
+    write_byte(ebda_seg, (uint16_t)&EbdaData->uForceBootDevice, 0);
 
     // Don't restore previous video mode
-    // The default text mode should be set up. (defect #1235)
+    // The default text mode should be set up. (defect @bugref{1235})
     set_mode(0x0003);
 
     // If Setup menu enabled
@@ -1021,70 +452,87 @@ done:
         // If the graphics logo disabled
         if (!is_fade_in && !is_fade_out && !logo_time)
         {
-            int i;
-
             if (uBootMenu == 2)
-                printf("Press F12 to select boot device.");
+                printf("Press F12 to select boot device.\n");
 
-            // Wait for timeout or keystroke
-            for (i = 0; i < F12_WAIT_TIME; i++)
+            // if the user has pressed F12 don't wait here
+            if (!f12_pressed)
             {
-                scan_code = wait(1);
-                if (scan_code)
-                    break;
+                // Wait for timeout or keystroke
+                scode = wait(F12_WAIT_TIME, 1);
+                if (scode == F12_SCAN_CODE)
+                    f12_pressed = 1;
             }
         }
 
         // If F12 pressed, show boot menu
-        if (scan_code == F12_SCAN_CODE)
+        if (f12_pressed)
         {
-            // Hide cursor, clear screen and move cursor to starting position
-            ASM_START
-                push bx
-                push cx
-                push dx
+            uint8_t boot_device = 0;
+            uint8_t boot_drive = 0;
 
-                mov  ax, #0x100
-                mov  cx, #0x1000
-                int  #0x10
+            clear_screen();
 
-                mov  ax, #0x700
-                mov  bh, #7
-                xor  cx, cx
-                mov  dx, #0x184f
-                int  #0x10
+            // Show menu. Note that some versions of bcc freak out if we split these strings.
+            printf("\nVirtualBox temporary boot device selection\n\nDetected Hard disks:\n\n");
+            print_detected_harddisks();
+            printf("\nOther boot devices:\n f) Floppy\n c) CD-ROM\n l) LAN\n\n b) Continue booting\n");
 
-                mov  ax, #0x200
-                xor  bx, bx
-                xor  dx, dx
-                int  #0x10
 
-                pop  dx
-                pop  cx
-                pop  bx
-            ASM_END
-
-            // Show menu
-            printf("\n");
-            printf(" 1) Floppy\n");
-            printf(" 2) Hard Disk\n");
-            printf(" 3) CD-ROM\n");
-            printf(" 4) LAN\n\n");
-            printf(" 0) Continue booting\n");
 
             // Wait for keystroke
             for (;;)
             {
-                scan_code = wait(1);
-                if (scan_code)
+                do
+                {
+                    scode = wait(WAIT_HZ, 1);
+                } while (scode == 0);
+
+                if (scode == 0x30)
+                {
+                    // 'b' ... continue
+                    break;
+                }
+
+                // Check if hard disk was selected
+                if ((scode >= 0x02) && (scode <= 0x09))
+                {
+                    boot_drive = get_boot_drive(scode);
+
+                    /*
+                     * 0xff indicates that there is no mapping
+                     * from the scan code to a hard drive.
+                     * Wait for next keystroke.
+                     */
+                    if (boot_drive == 0xff)
+                        continue;
+
+                    write_byte(ebda_seg, (uint16_t)&EbdaData->uForceBootDrive, boot_drive);
+                    boot_device = 0x02;
+                    break;
+                }
+
+                switch (scode)
+                {
+                    case 0x21:
+                        // Floppy
+                        boot_device = 0x01;
+                        break;
+                    case 0x2e:
+                        // CD-ROM
+                        boot_device = 0x03;
+                        break;
+                    case 0x26:
+                        // LAN
+                        boot_device = 0x04;
+                        break;
+                }
+
+                if (boot_device != 0)
                     break;
             }
 
-            // Change first boot device code to selected one
-            if (scan_code > 0x02 && scan_code <= 0x05)
-            {
-                write_byte(ebda_seg,&EbdaData->uForceBootDrive, scan_code-1);
-            }
+            write_byte(ebda_seg, (uint16_t)&EbdaData->uForceBootDevice, boot_device);
 
             // Switch to text mode. Clears screen and enables cursor again.
             set_mode(0x0003);
@@ -1095,4 +543,26 @@ done:
     wait_uninit();
 
     return;
+}
+
+
+void delay_boot(uint16_t secs)
+{
+    uint16_t    i;
+
+    if (!secs)
+        return;
+
+    // Set PIT to 1ms ticks
+    wait_init();
+
+    printf("Delaying boot for %d seconds:", secs);
+    for (i = secs; i > 0; i--)
+    {
+        printf(" %d", i);
+        wait(WAIT_HZ, 0);
+    }
+    printf("\n");
+    // Restore PIT ticks
+    wait_uninit();
 }

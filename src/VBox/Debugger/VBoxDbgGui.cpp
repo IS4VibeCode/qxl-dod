@@ -1,53 +1,78 @@
+/* $Id: VBoxDbgGui.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * VBox Debugger GUI - The Manager.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
+#define LOG_GROUP LOG_GROUP_DBGG
 #define VBOX_COM_NO_ATL
 #include <VBox/com/defs.h>
-#include <VBox/vm.h>
-#include <VBox/err.h>
+#include <iprt/errcore.h>
 
 #include "VBoxDbgGui.h"
-#include <qdesktopwidget.h>
-#include <qapplication.h>
+#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
+# include <QScreen>
+#else
+# include <QDesktopWidget>
+#endif
+#include <QApplication>
+
 
 
 VBoxDbgGui::VBoxDbgGui() :
     m_pDbgStats(NULL), m_pDbgConsole(NULL), m_pSession(NULL), m_pConsole(NULL),
-    m_pMachineDebugger(NULL), m_pMachine(NULL), m_pVM(NULL), m_x(0), m_y(0), m_cx(0), m_cy(0),
-    m_xDesktop(0), m_yDesktop(0), m_cxDesktop(0), m_cyDesktop(0)
+    m_pMachineDebugger(NULL), m_pMachine(NULL), m_pVM(NULL), m_pUVM(NULL), m_pVMM(NULL),
+    m_pParent(NULL), m_pMenu(NULL),
+    m_x(0), m_y(0), m_cx(0), m_cy(0), m_xDesktop(0), m_yDesktop(0), m_cxDesktop(0), m_cyDesktop(0)
 {
 
 }
 
 
-int VBoxDbgGui::init(ISession *pSession)
+int VBoxDbgGui::init(PUVM pUVM, PCVMMR3VTABLE pVMM)
 {
     /*
-     * Update the desktop size first.
+     * Set the VM handle and update the desktop size.
      */
+    m_pUVM = pUVM; /* Note! This eats the incoming reference to the handle! */
+    m_pVMM = pVMM;
     updateDesktopSize();
 
+    return VINF_SUCCESS;
+}
+
+
+int VBoxDbgGui::init(ISession *pSession)
+{
+    int rc = VERR_GENERAL_FAILURE;
+
     /*
-     * Query the Virtual Box interfaces.
+     * Query the VirtualBox interfaces.
      */
     m_pSession = pSession;
     m_pSession->AddRef();
@@ -64,29 +89,38 @@ int VBoxDbgGui::init(ISession *pSession)
                 /*
                  * Get the VM handle.
                  */
-                ULONG64 ullVM;
-                hrc = m_pMachineDebugger->COMGETTER(VM)(&ullVM);
+                LONG64 llUVM = 0;
+                LONG64 llVMMFunctionTable = 0;
+                hrc = m_pMachineDebugger->GetUVMAndVMMFunctionTable((int64_t)VMMR3VTABLE_MAGIC_VERSION,
+                                                                    &llVMMFunctionTable, &llUVM);
                 if (SUCCEEDED(hrc))
                 {
-                    m_pVM = (PVM)(uintptr_t)ullVM;
-                    return VINF_SUCCESS;
+                    PUVM          pUVM = (PUVM)(intptr_t)llUVM;
+                    PCVMMR3VTABLE pVMM = (PCVMMR3VTABLE)(intptr_t)llVMMFunctionTable;
+                    rc = init(pUVM, pVMM);
+                    if (RT_SUCCESS(rc))
+                        return rc;
+
+                    pVMM->pfnVMR3ReleaseUVM(pUVM);
                 }
 
                 /* damn, failure! */
                 m_pMachineDebugger->Release();
+                m_pMachineDebugger = NULL;
             }
             m_pConsole->Release();
+            m_pConsole = NULL;
         }
         m_pMachine->Release();
+        m_pMachine = NULL;
     }
 
-    return VERR_GENERAL_FAILURE;
+    return rc;
 }
 
 
 VBoxDbgGui::~VBoxDbgGui()
 {
-
     if (m_pDbgStats)
     {
         delete m_pDbgStats;
@@ -123,67 +157,78 @@ VBoxDbgGui::~VBoxDbgGui()
         m_pSession = NULL;
     }
 
-    m_pVM = NULL;
+    if (m_pUVM)
+    {
+        Assert(m_pVMM);
+        m_pVMM->pfnVMR3ReleaseUVM(m_pUVM);
+        m_pUVM = NULL;
+        m_pVMM = NULL;
+    }
+}
+
+void
+VBoxDbgGui::setParent(QWidget *pParent)
+{
+    m_pParent = pParent;
 }
 
 
-int VBoxDbgGui::showStatistics()
+void
+VBoxDbgGui::setMenu(QMenu *pMenu)
+{
+    m_pMenu = pMenu;
+}
+
+
+int
+VBoxDbgGui::showStatistics(const char *pszFilter, const char *pszExpand, const char *pszConfig)
 {
     if (!m_pDbgStats)
     {
-        m_pDbgStats = new VBoxDbgStats(m_pVM);
+        m_pDbgStats = new VBoxDbgStats(this,
+                                       pszFilter && *pszFilter ? pszFilter :  "*",
+                                       pszExpand && *pszExpand ? pszExpand : NULL,
+                                       pszConfig && *pszConfig ? pszConfig : NULL,
+                                       2, m_pParent);
         connect(m_pDbgStats, SIGNAL(destroyed(QObject *)), this, SLOT(notifyChildDestroyed(QObject *)));
-        repositionStatistics();
+        repositionWindowInitial(m_pDbgStats, "DbgStats", VBoxDbgBaseWindow::kAttractionVmRight);
     }
-    m_pDbgStats->show();
+
+    m_pDbgStats->vShow();
     return VINF_SUCCESS;
 }
 
-void VBoxDbgGui::repositionStatistics(bool fResize/* = true*/)
-{
-    if (m_pDbgStats)
-    {
-        /* Move it to the right side of the VBox console. */
-        m_pDbgStats->move(m_x + m_cx, m_y);
-        if (fResize)
-            /* Resize it to cover all the space to the left side of the desktop. */
-            resizeWidget(m_pDbgStats, m_cxDesktop - m_cx - m_x + m_xDesktop, m_cyDesktop - m_y + m_yDesktop);
-    }
-}
 
-
-int VBoxDbgGui::showConsole()
+int
+VBoxDbgGui::showConsole()
 {
     if (!m_pDbgConsole)
     {
-        m_pDbgConsole = new VBoxDbgConsole(m_pVM);
+        IVirtualBox *pVirtualBox = NULL;
+        m_pMachine->COMGETTER(Parent)(&pVirtualBox);
+        m_pDbgConsole = new VBoxDbgConsole(this, m_pParent, pVirtualBox);
         connect(m_pDbgConsole, SIGNAL(destroyed(QObject *)), this, SLOT(notifyChildDestroyed(QObject *)));
-        repositionConsole();
+        repositionWindowInitial(m_pDbgConsole, "DbgConsole", VBoxDbgBaseWindow::kAttractionVmBottom);
     }
-    m_pDbgConsole->show();
+
+    m_pDbgConsole->vShow();
     return VINF_SUCCESS;
 }
 
 
-void VBoxDbgGui::repositionConsole(bool fResize/* = true*/)
-{
-    if (m_pDbgConsole)
-    {
-        /* Move it to the bottom of the VBox console. */
-        m_pDbgConsole->move(m_x, m_y + m_cy);
-        if (fResize)
-            /* Resize it to cover the space down to the bottom of the desktop. */
-            resizeWidget(m_pDbgConsole, m_cx, m_cyDesktop - m_cy - m_y + m_yDesktop);
-    }
-}
-
-
-void VBoxDbgGui::updateDesktopSize()
+void
+VBoxDbgGui::updateDesktopSize()
 {
     QRect Rct(0, 0, 1600, 1200);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
+    QScreen *pScreen = QApplication::screenAt(QPoint(m_x, m_y));
+    if (pScreen)
+        Rct = pScreen->availableGeometry();
+#else
     QDesktopWidget *pDesktop = QApplication::desktop();
     if (pDesktop)
         Rct = pDesktop->availableGeometry(QPoint(m_x, m_y));
+#endif
     m_xDesktop = Rct.x();
     m_yDesktop = Rct.y();
     m_cxDesktop = Rct.width();
@@ -191,8 +236,76 @@ void VBoxDbgGui::updateDesktopSize()
 }
 
 
-void VBoxDbgGui::adjustRelativePos(int x, int y, unsigned cx, unsigned cy)
+void
+VBoxDbgGui::repositionWindow(VBoxDbgBaseWindow *a_pWindow, bool a_fResize /*=true*/)
 {
+    if (a_pWindow)
+    {
+        VBoxDbgBaseWindow::VBoxDbgAttractionType const enmAttraction = a_pWindow->vGetWindowAttraction();
+        QSize const     BorderSize = a_pWindow->vGetBorderSize();
+        unsigned const  cxMinHint  = RT_MAX(32, a_pWindow->vGetMinWidthHint()) + BorderSize.width();
+        int             x,  y;
+        unsigned        cx, cy;
+        /** @todo take the x,y screen into account rather than the one of the VM
+         *        window. also generally consider adjacent screens. */
+        switch (enmAttraction)
+        {
+            case VBoxDbgBaseWindow::kAttractionVmRight:
+                x  = m_x + m_cx;
+                y  = m_y;
+                cx = m_cxDesktop - m_cx - m_x + m_xDesktop;
+                if (cx > m_cxDesktop || cx < cxMinHint)
+                    cx = cxMinHint;
+                cy = m_cyDesktop - m_y + m_yDesktop;
+                break;
+
+            case VBoxDbgBaseWindow::kAttractionVmBottom:
+                x  = m_x;
+                y  = m_y + m_cy;
+                cx = m_cx;
+                if (cx < cxMinHint)
+                {
+                    if (cxMinHint - cx <= unsigned(m_x - m_xDesktop)) /* move it to the left if we have sufficient room. */
+                        x -= cxMinHint - cx;
+                    else
+                        x = m_xDesktop;
+                    cx = cxMinHint;
+                }
+                cy = m_cyDesktop - m_cy - m_y + m_yDesktop;
+                break;
+
+            /** @todo implement the other placements when they become selectable. */
+
+            default:
+                return;
+        }
+
+        a_pWindow->vReposition(x, y, cx, cy, a_fResize);
+    }
+}
+
+
+void
+VBoxDbgGui::repositionWindowInitial(VBoxDbgBaseWindow *a_pWindow, const char *a_pszSettings,
+                                    VBoxDbgBaseWindow::VBoxDbgAttractionType a_enmDefaultAttraction)
+{
+    a_pWindow->vSetWindowAttraction(a_enmDefaultAttraction);
+
+    /** @todo save/restore the attachment type. */
+    RT_NOREF(a_pszSettings);
+
+    repositionWindow(a_pWindow, true /*fResize*/);
+}
+
+
+void
+VBoxDbgGui::adjustRelativePos(int x, int y, unsigned cx, unsigned cy)
+{
+    /* Disregard a width less than 640 since it will mess up the console,
+       but only if previous width was already initialized. */
+    if (cx < 640 && m_cx > 0)
+        cx = m_cx;
+
     const bool fResize = cx != m_cx || cy != m_cy;
     const bool fMoved  = x  != m_x  || y  != m_y;
 
@@ -203,20 +316,29 @@ void VBoxDbgGui::adjustRelativePos(int x, int y, unsigned cx, unsigned cy)
 
     if (fMoved)
         updateDesktopSize();
-    repositionConsole(fResize);
-    repositionStatistics(fResize);
+    repositionWindow(m_pDbgConsole, fResize);
+    repositionWindow(m_pDbgStats, fResize);
 }
 
 
-/*static*/ void VBoxDbgGui::resizeWidget(QWidget *pWidget, unsigned cx, unsigned cy)
+QString
+VBoxDbgGui::getMachineName() const
 {
-    QSize FrameSize = pWidget->frameSize();
-    QSize WidgetSize = pWidget->size();
-    pWidget->resize(cx - (FrameSize.width() - WidgetSize.width()),
-                    cy - (FrameSize.height() - WidgetSize.height()));
+    QString strName;
+    AssertReturn(m_pMachine, strName);
+    BSTR bstr;
+    HRESULT hrc = m_pMachine->COMGETTER(Name)(&bstr);
+    if (SUCCEEDED(hrc))
+    {
+        strName = QString::fromUtf16((const char16_t *)bstr);
+        SysFreeString(bstr);
+    }
+    return strName;
 }
 
-void VBoxDbgGui::notifyChildDestroyed(QObject *pObj)
+
+void
+VBoxDbgGui::notifyChildDestroyed(QObject *pObj)
 {
     if (m_pDbgStats == pObj)
         m_pDbgStats = NULL;

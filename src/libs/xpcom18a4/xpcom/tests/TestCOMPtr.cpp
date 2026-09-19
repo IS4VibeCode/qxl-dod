@@ -157,11 +157,11 @@ IFoo::Release()
     if ( wrap_message )
       printf(">>");
       
-    --refcount_;
+    nsrefcnt const newcount = --refcount_;
     printf("IFoo@%p::Release(), refcount --> %d\n",
-           STATIC_CAST(void*, this), refcount_);
+           STATIC_CAST(void*, this), newcount);
 
-    if ( !refcount_ )
+    if ( !newcount )
       {
         printf("  delete IFoo@%p\n", STATIC_CAST(void*, this));
         delete this;
@@ -170,7 +170,7 @@ IFoo::Release()
     if ( wrap_message )
       printf("<<IFoo@%p::Release()\n", STATIC_CAST(void*, this));
 
-    return refcount_;
+    return newcount;
   }
 
 nsresult
@@ -419,7 +419,7 @@ main()
   {
     printf(">>main()\n");
 
-		printf("sizeof(nsCOMPtr<IFoo>) --> %d\n", sizeof(nsCOMPtr<IFoo>));
+		printf("sizeof(nsCOMPtr<IFoo>) --> %zd\n", sizeof(nsCOMPtr<IFoo>));
 
 #ifdef TEST_EXCEPTIONS
 		TestBloat_Raw();

@@ -1,3 +1,4 @@
+/* $Id: tstVBoxAPIWin.cpp 113399 2026-03-13 23:48:15Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * tstVBoxAPIWin - sample program to illustrate the VirtualBox
@@ -11,24 +12,64 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
+/*
+ * PURPOSE OF THIS SAMPLE PROGRAM
+ * ------------------------------
+ *
+ * This sample program is intended to demonstrate the minimal code necessary
+ * to use VirtualBox COM API for learning puroses only. The program uses pure
+ * Win32 API and doesn't have any extra dependencies to let you better
+ * understand what is going on when a client talks to the VirtualBox core
+ * using the COM framework.
+ *
+ * However, if you want to write a real application, it is highly recommended
+ * to use our MS COM XPCOM Glue library and helper C++ classes. This way, you
+ * will get at least the following benefits:
+ *
+ * a) better portability: both the MS COM (used on Windows) and XPCOM (used
+ *    everywhere else) VirtualBox client application from the same source code
+ *    (including common smart C++ templates for automatic interface pointer
+ *    reference counter and string data management);
+ * b) simpler XPCOM initialization and shutdown (only a single method call
+ *    that does everything right).
+ *
+ * Currently, there is no separate sample program that uses the VirtualBox MS
+ * COM XPCOM Glue library. Please refer to the sources of stock VirtualBox
+ * applications such as the VirtualBox GUI frontend or the VBoxManage command
+ * line frontend.
+ */
+
+
 #include <stdio.h>
+#include <iprt/win/windows.h>  /* Avoid -Wall warnings. */
 #include "VirtualBox.h"
 
+#define SAFE_RELEASE(x) \
+    if (x) { \
+        x->Release(); \
+        x = NULL; \
+    }
 
 int listVMs(IVirtualBox *virtualBox)
 {
@@ -37,82 +78,228 @@ int listVMs(IVirtualBox *virtualBox)
     /*
      * First we have to get a list of all registered VMs
      */
-    IMachineCollection *collection = NULL;
-    IMachineEnumerator *enumerator = NULL;
+    SAFEARRAY *machinesArray = NULL;
 
-    do
+    rc = virtualBox->get_Machines(&machinesArray);
+    if (SUCCEEDED(rc))
     {
-        rc = virtualBox->get_Machines(&collection);
-        if (SUCCEEDED(rc))
-            rc = collection->Enumerate(&enumerator);
-
+        IMachine **machines;
+        rc = SafeArrayAccessData(machinesArray, (void **) &machines);
         if (SUCCEEDED(rc))
         {
-            BOOL hasMore;
-            while (enumerator->HasMore(&hasMore), hasMore)
+            for (ULONG i = 0; i < machinesArray->rgsabound[0].cElements; ++i)
             {
-                /*
-                 * Get the machine object
-                 */
-                IMachine *machine = NULL;
-                rc = enumerator->GetNext(&machine);
+                BSTR str;
+
+                rc = machines[i]->get_Name(&str);
                 if (SUCCEEDED(rc))
                 {
-                    BSTR str;
-
-                    machine->get_Name(&str);
                     printf("Name: %S\n", str);
-
                     SysFreeString(str);
-
-                    machine->Release();
                 }
             }
-        }
-    } while (0);
 
-    if (enumerator)
-        enumerator->Release();
-    if (collection)
-        collection->Release();
+            SafeArrayUnaccessData(machinesArray);
+        }
+
+        SafeArrayDestroy(machinesArray);
+    }
 
     return 0;
 }
 
 
-int main(int argc, char *argv[])
+int testErrorInfo(IVirtualBox *virtualBox)
 {
     HRESULT rc;
-    IVirtualBox *virtualBox;
 
-    do
+    /* Try to find a machine that doesn't exist */
+    IMachine *machine = NULL;
+    BSTR machineName = SysAllocString(L"Foobar");
+
+    rc = virtualBox->FindMachine(machineName, &machine);
+
+    if (FAILED(rc))
     {
-        /* initialize the COM subsystem */
-        CoInitialize(NULL);
+        IErrorInfo *errorInfo;
 
-        /* instantiate the VirtualBox root object */
-        rc = CoCreateInstance(CLSID_VirtualBox,       /* the VirtualBox base object */
-                              NULL,                   /* no aggregation */
-                              CLSCTX_LOCAL_SERVER,    /* the object lives in a server process on this machine */
-                              IID_IVirtualBox,        /* IID of the interface */
-                              (void**)&virtualBox);
+        rc = GetErrorInfo(0, &errorInfo);
 
-        if (!SUCCEEDED(rc))
+        if (FAILED(rc))
+            printf("Error getting error info! rc=%#lx\n", rc);
+        else
         {
-            printf("Error creating VirtualBox instance! rc = 0x%x\n", rc);
-            break;
+            BSTR errorDescription = NULL;
+
+            rc = errorInfo->GetDescription(&errorDescription);
+
+            if (FAILED(rc) || !errorDescription)
+                printf("Error getting error description! rc=%#lx\n", rc);
+            else
+            {
+                printf("Successfully retrieved error description: %S\n", errorDescription);
+
+                SysFreeString(errorDescription);
+            }
+
+            errorInfo->Release();
         }
+    }
 
-        listVMs(virtualBox);
+    SAFE_RELEASE(machine);
+    SysFreeString(machineName);
+
+    return 0;
+}
 
 
-        /* release the VirtualBox object */
-        virtualBox->Release();
+int testStartVM(IVirtualBox *virtualBox)
+{
+    HRESULT rc;
 
-    } while (0);
+    /* Try to start a VM called "WinXP SP2". */
+    IMachine *machine = NULL;
+    BSTR machineName = SysAllocString(L"WinXP SP2");
+
+    rc = virtualBox->FindMachine(machineName, &machine);
+
+    if (FAILED(rc))
+    {
+        IErrorInfo *errorInfo;
+
+        rc = GetErrorInfo(0, &errorInfo);
+
+        if (FAILED(rc))
+            printf("Error getting error info! rc=%#lx\n", rc);
+        else
+        {
+            BSTR errorDescription = NULL;
+
+            rc = errorInfo->GetDescription(&errorDescription);
+
+            if (FAILED(rc) || !errorDescription)
+                printf("Error getting error description! rc=%#lx\n", rc);
+            else
+            {
+                printf("Successfully retrieved error description: %S\n", errorDescription);
+
+                SysFreeString(errorDescription);
+            }
+
+            SAFE_RELEASE(errorInfo);
+        }
+    }
+    else
+    {
+        ISession *session = NULL;
+        IConsole *console = NULL;
+        IProgress *progress = NULL;
+        BSTR sessiontype = SysAllocString(L"gui");
+        BSTR guid;
+
+        do
+        {
+            rc = machine->get_Id(&guid); /* Get the GUID of the machine. */
+            if (!SUCCEEDED(rc))
+            {
+                printf("Error retrieving machine ID! rc=%#lx\n", rc);
+                break;
+            }
+
+            /* Create the session object. */
+            rc = CoCreateInstance(CLSID_Session,        /* the VirtualBox base object */
+                                  NULL,                 /* no aggregation */
+                                  CLSCTX_INPROC_SERVER, /* the object lives in the current process */
+                                  IID_ISession,         /* IID of the interface */
+                                  (void**)&session);
+            if (!SUCCEEDED(rc))
+            {
+                printf("Error creating Session instance! rc=%#lx\n", rc);
+                break;
+            }
+
+            /* Start a VM session using the delivered VBox GUI. */
+            rc = machine->LaunchVMProcess(session, sessiontype,
+                                          NULL, &progress);
+            if (!SUCCEEDED(rc))
+            {
+                printf("Could not open remote session! rc=%#lx\n", rc);
+                break;
+            }
+
+            /* Wait until VM is running. */
+            printf("Starting VM, please wait ...\n");
+            rc = progress->WaitForCompletion(-1);
+
+            /* Get console object. */
+            session->get_Console(&console);
+
+            /* Bring console window to front. */
+            machine->ShowConsoleWindow(0);
+
+            printf("Press enter to power off VM and close the session...\n");
+            (void)getchar();
+
+            /* Power down the machine. */
+            rc = console->PowerDown(&progress);
+
+            /* Wait until VM is powered down. */
+            printf("Powering off VM, please wait ...\n");
+            rc = progress->WaitForCompletion(-1);
+
+            /* Close the session. */
+            rc = session->UnlockMachine();
+
+        } while (0);
+
+        SAFE_RELEASE(console);
+        SAFE_RELEASE(progress);
+        SAFE_RELEASE(session);
+        SysFreeString(guid);
+        SysFreeString(sessiontype);
+        SAFE_RELEASE(machine);
+    }
+
+    SysFreeString(machineName);
+
+    return 0;
+}
+
+
+int main()
+{
+    /* Initialize the COM subsystem. */
+    (void)CoInitialize(NULL);
+
+    /* Instantiate the VirtualBox root object. */
+    IVirtualBoxClient *virtualBoxClient;
+    HRESULT rc = CoCreateInstance(CLSID_VirtualBoxClient, /* the VirtualBoxClient object */
+                                  NULL,                   /* no aggregation */
+                                  CLSCTX_INPROC_SERVER,   /* the object lives in the current process */
+                                  IID_IVirtualBoxClient,  /* IID of the interface */
+                                  (void**)&virtualBoxClient);
+    if (SUCCEEDED(rc))
+    {
+        IVirtualBox *virtualBox;
+        rc = virtualBoxClient->get_VirtualBox(&virtualBox);
+        if (SUCCEEDED(rc))
+        {
+            listVMs(virtualBox);
+
+            testErrorInfo(virtualBox);
+
+            /* Enable the following line to get a VM started. */
+            //testStartVM(virtualBox);
+
+            /* Release the VirtualBox object. */
+            virtualBox->Release();
+            virtualBoxClient->Release();
+        }
+        else
+            printf("Error creating VirtualBox instance! rc=%#lx\n", rc);
+    }
 
     CoUninitialize();
     return 0;
 }
-
 

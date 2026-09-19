@@ -1,33 +1,50 @@
-/* $Id: sched-generic.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: sched-generic.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Scheduling, generic stubs.
+ * IPRT - Scheduling, generic stubs.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_THREAD
 #include <iprt/thread.h>
+#include "internal/iprt.h"
+
 #include <iprt/log.h>
 #include <iprt/assert.h>
-#include <iprt/err.h>
+#include <iprt/errcore.h>
 #include "internal/sched.h"
 
 
@@ -38,44 +55,23 @@
  * @returns iprt status code.
  * @param   enmType     The thread type to be assumed for the current thread.
  */
-int rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
+DECLHIDDEN(int) rtSchedNativeCalcDefaultPriority(RTTHREADTYPE enmType)
 {
-    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_LAST);
+    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_END);
     return VINF_SUCCESS;
 }
 
 
-/**
- * Validates and sets the process priority.
- * This will check that all rtThreadNativeSetPriority() will success for all the
- * thread types when applied to the current thread.
- *
- * @returns iprt status code.
- * @param   enmPriority     The priority to validate and set.
- * @remark  Located in sched.
- */
-int rtProcNativeSetPriority(RTPROCPRIORITY enmPriority)
+DECLHIDDEN(int) rtProcNativeSetPriority(RTPROCPRIORITY enmPriority)
 {
     Assert(enmPriority > RTPROCPRIORITY_INVALID && enmPriority < RTPROCPRIORITY_LAST);
     return VINF_SUCCESS;
 }
 
 
-/**
- * Sets the priority of the thread according to the thread type
- * and current process priority.
- *
- * The RTTHREADINT::enmType member has not yet been updated and will be updated by
- * the caller on a successful return.
- *
- * @returns iprt status code.
- * @param   pThread     The thread in question.
- * @param   enmType     The thread type.
- * @remark  Located in sched.
- */
-int rtThreadNativeSetPriority(PRTTHREADINT pThread, RTTHREADTYPE enmType)
+DECLHIDDEN(int) rtThreadNativeSetPriority(PRTTHREADINT pThread, RTTHREADTYPE enmType)
 {
-    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_LAST);
+    Assert(enmType > RTTHREADTYPE_INVALID && enmType < RTTHREADTYPE_END);
     return VINF_SUCCESS;
 }
 

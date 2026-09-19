@@ -1,95 +1,124 @@
-/* $Id: alloc-r0drv-linux.c 1  klaus.espenlaub@oracle.com $ */
+/* $Id: alloc-r0drv-linux.c 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Memory Allocation, Ring-0 Driver, Linux.
+ * IPRT - Memory Allocation, Ring-0 Driver, Linux.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include "the-linux-kernel.h"
-#include <iprt/alloc.h>
+#include "internal/iprt.h"
+#include <iprt/mem.h>
+
 #include <iprt/assert.h>
+#include <iprt/errcore.h>
 #include "r0drv/alloc-r0drv.h"
+
+#include "internal/initterm.h"
+
 
 
 /**
  * OS specific allocation function.
  */
-PRTMEMHDR rtMemAlloc(size_t cb, uint32_t fFlags)
+DECLHIDDEN(int) rtR0MemAllocEx(size_t cb, uint32_t fFlags, PRTMEMHDR *ppHdr)
 {
+    PRTMEMHDR pHdr;
+    IPRT_LINUX_SAVE_EFL_AC();
+
     /*
      * Allocate.
      */
-    PRTMEMHDR pHdr;
-    Assert(cb != sizeof(void *)); /* 99% of pointer sized allocations are wrong. */
-    if (fFlags & RTMEMHDR_FLAG_EXEC)
-    {
-#if defined(__AMD64__)
-        pHdr = (PRTMEMHDR)__vmalloc(cb + sizeof(*pHdr), GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL_EXEC);
-#elif defined(PAGE_KERNEL_EXEC) && defined(CONFIG_X86_PAE)
-        pHdr = (PRTMEMHDR)__vmalloc(cb + sizeof(*pHdr), GFP_KERNEL | __GFP_HIGHMEM,
-                                    __pgprot(cpu_has_pge ? _PAGE_KERNEL_EXEC | _PAGE_GLOBAL : _PAGE_KERNEL_EXEC));
+    if (
+#if 1 /* vmalloc has serious performance issues, avoid it. */
+           cb <= PAGE_SIZE*16 - sizeof(*pHdr)
 #else
-        pHdr = (PRTMEMHDR)vmalloc(cb + sizeof(*pHdr));
+           cb <= PAGE_SIZE
 #endif
-        fFlags &= ~RTMEMHDR_FLAG_KMALLOC;
-    }
-    else
+        || (fFlags & RTMEMHDR_FLAG_ANY_CTX)
+       )
     {
-        if (cb <= PAGE_SIZE)
-        {
-            fFlags |= RTMEMHDR_FLAG_KMALLOC;
-            pHdr = kmalloc(cb + sizeof(*pHdr), GFP_KERNEL);
-        }
-        else
+        fFlags |= RTMEMHDR_FLAG_KMALLOC;
+        pHdr = kmalloc(cb + sizeof(*pHdr),
+                       fFlags & RTMEMHDR_FLAG_ANY_CTX_ALLOC ? GFP_ATOMIC | __GFP_NOWARN : GFP_KERNEL | __GFP_NOWARN);
+        if (RT_UNLIKELY(   !pHdr
+                        && cb > PAGE_SIZE
+                        && !(fFlags & RTMEMHDR_FLAG_ANY_CTX) ))
         {
             fFlags &= ~RTMEMHDR_FLAG_KMALLOC;
             pHdr = vmalloc(cb + sizeof(*pHdr));
         }
     }
-
-    /*
-     * Initialize.
-     */
-    if (pHdr)
+    else
+        pHdr = vmalloc(cb + sizeof(*pHdr));
+    if (RT_LIKELY(pHdr))
     {
+        /*
+         * Initialize.
+         */
         pHdr->u32Magic  = RTMEMHDR_MAGIC;
         pHdr->fFlags    = fFlags;
         pHdr->cb        = cb;
-        pHdr->u32Padding= 0;
+        pHdr->cbReq     = cb;
+
+        *ppHdr = pHdr;
+        IPRT_LINUX_RESTORE_EFL_AC();
+        return VINF_SUCCESS;
     }
-    return pHdr;
+
+    IPRT_LINUX_RESTORE_EFL_AC();
+    return VERR_NO_MEMORY;
 }
 
 
 /**
  * OS specific free function.
  */
-void rtMemFree(PRTMEMHDR pHdr)
+DECLHIDDEN(void) rtR0MemFree(PRTMEMHDR pHdr)
 {
+    IPRT_LINUX_SAVE_EFL_AC();
+
     pHdr->u32Magic += 1;
     if (pHdr->fFlags & RTMEMHDR_FLAG_KMALLOC)
         kfree(pHdr);
     else
         vfree(pHdr);
+
+    IPRT_LINUX_RESTORE_EFL_AC();
 }
+
 
 
 /**
@@ -125,12 +154,16 @@ RTR0DECL(void *) RTMemContAlloc(PRTCCPHYS pPhys, size_t cb)
 {
     int             cOrder;
     unsigned        cPages;
+    void           *pvRet;
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
     struct page    *paPages;
+#endif
+    IPRT_LINUX_SAVE_EFL_AC();
 
     /*
      * validate input.
      */
-    Assert(VALID_PTR(pPhys));
+    AssertPtr(pPhys);
     Assert(cb > 0);
 
     /*
@@ -139,11 +172,19 @@ RTR0DECL(void *) RTMemContAlloc(PRTCCPHYS pPhys, size_t cb)
     cb = RT_ALIGN_Z(cb, PAGE_SIZE);
     cPages = cb >> PAGE_SHIFT;
     cOrder = CalcPowerOf2Order(cPages);
-#ifdef __AMD64__ /** @todo check out if there is a correct way of getting memory below 4GB (physically). */
-    paPages = alloc_pages(GFP_DMA, cOrder);
-#else
-    paPages = alloc_pages(GFP_USER, cOrder);
-#endif
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
+# if (defined(RT_ARCH_AMD64) || defined(CONFIG_X86_PAE)) && defined(GFP_DMA32)
+    /* ZONE_DMA32: 0-4GB */
+    paPages = alloc_pages(GFP_DMA32 | __GFP_NOWARN, cOrder);
+    if (!paPages)
+# endif
+# ifdef RT_ARCH_AMD64
+        /* ZONE_DMA; 0-16MB */
+        paPages = alloc_pages(GFP_DMA | __GFP_NOWARN, cOrder);
+# else
+        /* ZONE_NORMAL: 0-896MB */
+        paPages = alloc_pages(GFP_USER | __GFP_NOWARN, cOrder);
+# endif
     if (paPages)
     {
         /*
@@ -165,19 +206,26 @@ RTR0DECL(void *) RTMemContAlloc(PRTCCPHYS pPhys, size_t cb)
             }
 
             SetPageReserved(&paPages[iPage]);
-            if (pgprot_val(MY_PAGE_KERNEL_EXEC) != pgprot_val(PAGE_KERNEL))
-                MY_CHANGE_PAGE_ATTR(&paPages[iPage], 1, MY_PAGE_KERNEL_EXEC);
         }
         *pPhys = page_to_phys(paPages);
-        return phys_to_virt(page_to_phys(paPages));
+        pvRet = phys_to_virt(page_to_phys(paPages));
     }
+    else
+        pvRet = NULL;
+#else
+    pvRet = (void *)__get_free_pages(GFP_DMA32 | __GFP_NOWARN, cOrder);
+    if (pvRet)
+        *pPhys = virt_to_phys(pvRet);
+#endif
 
-    return NULL;
+    IPRT_LINUX_RESTORE_EFL_AC();
+    return pvRet;
 }
+RT_EXPORT_SYMBOL(RTMemContAlloc);
 
 
 /**
- * Frees memory allocated ysing RTMemContAlloc().
+ * Frees memory allocated using RTMemContAlloc().
  *
  * @param   pv      Pointer to return from RTMemContAlloc().
  * @param   cb      The cb parameter passed to RTMemContAlloc().
@@ -188,8 +236,11 @@ RTR0DECL(void) RTMemContFree(void *pv, size_t cb)
     {
         int             cOrder;
         unsigned        cPages;
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
         unsigned        iPage;
         struct page    *paPages;
+#endif
+        IPRT_LINUX_SAVE_EFL_AC();
 
         /* validate */
         AssertMsg(!((uintptr_t)pv & PAGE_OFFSET_MASK), ("pv=%p\n", pv));
@@ -199,6 +250,7 @@ RTR0DECL(void) RTMemContFree(void *pv, size_t cb)
         cb = RT_ALIGN_Z(cb, PAGE_SIZE);
         cPages = cb >> PAGE_SHIFT;
         cOrder = CalcPowerOf2Order(cPages);
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
         paPages = virt_to_page(pv);
 
         /*
@@ -207,10 +259,13 @@ RTR0DECL(void) RTMemContFree(void *pv, size_t cb)
         for (iPage = 0; iPage < cPages; iPage++)
         {
             ClearPageReserved(&paPages[iPage]);
-            if (pgprot_val(MY_PAGE_KERNEL_EXEC) != pgprot_val(PAGE_KERNEL))
-                MY_CHANGE_PAGE_ATTR(&paPages[iPage], 1, PAGE_KERNEL);
         }
         __free_pages(paPages, cOrder);
+#else
+        free_pages((uintptr_t)pv, cOrder);
+#endif
+        IPRT_LINUX_RESTORE_EFL_AC();
     }
 }
+RT_EXPORT_SYMBOL(RTMemContFree);
 

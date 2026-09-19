@@ -1,3 +1,4 @@
+/* $Id: VBoxSDLTest.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VBox frontends: VBoxSDL (simple frontend based on SDL):
@@ -5,27 +6,42 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#if defined(__WIN__) ///@todo someone please explain why we don't follow the book!
+#ifdef _MSC_VER
+# pragma warning(push)
+# pragma warning(disable:4121)
+#endif
+#if defined(RT_OS_WINDOWS) /// @todo someone please explain why we don't follow the book!
 # define _SDL_main_h
 #endif
 #include <SDL.h>
+#ifdef _MSC_VER
+# pragma warning(pop)
+#endif
 
 #include <iprt/assert.h>
+#include <iprt/env.h>
+#include <iprt/initterm.h>
 #include <iprt/stream.h>
 #include <iprt/string.h>
 #include <iprt/time.h>
@@ -37,7 +53,7 @@
 #include "SDL_opengl.h"
 #endif
 
-#ifdef __WIN__
+#ifdef RT_OS_WINDOWS
 #define ESC_NORM
 #define ESC_BOLD
 #else
@@ -72,6 +88,7 @@ int
 main(int argc, char **argv)
 {
     int rc;
+    RTR3InitExe(argc, &argv, 0);
 
     for (int i = 1; i < argc; i++)
     {
@@ -91,18 +108,18 @@ main(int argc, char **argv)
         return -1;
     }
 
-#ifdef __WIN__
+#ifdef RT_OS_WINDOWS
     /* Default to DirectX if nothing else set. "windib" would be possible.  */
-    if (!getenv("SDL_VIDEODRIVER"))
+    if (!RTEnvExist("SDL_VIDEODRIVER"))
     {
         _putenv("SDL_VIDEODRIVER=directx");
     }
 #endif
 
-#ifdef __WIN__
+#ifdef RT_OS_WINDOWS
     _putenv("SDL_VIDEO_WINDOW_POS=0,0");
 #else
-    putenv("SDL_VIDEO_WINDOW_POS=0,0");
+    RTEnvSet("SDL_VIDEO_WINDOW_POS", "0,0");
 #endif
 
     rc = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_NOPARACHUTE);
@@ -134,7 +151,7 @@ main(int argc, char **argv)
     RTPrintf("  Video memory in kilobytes:                   %d\n", videoInfo->video_mem);
     RTPrintf("  Optimal bpp mode:                            %d\n", videoInfo->vfmt->BitsPerPixel);
     char buf[256];
-    RTPrintf("Video driver SDL_VIDEODRIVER / active:         %s/%s\n", getenv("SDL_VIDEODRIVER"),
+    RTPrintf("Video driver SDL_VIDEODRIVER / active:         %s/%s\n", RTEnvGet("SDL_VIDEODRIVER"),
                                                                        SDL_VideoDriverName(buf, sizeof(buf)));
 
     RTPrintf("\n"
@@ -150,6 +167,7 @@ main(int argc, char **argv)
     bench(1280, 1024, 16);  bench(1280, 1024, 24);  bench(1280, 1024, 32);
 
     RTPrintf("\nSuccess!\n");
+    return 0;
 }
 
 /**
@@ -242,8 +260,8 @@ static void bench(unsigned long w, unsigned long h, unsigned long bpp)
     else
     {
         /* no restriction */
-        guMaxScreenWidth  = ~0;
-        guMaxScreenHeight = ~0;
+        guMaxScreenWidth  = ~0U;
+        guMaxScreenHeight = ~0U;
     }
 
     newWidth  = RT_MIN(guMaxScreenWidth,  guGuestXRes);
@@ -261,9 +279,11 @@ static void bench(unsigned long w, unsigned long h, unsigned long bpp)
         checkSDL("SDL_GL_SetAttribute", SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  Bsize));
         checkSDL("SDL_GL_SetAttribute", SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 0));
     }
+#else
+    NOREF(Rsize); NOREF(Gsize); NOREF(Bsize);
 #endif
 
-    RTPrintf("Testing "ESC_BOLD"%ldx%ld@%ld"ESC_NORM"\n", guGuestXRes, guGuestYRes, guGuestBpp);
+    RTPrintf("Testing " ESC_BOLD "%ldx%ld@%ld" ESC_NORM "\n", guGuestXRes, guGuestYRes, guGuestBpp);
 
     gScreen = SDL_SetVideoMode(newWidth, newHeight, 0, sdlFlags);
     if (!gScreen)
@@ -338,8 +358,10 @@ static void bench(unsigned long w, unsigned long h, unsigned long bpp)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
 
-        for (guTextureWidth  = 32; guTextureWidth  < newWidth;  guTextureWidth  <<= 1);
-        for (guTextureHeight = 32; guTextureHeight < newHeight; guTextureHeight <<= 1);
+        for (guTextureWidth  = 32; guTextureWidth  < newWidth;  guTextureWidth  <<= 1)
+            ;
+        for (guTextureHeight = 32; guTextureHeight < newHeight; guTextureHeight <<= 1)
+            ;
         RTPrintf(", tex %ldx%ld\n", guTextureWidth, guTextureHeight);
 
         switch (guGuestBpp)
@@ -435,7 +457,7 @@ static void benchExecute()
 static int checkSDL(const char *fn, int rc)
 {
     if (rc == -1)
-        RTPrintf(""ESC_BOLD"%s() failed:"ESC_NORM" '%s'\n", fn, SDL_GetError());
+        RTPrintf("" ESC_BOLD "%s() failed:" ESC_NORM " '%s'\n", fn, SDL_GetError());
 
     return rc;
 }

@@ -1,253 +1,204 @@
+/* $Id: SUPLib-os2.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox host drivers - Ring-0 support drivers - OS/2 host:
- * OS/2 implementations for support library
+ * VirtualBox Support Library - OS/2 specific parts.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
+#define INCL_BASE
+#define INCL_ERRORS
+#include <os2.h>
+#undef RT_MAX
+
+#ifdef IN_SUP_HARDENED_R3
+# undef DEBUG /* Warning: disables RT_STRICT */
+# define LOG_DISABLED
+# define RTLOG_REL_DISABLED
+# include <iprt/log.h>
+#endif
+
 #include <VBox/types.h>
 #include <VBox/sup.h>
 #include <VBox/param.h>
 #include <VBox/err.h>
+#include <VBox/log.h>
 #include <iprt/path.h>
 #include <iprt/assert.h>
 #include <iprt/err.h>
-#include "SUPLibInternal.h"
-#include "SUPDRVIOC.h"
+#include "../SUPLibInternal.h"
+#include "../SUPDrvIOC.h"
 
-#include <sys/fcntl.h>
-#include <sys/ioctl.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <string.h>
 
 
-/*******************************************************************************
-*   Defined Constants And Macros                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Defined Constants And Macros                                                                                                 *
+*********************************************************************************************************************************/
 /** OS/2 Device name. */
-#define DEVICE_NAME     "/dev/$vboxdrv"
+#define DEVICE_NAME     "/dev/vboxdrv$"
 
 
 
-/*******************************************************************************
-*   Global Variables                                                           *
-*******************************************************************************/
-/** Handle to the open device. */
-static int      g_hDevice = -1;
-/** Flags whether or not we've loaded the kernel module. */
-static bool     g_fLoadedModule = false;
-
-
-/*******************************************************************************
-*   Internal Functions                                                         *
-*******************************************************************************/
-
-
-/**
- * Initialize the OS specific part of the library.
- * On Linux this involves:
- *      - loading the module.
- *      - open driver.
- *
- * @returns 0 on success.
- * @returns current -1 on failure but this must be changed to proper error codes.
- * @param   cbReserve   Ignored on OS/2.
- */
-int     suplibOsInit(size_t cbReserve)
+DECLHIDDEN(int) suplibOsInit(PSUPLIBDATA pThis, bool fPreInited, uint32_t fFlags, SUPINITOP *penmWhat, PRTERRINFO pErrInfo)
 {
     /*
-     * Check if already initialized.
+     * Nothing to do if pre-inited.
      */
-    if (g_hDevice >= 0)
-        return 0;
+    if (fPreInited)
+        return VINF_SUCCESS;
 
-#if 0
     /*
      * Try open the device.
      */
-    g_hDevice = open(DEVICE_NAME, O_RDWR, 0);
-    if (g_hDevice < 0)
+    ULONG ulAction = 0;
+    HFILE hDevice = (HFILE)-1;
+    APIRET rc = DosOpen((PCSZ)DEVICE_NAME,
+                        &hDevice,
+                        &ulAction,
+                        0,
+                        FILE_NORMAL,
+                        OPEN_ACTION_FAIL_IF_NEW | OPEN_ACTION_OPEN_IF_EXISTS,
+                        OPEN_FLAGS_NOINHERIT | OPEN_SHARE_DENYNONE | OPEN_ACCESS_READWRITE,
+                        NULL);
+    if (rc)
     {
-        /*
-         * Try load the device.
-         */
-        //todo suplibOsLoadKernelModule();
-        g_hDevice = open(DEVICE_NAME, O_RDWR, 0);
-        if (g_hDevice < 0)
-            return RTErrConvertFromErrno(errno);
+        int vrc;
+        switch (rc)
+        {
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:  vrc = VERR_VM_DRIVER_NOT_INSTALLED; break;
+            default:                    vrc = VERR_VM_DRIVER_OPEN_ERROR; break;
+        }
+        LogRel(("Failed to open \"%s\", rc=%d, vrc=%Rrc\n", DEVICE_NAME, rc, vrc));
+        return vrc;
     }
 
-    /*
-     * Check driver version.
-     */
-    /** @todo implement driver version checking. */
-
-    /*
-     * We're done.
-     */
-    NOREF(cbReserve);
-    return 0;
-#else
-    NOREF(cbReserve);
-    return VERR_NOT_IMPLEMENTED;
-#endif
-}
-
-
-int     suplibOsTerm(void)
-{
-    /*
-     * Check if we're initited at all.
-     */
-    if (g_hDevice >= 0)
-    {
-        if (close(g_hDevice))
-            AssertFailed();
-        g_hDevice = -1;
-    }
-
-    /*
-     * If we started the service we might consider stopping it too.
-     *
-     * Since this won't work unless the the process starting it is the
-     * last user we might wanna skip this...
-     */
-    if (g_fLoadedModule)
-    {
-        //todo kernel module unloading.
-        //suplibOsStopService();
-        //g_fStartedService = false;
-    }
-
-    return 0;
-}
-
-
-/**
- * Installs anything required by the support library.
- *
- * @returns 0 on success.
- * @returns error code on failure.
- */
-int suplibOsInstall(void)
-{
-//    int rc = mknod(DEVICE_NAME, S_IFCHR, );
-
-    return VERR_NOT_IMPLEMENTED;
-}
-
-
-/**
- * Installs anything required by the support library.
- *
- * @returns 0 on success.
- * @returns error code on failure.
- */
-int suplibOsUninstall(void)
-{
-//    int rc = unlink(DEVICE_NAME);
-
-    return VERR_NOT_IMPLEMENTED;
-}
-
-
-/**
- * Send a I/O Control request to the device.
- *
- * @returns 0 on success.
- * @returns VBOX error code on failure.
- * @param   uFunction   IO Control function.
- * @param   pvIn        Input data buffer.
- * @param   cbIn        Size of input data.
- * @param   pvOut       Output data buffer.
- * @param   cbOut       Size of output data.
- */
-int     suplibOsIOCtl(unsigned uFunction, void *pvIn, size_t cbIn, void *pvOut, size_t cbOut)
-{
-#if 0
-    AssertMsg(g_hDevice != -1, ("SUPLIB not initiated successfully!\n"));
-    /*
-     * Issue device iocontrol.
-     */
-    SUPDRVIOCTLDATA Args;
-    Args.pvIn = pvIn;
-    Args.cbIn = cbIn;
-    Args.pvOut = pvOut;
-    Args.cbOut = cbOut;
-
-    if (ioctl(g_hDevice, uFunction, &Args) >= 0)
-	return 0;
-    /* This is the reverse operation of the one found in SUPDrv-linux.c */
-    switch (errno)
-    {
-        case EACCES: return VERR_GENERAL_FAILURE;
-        case EINVAL: return VERR_INVALID_PARAMETER;
-        case ENOSYS: return VERR_INVALID_MAGIC;
-        case ENXIO:  return VERR_INVALID_HANDLE;
-        case EFAULT: return VERR_INVALID_POINTER;
-        case ENOLCK: return VERR_LOCK_FAILED;
-        case EEXIST: return VERR_ALREADY_LOADED;
-    }
-
-    return RTErrConvertFromErrno(errno);
-#else
-    return VERR_NOT_IMPLEMENTED;
-#endif
-}
-
-
-/**
- * Allocate a number of zero-filled pages in user space.
- *
- * @returns VBox status code.
- * @param   cPages      Number of pages to allocate.
- * @param   ppvPages    Where to return the base pointer.
- */
-int     suplibOsPageAlloc(size_t cPages, void **ppvPages)
-{
-    if (!posix_memalign(ppvPages, PAGE_SIZE, cPages << PAGE_SHIFT))
-    {
-        memset(*ppvPages, 0, cPages << PAGE_SHIFT);
-        return VINF_SUCCESS;
-    }
-    return RTErrConvertFromErrno(errno);
-}
-
-
-/**
- * Frees pages allocated by suplibOsPageAlloc().
- *
- * @returns VBox status code.
- * @param   pvPages     Pointer to pages.
- */
-int     suplibOsPageFree(void *pvPages)
-{
-    free(pvPages);
+    pThis->hDevice = hDevice;
+    pThis->fUnrestricted = true;
+    RT_NOREF(fFlags);
     return VINF_SUCCESS;
 }
 
 
+DECLHIDDEN(int) suplibOsTerm(PSUPLIBDATA pThis)
+{
+    /*
+     * Check if we're inited at all.
+     */
+    if (pThis->hDevice != (intptr_t)NIL_RTFILE)
+    {
+        APIRET rc = DosClose((HFILE)pThis->hDevice);
+        AssertMsg(rc == NO_ERROR, ("%d\n", rc)); NOREF(rc);
+        pThis->hDevice = (intptr_t)NIL_RTFILE;
+    }
+
+    return 0;
+}
 
 
+#ifndef IN_SUP_HARDENED_R3
+
+DECLHIDDEN(int) suplibOsInstall(void)
+{
+    /** @remark OS/2: Not supported */
+    return VERR_NOT_SUPPORTED;
+}
+
+
+DECLHIDDEN(int) suplibOsUninstall(void)
+{
+    /** @remark OS/2: Not supported */
+    return VERR_NOT_SUPPORTED;
+}
+
+
+DECLHIDDEN(int) suplibOsIOCtl(PSUPLIBDATA pThis, uintptr_t uFunction, void *pvReq, size_t cbReq)
+{
+    ULONG cbReturned = sizeof(SUPREQHDR);
+    int rc = DosDevIOCtl((HFILE)pThis->hDevice, SUP_CTL_CATEGORY, uFunction,
+                         pvReq, cbReturned, &cbReturned,
+                         NULL, 0, NULL);
+    if (RT_LIKELY(rc == NO_ERROR))
+        return VINF_SUCCESS;
+    return RTErrConvertFromOS2(rc);
+}
+
+
+DECLHIDDEN(int) suplibOsIOCtlFast(PSUPLIBDATA pThis, uintptr_t uFunction, uintptr_t idCpu)
+{
+    NOREF(idCpu);
+    int32_t rcRet = VERR_INTERNAL_ERROR;
+    int rc = DosDevIOCtl((HFILE)pThis->hDevice, SUP_CTL_CATEGORY_FAST, uFunction,
+                         NULL, 0, NULL,
+                         NULL, 0, NULL);
+    if (RT_LIKELY(rc == NO_ERROR))
+        rc = rcRet;
+    else
+        rc = RTErrConvertFromOS2(rc);
+    return rc;
+}
+
+
+DECLHIDDEN(int) suplibOsPageAlloc(PSUPLIBDATA pThis, size_t cPages, uint32_t fFlags, void **ppvPages)
+{
+    RT_NOREF(pThis, fFlags);
+    *ppvPages = NULL;
+    int rc = DosAllocMem(ppvPages, cPages << PAGE_SHIFT, PAG_READ | PAG_WRITE | PAG_EXECUTE | PAG_COMMIT | OBJ_ANY);
+    if (rc == ERROR_INVALID_PARAMETER)
+        rc = DosAllocMem(ppvPages, cPages << PAGE_SHIFT, PAG_READ | PAG_WRITE | PAG_EXECUTE | PAG_COMMIT | OBJ_ANY);
+    if (!rc)
+        rc = VINF_SUCCESS;
+    else
+        rc = RTErrConvertFromOS2(rc);
+    return rc;
+}
+
+
+DECLHIDDEN(int) suplibOsPageFree(PSUPLIBDATA pThis, void *pvPages, size_t /* cPages */)
+{
+    NOREF(pThis);
+    if (pvPages)
+    {
+        int rc = DosFreeMem(pvPages);
+        Assert(!rc); NOREF(rc);
+    }
+    return VINF_SUCCESS;
+}
+
+#endif /* !IN_SUP_HARDENED_R3 */
 

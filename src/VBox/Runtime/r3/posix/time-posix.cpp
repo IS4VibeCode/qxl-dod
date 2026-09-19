@@ -1,138 +1,72 @@
-/* $Id: time-posix.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: time-posix.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Time, POSIX.
+ * IPRT - Time, POSIX.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_TIME
 #define RTTIME_INCL_TIMEVAL
 #include <sys/time.h>
 #include <time.h>
-#ifdef __LINUX__
-# include <sys/syscall.h>
-# include <unistd.h>
-# ifndef __NR_clock_gettime
-#  define __NR_timer_create	259
-#  define __NR_clock_gettime	(__NR_timer_create+6)
-# endif
-#endif /* __LINUX__ */
 
 #include <iprt/time.h>
 #include "internal/time.h"
 
 
-#ifdef __LINUX__
-DECLINLINE(int) sys_clock_gettime(clockid_t id,  struct timespec *ts)
-{
-    int rc = syscall(__NR_clock_gettime, id, ts);
-    if (rc >= 0)
-        return rc;
-    return -1;
-}
-#endif /* __LINUX__ */
-
-
-/**
- * Wrapper around various monotone time sources.
- */
-DECLINLINE(int) mono_clock(struct timespec *ts)
-{
-#if !defined(__OS2__) && !defined(__L4__)
-    static int iWorking = -1;
-    switch (iWorking)
-    {
-#ifdef CLOCK_MONOTONIC
-        /*
-         * Standard clock_gettime()
-         */
-        case 0:
-            return clock_gettime(CLOCK_MONOTONIC, ts);
-
-#ifdef __LINUX__
-        /*
-         * Syscall clock_gettime().
-         */
-        case 1:
-            return sys_clock_gettime(CLOCK_MONOTONIC, ts);
-#endif /* __LINUX__ */
-
-#endif /* CLOCK_MONOTONIC */
-
-
-        /*
-         * Figure out what's working.
-         */
-        case -1:
-        {
-            int rc;
-#ifdef CLOCK_MONOTONIC
-            /*
-             * Real-Time API.
-             */
-            rc = clock_gettime(CLOCK_MONOTONIC, ts);
-            if (!rc)
-            {
-                iWorking = 0;
-                return 0;
-            }
-
-#ifdef __LINUX__
-            rc = sys_clock_gettime(CLOCK_MONOTONIC, ts);
-            if (!rc)
-            {
-                iWorking = 1;
-                return 0;
-            }
-#endif /* __LINUX__ */
-#endif /* CLOCK_MONOTONIC */
-
-            /* give up */
-            iWorking = -2;
-            break;
-        }
-    }
-#endif /* !__OS2__ && !__L4__ */
-    return -1;
-}
-
-
 DECLINLINE(uint64_t) rtTimeGetSystemNanoTS(void)
 {
+#if defined(CLOCK_MONOTONIC) && !defined(RT_OS_L4) && !defined(RT_OS_OS2)
     /* check monotonic clock first. */
-    static bool fMonoClock = true;
-    if (fMonoClock)
+    static bool s_fMonoClock = true;
+    if (s_fMonoClock)
     {
         struct timespec ts;
-        if (!mono_clock(&ts))
-            return (uint64_t)ts.tv_sec * (uint64_t)(1000 * 1000 * 1000)
+        if (!clock_gettime(CLOCK_MONOTONIC, &ts))
+            return (uint64_t)ts.tv_sec * RT_NS_1SEC_64
                  + ts.tv_nsec;
-        fMonoClock = false;
+        s_fMonoClock = false;
     }
+#endif
 
     /* fallback to gettimeofday(). */
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec  * (uint64_t)(1000 * 1000 * 1000)
-         + (uint64_t)(tv.tv_usec * 1000);
+    return (uint64_t)tv.tv_sec  * RT_NS_1SEC_64
+         + (uint64_t)(tv.tv_usec * RT_NS_1US);
 }
 
 
@@ -160,20 +94,6 @@ RTDECL(uint64_t) RTTimeSystemNanoTS(void)
  */
 RTDECL(uint64_t) RTTimeSystemMilliTS(void)
 {
-    return rtTimeGetSystemNanoTS() / 1000000;
-}
-
-
-/**
- * Gets the current system time.
- *
- * @returns pTime.
- * @param   pTime   Where to store the time.
- */
-RTR3DECL(PRTTIMESPEC) RTTimeNow(PRTTIMESPEC pTime)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return RTTimeSpecSetTimeval(pTime, &tv);
+    return rtTimeGetSystemNanoTS() / RT_NS_1MS;
 }
 

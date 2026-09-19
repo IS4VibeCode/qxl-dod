@@ -1,3 +1,5 @@
+/* $Id: RemoteUSBDeviceImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
+
 /** @file
  *
  * VirtualBox IHostUSBDevice COM interface implementation
@@ -5,227 +7,130 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_REMOTEUSBDEVICEIMPL
-#define ____H_REMOTEUSBDEVICEIMPL
+#ifndef MAIN_INCLUDED_RemoteUSBDeviceImpl_h
+#define MAIN_INCLUDED_RemoteUSBDeviceImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
-#include "Collection.h"
-#include <VBox/vrdpapi.h>
+#include "HostUSBDeviceWrap.h"
+
+struct _VRDEUSBDEVICEDESC;
+typedef _VRDEUSBDEVICEDESC VRDEUSBDEVICEDESC;
 
 class ATL_NO_VTABLE RemoteUSBDevice :
-    public VirtualBoxSupportErrorInfoImpl <RemoteUSBDevice, IHostUSBDevice>,
-    public VirtualBoxSupportTranslation <RemoteUSBDevice>,
-    public VirtualBoxBase,
-    public IHostUSBDevice
+    public HostUSBDeviceWrap
 {
 public:
 
-    DECLARE_NOT_AGGREGATABLE(RemoteUSBDevice)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(RemoteUSBDevice)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IHostUSBDevice)
-        COM_INTERFACE_ENTRY(IUSBDevice)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
-
-    DECLARE_EMPTY_CTOR_DTOR (RemoteUSBDevice)
+    DECLARE_COMMON_CLASS_METHODS(RemoteUSBDevice)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-#ifdef VRDP_MC
-    HRESULT init(uint32_t u32ClientId, VRDPUSBDEVICEDESC *pDevDesc);
-#else
-    HRESULT init(VRDPUSBDEVICEDESC *pDevDesc);
-#endif /* VRDP_MC */
+    HRESULT init(uint32_t u32ClientId, VRDEUSBDEVICEDESC const *pDevDesc, bool fDescExt);
     void uninit();
 
-    // IUSBDevice properties
-    STDMETHOD(COMGETTER(Id)) (GUIDPARAMOUT aId);
-    STDMETHOD(COMGETTER(VendorId)) (USHORT *aVendorId);
-    STDMETHOD(COMGETTER(ProductId)) (USHORT *aProductId);
-    STDMETHOD(COMGETTER(Revision)) (USHORT *aRevision);
-    STDMETHOD(COMGETTER(Manufacturer)) (BSTR *aManufacturer);
-    STDMETHOD(COMGETTER(Product)) (BSTR *aProduct);
-    STDMETHOD(COMGETTER(SerialNumber)) (BSTR *aSerialNumber);
-    STDMETHOD(COMGETTER(Address)) (BSTR *aAddress);
-    STDMETHOD(COMGETTER(Port)) (USHORT *aPort);
-    STDMETHOD(COMGETTER(Remote)) (BOOL *aRemote);
-
-    // IHostUSBDevice properties
-    STDMETHOD(COMGETTER(State)) (USBDeviceState_T *aState);
-
     // public methods only for internal purposes
-    bool dirty (void) { return mDirty; }
-    void dirty (bool aDirty) { mDirty = aDirty; }
+    bool dirty(void) const { return mData.dirty; }
+    void dirty(bool aDirty) { mData.dirty = aDirty; }
 
-    uint16_t devId (void) { return mDevId; }
-#ifdef VRDP_MC
-    uint32_t clientId (void) { return mClientId; }
-#endif /* VRDP_MC */
+    uint16_t devId(void) const { return mData.devId; }
+    uint32_t clientId(void) { return mData.clientId; }
 
-    bool captured (void) { return mState == USBDeviceState_USBDeviceCaptured; }
-    void captured (bool aCaptured)
+    bool captured(void) const { return mData.state == USBDeviceState_Captured; }
+    void captured(bool aCaptured)
     {
         if (aCaptured)
         {
-            Assert(mState == USBDeviceState_USBDeviceAvailable);
-            mState = USBDeviceState_USBDeviceCaptured;
+            Assert(mData.state == USBDeviceState_Available);
+            mData.state = USBDeviceState_Captured;
         }
         else
         {
-            Assert(mState == USBDeviceState_USBDeviceCaptured);
-            mState = USBDeviceState_USBDeviceAvailable;
+            Assert(mData.state == USBDeviceState_Captured);
+            mData.state = USBDeviceState_Available;
         }
     }
-
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"RemoteUSBDevice"; }
 
 private:
 
-    Guid mId;
+    // wrapped IUSBDevice properties
+    HRESULT getId(com::Guid &aId);
+    HRESULT getVendorId(USHORT *aVendorId);
+    HRESULT getProductId(USHORT *aProductId);
+    HRESULT getRevision(USHORT *aRevision);
+    HRESULT getManufacturer(com::Utf8Str &aManufacturer);
+    HRESULT getProduct(com::Utf8Str &aProduct);
+    HRESULT getSerialNumber(com::Utf8Str &aSerialNumber);
+    HRESULT getAddress(com::Utf8Str &aAddress);
+    HRESULT getPort(USHORT *aPort);
+    HRESULT getVersion(USHORT *aVersion);
+    HRESULT getPortPath(com::Utf8Str &aAddress);
+    HRESULT getSpeed(USBConnectionSpeed_T *aSpeed);
+    HRESULT getRemote(BOOL *aRemote);
+    HRESULT getBackend(com::Utf8Str &aBackend);
+    HRESULT getDeviceInfo(std::vector<com::Utf8Str> &aInfo);
 
-    uint16_t mVendorId;
-    uint16_t mProductId;
-    uint16_t mRevision;
-
-    Bstr mManufacturer;
-    Bstr mProduct;
-    Bstr mSerialNumber;
-
-    Bstr mAddress;
-
-    uint16_t mPort;
-
-    USBDeviceState_T mState;
-
-    bool mDirty;
-    uint16_t mDevId;
-#ifdef VRDP_MC
-    uint32_t mClientId;
-#endif /* VRDP_MC */
-};
+    // wrapped IHostUSBDevice properties
+    HRESULT getState(USBDeviceState_T *aState);
 
 
-/// @todo (dmik) give a less stupid name and move to Collection.h
-#define COM_DECL_READONLY_ENUM_AND_COLLECTION_FOR_BEGIN(c, iface) \
-    class c##Enumerator \
-        : public IfaceVectorEnumerator \
-            <iface##Enumerator, iface, ComObjPtr <c>, c##Enumerator> \
-        , public VirtualBoxSupportTranslation <c##Enumerator> \
-    { \
-        NS_DECL_ISUPPORTS \
-        public: static const wchar_t *getComponentName() { \
-            return WSTR_LITERAL (c) L"Enumerator"; \
-        } \
-    }; \
-    class c##Collection \
-        : public ReadonlyIfaceVector \
-            <iface##Collection, iface, iface##Enumerator, ComObjPtr <c>, c##Enumerator, \
-         c##Collection> \
-        , public VirtualBoxSupportTranslation <c##Collection> \
-    { \
-        NS_DECL_ISUPPORTS \
-        public: static const wchar_t *getComponentName() { \
-            return WSTR_LITERAL (c) L"Collection"; \
-        }
+    struct Data
+    {
+        Data() : vendorId(0), productId(0), revision(0), port(0), version(1),
+                 speed(USBConnectionSpeed_Null), state(USBDeviceState_NotSupported), dirty(FALSE),
+                 devId(0), clientId(0) {}
 
-#define COM_DECL_READONLY_ENUM_AND_COLLECTION_FOR_END(c, iface) \
+        const Guid id;
+
+        const uint16_t vendorId;
+        const uint16_t productId;
+        const uint16_t revision;
+
+        const Utf8Str manufacturer;
+        const Utf8Str product;
+        const Utf8Str serialNumber;
+
+        const Utf8Str address;
+        const Utf8Str backend;
+
+        const uint16_t port;
+        const Utf8Str portPath;
+        const uint16_t version;
+        const USBConnectionSpeed_T speed;
+
+        USBDeviceState_T state;
+        bool dirty;
+
+        const uint16_t devId;
+        const uint32_t clientId;
     };
 
-#ifdef __WIN__
+    Data mData;
+};
 
-#define COM_IMPL_READONLY_ENUM_AND_COLLECTION_FOR(c, iface)
-
-#else // !__WIN__
-
-#define COM_IMPL_READONLY_ENUM_AND_COLLECTION_FOR(c, iface) \
-    NS_DECL_CLASSINFO(c##Collection) \
-    NS_IMPL_THREADSAFE_ISUPPORTS1_CI(c##Collection, iface##Collection) \
-    NS_DECL_CLASSINFO(c##Enumerator) \
-    NS_IMPL_THREADSAFE_ISUPPORTS1_CI(c##Enumerator, iface##Enumerator)
-
-#endif
-
-COM_DECL_READONLY_ENUM_AND_COLLECTION_FOR_BEGIN (RemoteUSBDevice, IHostUSBDevice)
-
-    STDMETHOD(FindById) (INPTR GUIDPARAM aId, IHostUSBDevice **aDevice)
-    {
-        Guid idToFind = aId;
-        if (idToFind.isEmpty())
-            return E_INVALIDARG;
-        if (!aDevice)
-            return E_POINTER;
-
-        *aDevice = NULL;
-        Vector::value_type found;
-        Vector::iterator it = vec.begin();
-        while (!found && it != vec.end())
-        {
-            Guid id;
-            (*it)->COMGETTER(Id) (id.asOutParam());
-            if (id == idToFind)
-                found = *it;
-            ++ it;
-        }
-
-        if (!found)
-            return setError (E_INVALIDARG, RemoteUSBDeviceCollection::tr (
-                "Could not find a USB device with UUID {%s}"),
-                idToFind.toString().raw());
-
-        return found.queryInterfaceTo (aDevice);
-    }
-
-    STDMETHOD(FindByAddress) (INPTR BSTR aAddress, IHostUSBDevice **aDevice)
-    {
-        if (!aAddress)
-            return E_INVALIDARG;
-        if (!aDevice)
-            return E_POINTER;
-
-        *aDevice = NULL;
-        Vector::value_type found;
-        Vector::iterator it = vec.begin();
-        while (!found && it != vec.end())
-        {
-            Bstr address;
-            (*it)->COMGETTER(Address) (address.asOutParam());
-            if (address == aAddress)
-                found = *it;
-            ++ it;
-        }
-
-        if (!found)
-            return setError (E_INVALIDARG, RemoteUSBDeviceCollection::tr (
-                "Could not find a USB device with address '%ls'"),
-                aAddress);
-
-        return found.queryInterfaceTo (aDevice);
-    }
-
-COM_DECL_READONLY_ENUM_AND_COLLECTION_FOR_END (RemoteUSBDevice, IHostUSBDevice)
-
-
-#endif // ____H_REMOTEUSBDEVICEIMPL
+#endif /* !MAIN_INCLUDED_RemoteUSBDeviceImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

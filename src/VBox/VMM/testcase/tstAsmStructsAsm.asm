@@ -1,32 +1,47 @@
+; $Id: tstAsmStructsAsm.asm 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $
 ;; @file
+; Assembly / C structure layout testcase.
 ;
-; Make nasm create absolute symbols for the structure definition
+; Make yasm/nasm create absolute symbols for the structure definition
 ; which we can parse and make code from using objdump and sed.
-
-; Copyright (C) 2006 InnoTek Systemberatung GmbH
 ;
-; This file is part of VirtualBox Open Source Edition (OSE), as
-; available from http://www.virtualbox.org. This file is free software;
-; you can redistribute it and/or modify it under the terms of the GNU
-; General Public License as published by the Free Software Foundation,
-; in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
-; distribution. VirtualBox OSE is distributed in the hope that it will
-; be useful, but WITHOUT ANY WARRANTY of any kind.
-;
-; If you received this file as part of a commercial VirtualBox
-; distribution, then only the terms of your commercial VirtualBox
-; license agreement apply instead of the previous paragraph.
 
-%ifdef __AMD64__
+;
+; Copyright (C) 2006-2026 Oracle and/or its affiliates.
+;
+; This file is part of VirtualBox base platform packages, as
+; available from https://www.virtualbox.org.
+;
+; This program is free software; you can redistribute it and/or
+; modify it under the terms of the GNU General Public License
+; as published by the Free Software Foundation, in version 3 of the
+; License.
+;
+; This program is distributed in the hope that it will be useful, but
+; WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+; General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program; if not, see <https://www.gnu.org/licenses>.
+;
+; SPDX-License-Identifier: GPL-3.0-only
+;
+
+%ifdef RT_ARCH_AMD64
 BITS 64
 %endif
 
-%include "../CPUMInternal.mac"
-%include "../TRPMInternal.mac"
-%include "../VMMInternal.mac"
-%include "VBox/cpum.mac"
-%include "VBox/vm.mac"
-%include "../VMMSwitcher/VMMSwitcher.mac"
+%include "CPUMInternal.mac"
+%include "HMInternal.mac"
+%include "VMMInternal.mac"
+%include "VBox/vmm/cpum.mac"
+%include "VBox/vmm/vm.mac"
+%include "VBox/vmm/gvm.mac"
+%include "VBox/sup.mac"
+%ifdef DO_GLOBALS
+ %include "tstAsmStructsAsm.mac"
+%endif
 
 .text
 .data

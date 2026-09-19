@@ -1,126 +1,142 @@
+/* $Id: SharedFolderImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_SHAREDFOLDERIMPL
-#define ____H_SHAREDFOLDERIMPL
+#ifndef MAIN_INCLUDED_SharedFolderImpl_h
+#define MAIN_INCLUDED_SharedFolderImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
-#include "Collection.h"
+#include "SharedFolderWrap.h"
 #include <VBox/shflsvc.h>
 
-class Machine;
 class Console;
-class VirtualBox;
+
+namespace settings
+{
+    struct SharedFolder;
+}
 
 class ATL_NO_VTABLE SharedFolder :
-    public VirtualBoxSupportErrorInfoImpl <SharedFolder, ISharedFolder>,
-    public VirtualBoxSupportTranslation <SharedFolder>,
-    public VirtualBoxBase,
-    public ISharedFolder
+    public SharedFolderWrap
 {
 public:
 
-    // to satisfy the ComObjPtr template (we have const members)
-    SharedFolder() {}
-
-    DECLARE_NOT_AGGREGATABLE(SharedFolder)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(SharedFolder)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(ISharedFolder)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS (SharedFolder)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT init (Machine *aMachine, const BSTR aName, const BSTR aHostPath);
-    HRESULT initCopy (Machine *aMachine, SharedFolder *aThat);
-    HRESULT init (Console *aConsole, const BSTR aName, const BSTR aHostPath);
-    HRESULT init (VirtualBox *aVirtualBox, const BSTR aName, const BSTR aHostPath);
+    HRESULT init(Machine *aMachine, const com::Utf8Str &aName, const com::Utf8Str &aHostPath,
+                 bool aWritable, bool aAutoMount, const com::Utf8Str &aAutoMountPoint, bool fFailOnError,
+                 SymlinkPolicy_T enmSymlinkPolicy);
+    HRESULT initCopy(Machine *aMachine, SharedFolder *aThat);
+//    HRESULT init(Console *aConsole, const com::Utf8Str &aName, const com::Utf8Str &aHostPath,
+//                 bool aWritable, bool aAutoMount, const com::Utf8Str &aAutoMountPoint, bool fFailOnError);
+    HRESULT init(VirtualBox *aVirtualBox, const com::Utf8Str &aName, const com::Utf8Str &aHostPath,
+                 bool aWritable, bool aAutoMount, const com::Utf8Str &aAutoMountPoint, bool fFailOnError,
+                 SymlinkPolicy_T enmSymlinkPolicy);
+    HRESULT init(VirtualBox *aVirtualBox, const settings::SharedFolder &rData);
     void uninit();
-
-    // ISharedFolder properties
-    STDMETHOD(COMGETTER(Name)) (BSTR *aName);
-    STDMETHOD(COMGETTER(HostPath)) (BSTR *aHostPath);
-    STDMETHOD(COMGETTER(Accessible)) (BOOL *aAccessible);
+    HRESULT i_saveSettings(settings::SharedFolder &data);
 
     // public methods for internal purposes only
+    // (ensure there is a caller and a read lock before calling them!)
 
-    const Bstr &name() const { return mName; }
-    const Bstr &hostPath() const { return mHostPath; }
+    /**
+     * Public internal method. Returns the shared folder's name. Needs caller! Locking not necessary.
+     * @return
+     */
+    const Utf8Str &i_getName() const;
 
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"SharedFolder"; }
+    /**
+     * Public internal method. Returns the shared folder's host path. Needs caller! Locking not necessary.
+     * @return
+     */
+    const Utf8Str &i_getHostPath() const;
+
+    /**
+     * Public internal method. Returns true if the shared folder is writable. Needs caller and locking!
+     * @return
+     */
+    bool i_isWritable() const;
+
+    /**
+     * Public internal method. Returns true if the shared folder is auto-mounted. Needs caller and locking!
+     * @return
+     */
+    bool i_isAutoMounted() const;
+
+    /**
+     * Public internal method for getting the auto mount point.
+     */
+    const Utf8Str &i_getAutoMountPoint() const;
+
+    /**
+     * Public internal method for getting the symlink policy.
+     */
+    SymlinkPolicy_T i_getSymlinkPolicy() const;
 
 protected:
 
-    HRESULT protectedInit (VirtualBoxBaseWithChildren *aParent,
-                           const BSTR aName, const BSTR aHostPath);
-
+    HRESULT i_protectedInit(VirtualBoxBase *aParent,
+                            const Utf8Str &aName,
+                            const Utf8Str &aHostPath,
+                            bool aWritable,
+                            bool aAutoMount,
+                            const com::Utf8Str &aAutoMountPoint,
+                            bool fFailOnError,
+                            SymlinkPolicy_T enmSymlinkPolicy);
 private:
 
-    VirtualBoxBaseWithChildren *mParent;
+    // wrapped ISharedFolder properties.
+    HRESULT getName(com::Utf8Str &aName);
+    HRESULT getHostPath(com::Utf8Str &aHostPath);
+    HRESULT getAccessible(BOOL *aAccessible);
+    HRESULT getWritable(BOOL *aWritable);
+    HRESULT setWritable(BOOL aWritable);
+    HRESULT getAutoMount(BOOL *aAutoMount);
+    HRESULT setAutoMount(BOOL aAutoMount);
+    HRESULT getAutoMountPoint(com::Utf8Str &aAutoMountPoint);
+    HRESULT setAutoMountPoint(com::Utf8Str const &aAutoMountPoint);
+    HRESULT getLastAccessError(com::Utf8Str &aLastAccessError);
+    HRESULT getSymlinkPolicy(SymlinkPolicy_T *aSymlinkPolicy);
+    HRESULT setSymlinkPolicy(SymlinkPolicy_T aSymlinkPolicy);
+
+    VirtualBoxBase * const mParent;
 
     /* weak parents (only one of them is not null) */
-    ComObjPtr <Machine, ComWeakRef> mMachine;
-    ComObjPtr <Console, ComWeakRef> mConsole;
-    ComObjPtr <VirtualBox, ComWeakRef> mVirtualBox;
+    Machine        * const mMachine;
+    VirtualBox     * const mVirtualBox;
 
-    const Bstr mName;
-    const Bstr mHostPath;
+    struct Data;            // opaque data struct, defined in MachineSharedFolderImpl.cpp
+    Data *m;
 };
 
-COM_DECL_READONLY_ENUM_AND_COLLECTION_BEGIN (SharedFolder)
-
-    STDMETHOD(FindByName) (INPTR BSTR aName, ISharedFolder **aSharedFolder)
-    {
-        if (!aName)
-            return E_INVALIDARG;
-        if (!aSharedFolder)
-            return E_POINTER;
-
-        *aSharedFolder = NULL;
-        Vector::value_type found;
-        Vector::iterator it = vec.begin();
-        while (it != vec.end() && !found)
-        {
-            Bstr name;
-            (*it)->COMGETTER(Name) (name.asOutParam());
-            if (name == aName)
-                found = *it;
-            ++ it;
-        }
-
-        if (!found)
-            return setError (E_INVALIDARG, SharedFolderCollection::tr (
-                "Shared folder named '%ls' could not be found"), aName);
-
-        return found.queryInterfaceTo (aSharedFolder);
-    }
-
-COM_DECL_READONLY_ENUM_AND_COLLECTION_END (SharedFolder)
-
-#endif // ____H_SHAREDFOLDERIMPL
+#endif /* !MAIN_INCLUDED_SharedFolderImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

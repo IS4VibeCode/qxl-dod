@@ -47,6 +47,10 @@
 #include "xptinfo.h"
 #include "nsIInterfaceInfo.h"
 
+#ifdef VBOX_WITH_XPCOM_NAMESPACE_CLEANUP
+#define XPTC_InvokeByIndex VBoxNsxpXPTC_InvokeByIndex
+#endif /* VBOX_WITH_XPCOM_NAMESPACE_CLEANUP */
+
 /***************************************************************************/
 /*
  * The linkage of XPTC API functions differs depending on whether the file is
@@ -57,16 +61,32 @@
 #ifdef EXPORT_XPTC_API
 #define XPTC_PUBLIC_API(t)    PR_IMPLEMENT(t)
 #define XPTC_PUBLIC_DATA(t)   PR_IMPLEMENT_DATA(t)
-#ifdef _WIN32
+#if defined(_WIN32)
 #    define XPTC_EXPORT           __declspec(dllexport)
+#elif defined(XP_OS2) && defined(__declspec)
+#    define XPTC_EXPORT           __declspec(dllexport)
+#elif defined(XP_OS2_VACPP)
+#    define XPTC_EXPORT           extern
 #else
-#    define XPTC_EXPORT
+#  ifdef VBOX_HAVE_VISIBILITY_HIDDEN
+#    define XPTC_EXPORT           __attribute__((visibility("default")))
+#  else
+#    define XPTC_EXPORT 
+#  endif
 #endif
 #else
-#ifdef _WIN32
+#if defined(_WIN32)
 #    define XPTC_PUBLIC_API(t)    __declspec(dllimport) t
 #    define XPTC_PUBLIC_DATA(t)   __declspec(dllimport) t
 #    define XPTC_EXPORT           __declspec(dllimport)
+#elif defined(XP_OS2) && defined(__declspec)
+#    define XPTC_PUBLIC_API(t)    __declspec(dllimport) t
+#    define XPTC_PUBLIC_DATA(t)   __declspec(dllimport) t
+#    define XPTC_EXPORT           __declspec(dllimport)
+#elif defined(XP_OS2_VACPP)
+#    define XPTC_PUBLIC_API(t)    extern t
+#    define XPTC_PUBLIC_DATA(t)   extern t
+#    define XPTC_EXPORT           extern
 #else
 #    define XPTC_PUBLIC_API(t)    PR_IMPLEMENT(t)
 #    define XPTC_PUBLIC_DATA(t)   t
@@ -122,6 +142,13 @@ struct nsXPTCVariant : public nsXPTCMiniVariant
         VAL_IS_CSTR    = 0x40  // val.p holds a pointer to cstring needing cleanup        
     };
 
+    /* VBox: Added to prevent -Wclass-memaccess warnings (nsXPTType has a constructor) in python/src/VariantUtils.cpp */
+    nsXPTCVariant() : ptr(NULL), flags(0)
+    {
+        val.p = NULL;
+        type.flags = 0; /* stupid nsXPTType constructor only do random bytes (documented) */
+    }
+
     void ClearFlags()         {flags = 0;}
     void SetPtrIsData()       {flags |= PTR_IS_DATA;}
     void SetValIsAllocated()  {flags |= VAL_IS_ALLOCD;}
@@ -138,6 +165,13 @@ struct nsXPTCVariant : public nsXPTCMiniVariant
     PRBool IsValDOMString()  const  {return 0 != (flags & VAL_IS_DOMSTR);}
     PRBool IsValUTF8String() const  {return 0 != (flags & VAL_IS_UTF8STR);}
     PRBool IsValCString()    const  {return 0 != (flags & VAL_IS_CSTR);}    
+#ifdef VBOX
+    PRBool MustFreeVal()     const  {return 0 != (flags & (  VAL_IS_ALLOCD
+                                                           | VAL_IS_IFACE
+                                                           | VAL_IS_DOMSTR
+                                                           | VAL_IS_UTF8STR
+                                                           | VAL_IS_CSTR)); }
+#endif
 
     void Init(const nsXPTCMiniVariant& mv, const nsXPTType& t, PRUint8 f)
     {
@@ -197,6 +231,11 @@ public:
     // we expect it to never be called. 
     // *This is needed by the Irix implementation.*
     NS_IMETHOD QueryInterface(REFNSIID aIID, void** aInstancePtr);
+
+    // Implement dummy constructor, destructor to workaround Solaris gcc 4.8.2
+    // linking issue (see @bugref{5838}).
+    nsXPTCStubBase() {}
+    ~nsXPTCStubBase() {}
 
     // Include generated vtbl stub declarations.
     // These are virtual and *also* implemented by this class..

@@ -43,6 +43,11 @@
 #include "prtypes.h"
 #include "xpt_struct.h"
 
+#ifdef VBOX_WITH_XPCOM_NAMESPACE_CLEANUP
+#define XPTI_GetInterfaceInfoManager VBoxNsxpXPTI_GetInterfaceInfoManager
+#define XPTI_FreeInterfaceInfoManager VBoxNsxpXPTI_FreeInterfaceInfoManager
+#endif /* VBOX_WITH_XPCOM_NAMESPACE_CLEANUP */
+
 /*
  * The linkage of XPTI API functions differs depending on whether the file is
  * used within the XPTI library or not.  Any source file within the XPTI
@@ -52,16 +57,28 @@
 #ifdef EXPORT_XPTI_API
 #define XPTI_PUBLIC_API(t)    PR_IMPLEMENT(t)
 #define XPTI_PUBLIC_DATA(t)   PR_IMPLEMENT_DATA(t)
-#ifdef _WIN32
+#if defined(_WIN32)
 #    define XPTI_EXPORT           __declspec(dllexport)
+#elif defined(XP_OS2) && defined(__declspec)
+#    define XPTI_EXPORT           __declspec(dllexport)
+#elif defined(XP_OS2_VACPP)
+#    define XPTI_EXPORT           extern
 #else
 #    define XPTI_EXPORT
 #endif
 #else
-#ifdef _WIN32
+#if defined(_WIN32)
 #    define XPTI_PUBLIC_API(t)    __declspec(dllimport) t
 #    define XPTI_PUBLIC_DATA(t)   __declspec(dllimport) t
 #    define XPTI_EXPORT           __declspec(dllimport)
+#elif defined(XP_OS2) && defined(__declspec)
+#    define XPTI_PUBLIC_API(t)    __declspec(dllimport) t
+#    define XPTI_PUBLIC_DATA(t)   __declspec(dllimport) t
+#    define XPTI_EXPORT           __declspec(dllimport)
+#elif defined(XP_OS2_VACPP)
+#    define XPTI_PUBLIC_API(t)    extern t
+#    define XPTI_PUBLIC_DATA(t)   extern t
+#    define XPTI_EXPORT           extern
 #else
 #    define XPTI_PUBLIC_API(t)    PR_IMPLEMENT(t)
 #    define XPTI_PUBLIC_DATA(t)   t

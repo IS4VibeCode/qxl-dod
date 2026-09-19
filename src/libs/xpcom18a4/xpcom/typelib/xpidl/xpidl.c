@@ -38,14 +38,13 @@
 /*
  * Main xpidl program entry point.
  */
+#include <iprt/initterm.h>
 
 #include "xpidl.h"
 
 static ModeData modes[] = {
     {"header",  "Generate C++ header",         "h",    xpidl_header_dispatch},
     {"typelib", "Generate XPConnect typelib",  "xpt",  xpidl_typelib_dispatch},
-    {"doc",     "Generate HTML documentation", "html", xpidl_doc_dispatch},
-    {"java",    "Generate Java interface",     "java", xpidl_java_dispatch},
     {0,         0,                             0,      0}
 };
 
@@ -60,11 +59,11 @@ FindMode(char *mode)
     return NULL;
 }
 
-gboolean enable_debug               = FALSE;
-gboolean enable_warnings            = FALSE;
-gboolean verbose_mode               = FALSE;
-gboolean emit_typelib_annotations   = FALSE;
-gboolean explicit_output_filename   = FALSE;
+bool enable_debug               = false;
+bool enable_warnings            = false;
+bool verbose_mode               = false;
+bool emit_typelib_annotations   = false;
+bool explicit_output_filename   = false;
 
 /* The following globals are explained in xpt_struct.h */
 PRUint8  major_version              = XPT_MAJOR_VERSION;
@@ -85,38 +84,28 @@ static char xpidl_usage_str[] =
 static void
 xpidl_usage(int argc, char *argv[])
 {
-    int i;
+    RT_NOREF(argc);
     fprintf(stderr, xpidl_usage_str, argv[0]);
-    for (i = 0; modes[i].mode; i++) {
+    for (int i = 0; modes[i].mode; i++) {
         fprintf(stderr, "          %-12s  %-30s (.%s)\n", modes[i].mode,
                 modes[i].modeInfo, modes[i].suffix);
     }
 }
 
-#if defined(XP_MAC) && defined(XPIDL_PLUGIN)
-#define main xpidl_main
-int xpidl_main(int argc, char *argv[]);
-#endif
-
 int main(int argc, char *argv[])
 {
+    RTR3InitExeNoArguments(0);
+
     int i;
-    IncludePathEntry *inc, *inc_head, **inc_tail;
+    RTLISTANCHOR LstIncludePaths;
     char *file_basename = NULL;
     ModeData *mode = NULL;
-    gboolean create_old_typelib = FALSE;
 
-    /* turn this on for extra checking of our code */
-/*    IDL_check_cast_enable(TRUE); */
+    RTListInit(&LstIncludePaths);
 
-    inc_head = xpidl_malloc(sizeof *inc);
-#ifndef XP_MAC
-    inc_head->directory = ".";
-#else
-    inc_head->directory = "";
-#endif
-    inc_head->next = NULL;
-    inc_tail = &inc_head->next;
+    PXPIDLINCLUDEDIR pInc = (PXPIDLINCLUDEDIR)xpidl_malloc(sizeof(*pInc));
+    pInc->pszPath = ".";
+    RTListAppend(&LstIncludePaths, &pInc->NdIncludes);
 
     for (i = 1; i < argc; i++) {
         if (argv[i][0] != '-')
@@ -128,20 +117,19 @@ int main(int argc, char *argv[])
           case 0:               /* - is a legal input filename (stdin)  */
             goto done_options;
           case 'a':
-            emit_typelib_annotations = TRUE;
+            emit_typelib_annotations = true;
             break;
           case 'w':
-            enable_warnings = TRUE;
+            enable_warnings = true;
             break;
           case 'v':
-            verbose_mode = TRUE;
+            verbose_mode = true;
             break;
           case 't':
           {
             /* Parse for "-t version number" and store it into global boolean
              * and string variables.
              */
-            const gchar* typelib_version_string = NULL;
 
             /* 
              * If -t is the last argument on the command line, we have a problem
@@ -149,15 +137,6 @@ int main(int argc, char *argv[])
 
             if (i + 1 == argc) {
                 fprintf(stderr, "ERROR: missing version number after -t\n");
-                xpidl_usage(argc, argv);
-                return 1;
-            }
-
-            /* Do not allow more than one "-t" definition */
-            if (create_old_typelib) {
-                fprintf(stderr,
-                        "ERROR: -t argument used twice. "
-                        "Cannot specify more than one version\n");
                 xpidl_usage(argc, argv);
                 return 1;
             }
@@ -172,8 +151,6 @@ int main(int argc, char *argv[])
               case XPT_VERSION_CURRENT:
                 break; 
               case XPT_VERSION_OLD: 
-                create_old_typelib = TRUE;
-                break; 
               case XPT_VERSION_UNSUPPORTED: 
                 fprintf(stderr, "ERROR: version \"%s\" not supported.\n", 
                         argv[i]);
@@ -194,20 +171,16 @@ int main(int argc, char *argv[])
                 xpidl_usage(argc, argv);
                 return 1;
             }
-            inc = xpidl_malloc(sizeof *inc);
+            pInc = (PXPIDLINCLUDEDIR)xpidl_malloc(sizeof(*pInc));
             if (argv[i][2] == '\0') {
                 /* is it the -I foo form? */
-                inc->directory = argv[++i];
+                pInc->pszPath = argv[++i];
             } else {
                 /* must be the -Ifoo form.  Don't preincrement i. */
-                inc->directory = argv[i] + 2;
+                pInc->pszPath = argv[i] + 2;
             }
-#ifdef DEBUG_shaver_includes
-            fprintf(stderr, "adding %s to include path\n", inc->directory);
-#endif
-            inc->next = NULL;
-            *inc_tail = inc;
-            inc_tail = &inc->next;
+
+            RTListAppend(&LstIncludePaths, &pInc->NdIncludes);
             break;
           case 'o':
             if (i == argc) {
@@ -216,7 +189,7 @@ int main(int argc, char *argv[])
                 return 1;
             }
             file_basename = argv[++i];
-            explicit_output_filename = FALSE;
+            explicit_output_filename = false;
             break;
           case 'e':
             if (i == argc) {
@@ -225,7 +198,7 @@ int main(int argc, char *argv[])
                 return 1;
             }
             file_basename = argv[++i];
-            explicit_output_filename = TRUE;
+            explicit_output_filename = true;
             break;
           case 'm':
             if (i + 1 == argc) {
@@ -268,8 +241,12 @@ int main(int argc, char *argv[])
      * Don't try to process multiple files, given that we don't handle -o
      * multiply.
      */
-    if (xpidl_process_idl(argv[i], inc_head, file_basename, mode))
+    int rc = xpidl_process_idl(argv[i], &LstIncludePaths, file_basename, mode);
+    if (RT_SUCCESS(rc))
         return 0;
 
+    /** @todo Free include paths. */
+
+    printf("Failed to process IDL file\n");
     return 1;
 }

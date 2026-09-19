@@ -1,78 +1,103 @@
-/* $Id: alloc-r0drv-nt.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: alloc-r0drv-nt.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Memory Allocation, Ring-0 Driver, NT.
+ * IPRT - Memory Allocation, Ring-0 Driver, NT.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include "the-nt-kernel.h"
+#include "internal/iprt.h"
+#include <iprt/mem.h>
 
-#include <iprt/alloc.h>
 #include <iprt/assert.h>
+#include <iprt/errcore.h>
 #include "r0drv/alloc-r0drv.h"
+#include "internal-r0drv-nt.h"
 
 
 /**
  * OS specific allocation function.
  */
-PRTMEMHDR rtMemAlloc(size_t cb, uint32_t fFlags)
+DECLHIDDEN(int) rtR0MemAllocEx(size_t cb, uint32_t fFlags, PRTMEMHDR *ppHdr)
 {
-    Assert(cb != sizeof(void *)); /* 99% of pointer sized allocations are wrong. */
-    PRTMEMHDR pHdr = (PRTMEMHDR)ExAllocatePoolWithTag(NonPagedPool, cb + sizeof(*pHdr), 'iprt');
-    if (pHdr)
+    if (!(fFlags & RTMEMHDR_FLAG_ANY_CTX))
     {
-        pHdr->u32Magic  = RTMEMHDR_MAGIC;
-        pHdr->fFlags    = fFlags;
-        pHdr->cb        = cb;
-        pHdr->u32Padding= 0;
+        PRTMEMHDR       pHdr;
+        POOL_TYPE const enmPoolType = g_uRtNtVersion >= RTNT_MAKE_VERSION(8,0) ? NonPagedPoolNx : NonPagedPool;
+        if (g_pfnrtExAllocatePoolWithTag)
+            pHdr = (PRTMEMHDR)g_pfnrtExAllocatePoolWithTag(enmPoolType, cb + sizeof(*pHdr), IPRT_NT_POOL_TAG);
+        else
+        {
+            fFlags |= RTMEMHDR_FLAG_UNTAGGED;
+            pHdr = (PRTMEMHDR)ExAllocatePool(enmPoolType, cb + sizeof(*pHdr));
+        }
+        if (RT_LIKELY(pHdr))
+        {
+            pHdr->u32Magic  = RTMEMHDR_MAGIC;
+            pHdr->fFlags    = fFlags;
+            pHdr->cb        = (uint32_t)cb; Assert(pHdr->cb == cb);
+            pHdr->cbReq     = (uint32_t)cb;
+            *ppHdr = pHdr;
+            return VINF_SUCCESS;
+        }
+        return VERR_NO_MEMORY;
     }
-    return pHdr;
+    return VERR_NOT_SUPPORTED;
 }
 
 
 /**
  * OS specific free function.
  */
-void rtMemFree(PRTMEMHDR pHdr)
+DECLHIDDEN(void) rtR0MemFree(PRTMEMHDR pHdr)
 {
-    pHdr->u32Magic += 1;
-    ExFreePool(pHdr);
+    pHdr->u32Magic = RTMEMHDR_MAGIC_DEAD;
+    if (g_pfnrtExFreePoolWithTag && !(pHdr->fFlags & RTMEMHDR_FLAG_UNTAGGED))
+        g_pfnrtExFreePoolWithTag(pHdr, IPRT_NT_POOL_TAG);
+    else
+        ExFreePool(pHdr);
 }
 
 
-/**
- * Allocates physical contiguous memory (below 4GB).
- * The allocation is page aligned and the content is undefined.
- *
- * @returns Pointer to the memory block. This is page aligned.
- * @param   pPhys   Where to store the physical address.
- * @param   cb      The allocation size in bytes. This is always
- *                  rounded up to PAGE_SIZE.
- */
 RTR0DECL(void *) RTMemContAlloc(PRTCCPHYS pPhys, size_t cb)
 {
     /*
      * validate input.
      */
-    Assert(VALID_PTR(pPhys));
+    AssertPtr(pPhys);
     Assert(cb > 0);
 
     /*
@@ -108,12 +133,6 @@ RTR0DECL(void *) RTMemContAlloc(PRTCCPHYS pPhys, size_t cb)
 }
 
 
-/**
- * Frees memory allocated ysing RTMemContAlloc().
- *
- * @param   pv      Pointer to return from RTMemContAlloc().
- * @param   cb      The cb parameter passed to RTMemContAlloc().
- */
 RTR0DECL(void) RTMemContFree(void *pv, size_t cb)
 {
     if (pv)

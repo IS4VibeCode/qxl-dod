@@ -101,7 +101,11 @@
 
 #ifdef HAVE_VISIBILITY_ATTRIBUTE
 #define NS_VISIBILITY_HIDDEN   __attribute__ ((visibility ("hidden")))
-#define NS_VISIBILITY_DEFAULT
+# ifdef VBOX_HAVE_VISIBILITY_HIDDEN
+#  define NS_VISIBILITY_DEFAULT  __attribute__ ((visibility ("default")))
+# else
+#  define NS_VISIBILITY_DEFAULT
+# endif
 
 #define NS_HIDDEN_(type)   NS_VISIBILITY_HIDDEN type
 #else
@@ -142,15 +146,9 @@
 #define NS_FASTCALL
 #endif
 
-/*
- * NS_DEFCALL undoes the effect of a global regparm/stdcall setting
- * so that xptcall works correctly.
- */
-#if defined(__i386__) && defined(__GNUC__) && (__GNUC__ >= 3) && !defined(XP_OS2)
-#define NS_DEFCALL __attribute__ ((regparm (0), cdecl))
-#else
-#define NS_DEFCALL
-#endif
+/* XXX: nike, maybe fix */
+#define NS_EXPORT_STATIC_MEMBER_(type) type
+#define NS_IMPORT_STATIC_MEMBER_(type) type
 
 #ifdef NS_WIN32
 
@@ -176,17 +174,41 @@
 #define NS_CALLBACK_(_type, _name) _type (* _name)
 #define NS_STDCALL
 
-#else
+#elif defined(XP_OS2) && defined(__declspec)
 
-#define NS_IMPORT
-#define NS_IMPORT_(type) type
-#define NS_EXPORT
-#define NS_EXPORT_(type) type
-#define NS_IMETHOD_(type) virtual IMETHOD_VISIBILITY type NS_DEFCALL
+#define NS_IMPORT __declspec(dllimport)
+#define NS_IMPORT_(type) type __declspec(dllimport) __stdcall
+#define NS_EXPORT __declspec(dllexport)
+#define NS_EXPORT_(type) type __declspec(dllexport) __stdcall
+#define NS_IMETHOD_(type) virtual IMETHOD_VISIBILITY type
 #define NS_IMETHODIMP_(type) type
 #define NS_METHOD_(type) type
 #define NS_CALLBACK_(_type, _name) _type (* _name)
 #define NS_STDCALL
+
+#else
+
+# ifdef VBOX_HAVE_VISIBILITY_HIDDEN
+#  define NS_IMPORT
+#  define NS_IMPORT_(type) type
+#  define NS_EXPORT __attribute__((visibility("default")))
+#  define NS_EXPORT_(type) __attribute__((visibility("default"))) type
+#  define NS_IMETHOD_(type) virtual IMETHOD_VISIBILITY type
+#  define NS_IMETHODIMP_(type) type
+#  define NS_METHOD_(type) type
+#  define NS_CALLBACK_(_type, _name) _type (* _name)
+#  define NS_STDCALL
+# else
+#  define NS_IMPORT
+#  define NS_IMPORT_(type) type
+#  define NS_EXPORT
+#  define NS_EXPORT_(type) type
+#  define NS_IMETHOD_(type) virtual IMETHOD_VISIBILITY type
+#  define NS_IMETHODIMP_(type) type
+#  define NS_METHOD_(type) type
+#  define NS_CALLBACK_(_type, _name) _type (* _name)
+#  define NS_STDCALL
+# endif
 #endif
 
 /**
@@ -397,13 +419,30 @@ typedef PRUint32 nsresult;
     "straight", no macro.
   */
 #endif
- 
+
+#if __cplusplus+0 > 201100L
+#define NS_DEFAULT  = default
+#define NS_DELETE   = delete
+#define NS_OVERRIDE override
+#else
+#define NS_DEFAULT
+#define NS_DELETE
+#define NS_OVERRIDE
+#endif
+
+
+#ifndef VBOX
 /* 
  * Use these macros to do 64bit safe pointer conversions.
  */
 
 #define NS_PTR_TO_INT32(x) ((char *)(x) - (char *)0)
 #define NS_INT32_TO_PTR(x) ((void *)((char *)0 + (x)))
+#else /* VBOX */
+// This stuff is (contrary to the comment) totally 64bit unsafe, so strip
+// it down to only do one direction, which is used by the hashing code.
+#define NS_PTR_TO_INT32(x) ((PRInt32)((char *)(x) - (char *)0))
+#endif /* VBOX */
 
 /*
  * These macros allow you to give a hint to the compiler about branch
@@ -419,9 +458,9 @@ typedef PRUint32 nsresult;
  *
  */
 
-#if defined(__GNUC__) && (__GNUC__ > 2)
-#define NS_LIKELY(x)    (__builtin_expect((x), 1))
-#define NS_UNLIKELY(x)  (__builtin_expect((x), 0))
+#if defined(__GNUC__) && (__GNUC__ > 2) && !defined(FORTIFY_RUNNING)
+#define NS_LIKELY(x)    (__builtin_expect(!!(x), 1))
+#define NS_UNLIKELY(x)  (__builtin_expect(!!(x), 0))
 #else
 #define NS_LIKELY(x)    (x)
 #define NS_UNLIKELY(x)  (x)

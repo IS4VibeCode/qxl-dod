@@ -1,31 +1,49 @@
-/* $Id: alloc-ef.h 1  klaus.espenlaub@oracle.com $ */
+/* $Id: alloc-ef.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Memory Allocation, electric fence.
+ * IPRT - Memory Allocation, electric fence.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __alloc_ef_h__
-#define __alloc_ef_h__
+#ifndef IPRT_INCLUDED_SRC_r3_alloc_ef_h
+#define IPRT_INCLUDED_SRC_r3_alloc_ef_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 /*******************************************************************************
 *   Defined Constants And Macros                                               *
 *******************************************************************************/
-#if defined(__DOXYGEN__)
+#if defined(DOXYGEN_RUNNING)
 # define RTALLOC_USE_EFENCE
 # define RTALLOC_EFENCE_IN_FRONT
 # define RTALLOC_EFENCE_FREE_FILL 'f'
@@ -35,14 +53,27 @@
  * If defined the electric fence put up for ALL allocations by RTMemAlloc(),
  * RTMemAllocZ(), RTMemRealloc(), RTMemTmpAlloc() and RTMemTmpAllocZ().
  */
-#if 0// defined(DEBUG_bird)
+#if 0
 # define RTALLOC_USE_EFENCE
 #endif
 
-/** @def RTALLOC_EFENCE_SIZE
- * The size of the fence. This must be page aligned.
+/** @def RTALLOC_EFENCE_SIZE_FACTOR
+ * The size of the fence as a multiple of the system page size.
  */
-#define RTALLOC_EFENCE_SIZE             PAGE_SIZE
+#define RTALLOC_EFENCE_SIZE_FACTOR      1
+
+/** @def RTALLOC_EFENCE_ALIGNMENT
+ * The allocation alignment, power of two of course.
+ *
+ * Use this for working around misaligned sizes, usually stemming from
+ * allocating a string or something after the main structure.  When you
+ * encounter this, please fix the allocation to RTMemAllocVar or RTMemAllocZVar.
+ */
+#if 0
+# define RTALLOC_EFENCE_ALIGNMENT       (ARCH_BITS / 8)
+#else
+# define RTALLOC_EFENCE_ALIGNMENT       1
+#endif
 
 /** @def RTALLOC_EFENCE_IN_FRONT
  * Define this to put the fence up in front of the block.
@@ -67,34 +98,55 @@
 /** @def RTALLOC_EFENCE_FREE_FILL
  * This define will enable memset(,RTALLOC_EFENCE_FREE_FILL,)'ing the user memory
  * in the block before freeing/decommitting it. This is useful in GDB since GDB
- * appeares to be able to read the content of the page even after it's been
+ * appears to be able to read the content of the page even after it's been
  * decommitted.
  * Requires RTALLOC_EFENCE_TRACE.
  */
-#if defined(__LINUX__)
+#if defined(RT_OS_LINUX) || defined(RT_OS_SOLARIS) || defined(DOXYGEN_RUNNING)
 # define RTALLOC_EFENCE_FREE_FILL       'f'
 #endif
 
 /** @def RTALLOC_EFENCE_FILLER
  * This define will enable memset(,RTALLOC_EFENCE_FILLER,)'ing the allocated
- * memory when the API doesn't require it to be zero'ed.
+ * memory when the API doesn't require it to be zero'd.
  */
 #define RTALLOC_EFENCE_FILLER           0xef
 
-#if defined(__DOXYGEN__)
+/** @def RTALLOC_EFENCE_NOMAN_FILLER
+ * This define will enable memset(,RTALLOC_EFENCE_NOMAN_FILLER,)'ing the
+ * unprotected but not allocated area of memory, the so called no man's land.
+ */
+#define RTALLOC_EFENCE_NOMAN_FILLER     0xaa
+
+/** @def RTALLOC_EFENCE_FENCE_FILLER
+ * This define will enable memset(,RTALLOC_EFENCE_FENCE_FILLER,)'ing the
+ * fence itself, as debuggers can usually read them.
+ */
+#define RTALLOC_EFENCE_FENCE_FILLER     0xcc
+
+#if defined(DOXYGEN_RUNNING)
 /** @def RTALLOC_EFENCE_CPP
  * This define will enable the new and delete wrappers.
  */
 # define RTALLOC_EFENCE_CPP
 #endif
 
+#if defined(RUNNING_DOXYGEN)
+/** @def RTALLOC_REPLACE_MALLOC
+ * Replaces the malloc, calloc, realloc, free and friends in libc (experimental).
+ * Set in LocalConfig.kmk. Requires RTALLOC_EFENCE_TRACE to work. */
+# define RTALLOC_REPLACE_MALLOC
+#endif
+#if defined(RTALLOC_REPLACE_MALLOC) && !defined(RTALLOC_EFENCE_TRACE)
+# error "RTALLOC_REPLACE_MALLOC requires RTALLOC_EFENCE_TRACE."
+#endif
 
 
 /*******************************************************************************
 *   Header Files                                                               *
 *******************************************************************************/
-#ifdef __WIN__
-# include <Windows.h>
+#ifdef RT_OS_WINDOWS
+# include <iprt/win/windows.h>
 #else
 # include <sys/mman.h>
 #endif
@@ -114,6 +166,7 @@ typedef enum RTMEMTYPE
     RTMEMTYPE_RTMEMALLOCZ,
     RTMEMTYPE_RTMEMREALLOC,
     RTMEMTYPE_RTMEMFREE,
+    RTMEMTYPE_RTMEMFREEZ,
 
     RTMEMTYPE_NEW,
     RTMEMTYPE_NEW_ARRAY,
@@ -131,8 +184,12 @@ typedef struct RTMEMBLOCK
     AVLPVNODECORE   Core;
     /** Allocation type. */
     RTMEMTYPE       enmType;
-    /** The size of the block. */
-    size_t          cb;
+    /** The unaligned size of the block. */
+    size_t          cbUnaligned;
+    /** The aligned size of the block. */
+    size_t          cbAligned;
+    /** The allocation tag (read-only string). */
+    const char     *pszTag;
     /** The return address of the allocator function. */
     void           *pvCaller;
     /** Line number of the alloc call. */
@@ -148,12 +205,27 @@ typedef struct RTMEMBLOCK
 
 /*******************************************************************************
 *   Internal Functions                                                         *
-*******************************************************************************/
-__BEGIN_DECLS
-RTDECL(void *) rtMemAlloc(const char *pszOp, RTMEMTYPE enmType, size_t cb, void *pvCaller, unsigned iLine, const char *pszFile, const char *pszFunction);
-RTDECL(void *) rtMemRealloc(const char *pszOp, RTMEMTYPE enmType, void *pvOld, size_t cbNew, void *pvCaller, unsigned iLine, const char *pszFile, const char *pszFunction);
-RTDECL(void) rtMemFree(const char *pszOp, RTMEMTYPE enmType, void *pv, void *pvCaller, unsigned iLine, const char *pszFile, const char *pszFunction);
-__END_DECLS
+******************************************************************************/
+RT_C_DECLS_BEGIN
+RTDECL(void *)  rtR3MemAlloc(const char *pszOp, RTMEMTYPE enmType, size_t cbUnaligned, size_t cbAligned,
+                             const char *pszTag, void *pvCaller, RT_SRC_POS_DECL);
+RTDECL(void *)  rtR3MemRealloc(const char *pszOp, RTMEMTYPE enmType, void *pvOld, size_t cbNew,
+                               const char *pszTag, void *pvCaller, RT_SRC_POS_DECL);
+RTDECL(void)    rtR3MemFree(const char *pszOp, RTMEMTYPE enmType, void *pv, size_t cbUser, void *pvCaller, RT_SRC_POS_DECL);
+RT_C_DECLS_END
 
+
+/*******************************************************************************
+*   Global Variables                                                           *
+*******************************************************************************/
+#ifdef RTALLOC_REPLACE_MALLOC
+RT_C_DECLS_BEGIN
+extern void * (*g_pfnOrgMalloc)(size_t);
+extern void * (*g_pfnOrgCalloc)(size_t, size_t);
+extern void * (*g_pfnOrgRealloc)(void *, size_t);
+extern void   (*g_pfnOrgFree)(void *);
+RT_C_DECLS_END
 #endif
+
+#endif /* !IPRT_INCLUDED_SRC_r3_alloc_ef_h */
 

@@ -1,1060 +1,1013 @@
 /** @file
- * VBoxGuest - VirtualBox Guest Additions interface
+ * VBoxGuest - VirtualBox Guest Additions Driver Interface. (ADD,DEV)
+ *
+ * @note    This file is used by 16-bit compilers too (OpenWatcom).
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following
+ * conditions:
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __VBox_VBoxGuest_h__
-#define __VBox_VBoxGuest_h__
-
-#include <iprt/cdefs.h>
-#include <iprt/types.h>
-#include <VBox/err.h>
-#include <VBox/ostypes.h>
-
-/*******************************************************************************
-*   Defined Constants And Macros                                               *
-*******************************************************************************/
-
-#ifdef __WIN__
-/** The support service name. */
-#define VBOXGUEST_SERVICE_NAME       "VBoxGuest"
-/** Win32 Device name. */
-#define VBOXGUEST_DEVICE_NAME        "\\\\.\\VBoxGuest"
-/** Global name for Win2k+ */
-#define VBOXGUEST_DEVICE_NAME_GLOBAL "\\\\.\\Global\\VBoxGuest"
-/** Win32 driver name */
-#define VBOXGUEST_DEVICE_NAME_NT     L"\\Device\\VBoxGuest"
-/** device name */
-#define VBOXGUEST_DEVICE_NAME_DOS    L"\\DosDevices\\VBoxGuest"
-#else /* !__WIN__ */
-#define VBOXGUEST_DEVICE_NAME        "/dev/vboxadd"
+#ifndef VBOX_INCLUDED_VBoxGuest_h
+#define VBOX_INCLUDED_VBoxGuest_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
 #endif
 
-/** VirtualBox vendor ID */
-#define VBOX_PCI_VENDORID (0x80ee)
+#include <VBox/types.h>
+#include <iprt/assertcompile.h>
+#include <VBox/VMMDevCoreTypes.h>
+#include <VBox/VBoxGuestCoreTypes.h>
 
-/** VMMDev PCI card identifiers */
-#define VMMDEV_VENDORID VBOX_PCI_VENDORID
-#define VMMDEV_DEVICEID (0xcafe)
 
-/** VirtualBox graphics card identifiers */
-#define VBOX_VENDORID VBOX_PCI_VENDORID
-#define VBOX_VESA_VENDORID VBOX_PCI_VENDORID
-#define VBOX_DEVICEID (0xbeef)
-#define VBOX_VESA_DEVICEID (0xbeef)
 
-/**
- * VBoxGuest port definitions
+/** @defgroup grp_vboxguest  VirtualBox Guest Additions Device Driver
+ *
+ * Also know as VBoxGuest.
+ *
  * @{
  */
 
-/** guest can (== wants to) handle absolute coordinates */
-#define VBOXGUEST_MOUSE_GUEST_CAN_ABSOLUTE      BIT(0)
-/** host can (== wants to) send absolute coordinates */
-#define VBOXGUEST_MOUSE_HOST_CAN_ABSOLUTE       BIT(1)
-/** guest can *NOT* switch to software cursor and therefore depends on the host cursor */
-#define VBOXGUEST_MOUSE_GUEST_NEEDS_HOST_CURSOR BIT(2)
-/** host does NOT provide support for drawing the cursor itself (e.g. L4 console) */
-#define VBOXGUEST_MOUSE_HOST_CANNOT_HWPOINTER   BIT(3)
-
-/** fictive start address of the hypervisor physical memory for MmMapIoSpace */
-#define HYPERVISOR_PHYSICAL_START  0xf8000000
-
-/*
- * VMMDev Generic Request Interface
- */
-
-/** port for generic request interface */
-#define PORT_VMMDEV_REQUEST_OFFSET 0
-
-/** Current version of the VMMDev interface.
+/** @defgroup grp_vboxguest_ioc  VirtualBox Guest Additions Driver Interface
  *
- * Additions are allowed to work only if
- * additions_major == vmmdev_current && additions_minor <= vmmdev_current.
- * Additions version is reported to host (VMMDev) by VMMDevReq_ReportGuestInfo.
+ * @note This is considered internal in ring-3, please use the VbglR3 functions.
+ *
+ * - I/O controls for user and/or kernel mode starts at 0.
+ * - IDC specific requests descends from 63.
+ * - Bits 7 and 6 are currently reserved for future hacks.
+ *
+ * @remarks When creating new IOCtl interfaces keep in mind that not all OSes supports
+ *          reporting back the output size. (This got messed up a little bit in VBoxDrv.)
+ *
+ *          The request size is also a little bit tricky as it's passed as part of the
+ *          request code on unix. The size field is 14 bits on Linux, 12 bits on *BSD,
+ *          13 bits Darwin, and 8-bits on Solaris. All the BSDs and Darwin kernels
+ *          will make use of the size field, while Linux and Solaris will not. We're of
+ *          course using the size to validate and/or map/lock the request, so it has
+ *          to be valid.
+ *
+ *          For Solaris we will have to do something special though, 255 isn't
+ *          sufficient for all we need. A 4KB restriction (BSD) is probably not
+ *          too problematic (yet) as a general one.
+ *
+ *          More info can be found in SUPDRVIOC.h and related sources.
+ *
+ * @remarks If adding interfaces that only has input or only has output, some new macros
+ *          needs to be created so the most efficient IOCtl data buffering method can be
+ *          used.
+ *
+ * @{
  */
-#define VMMDEV_VERSION_MAJOR (0x1)
-#define VMMDEV_VERSION_MINOR (0x4)
-#define VMMDEV_VERSION ((VMMDEV_VERSION_MAJOR << 16) | VMMDEV_VERSION_MINOR)
+#if !defined(IN_RC) && !defined(IN_RING0_AGNOSTIC)
+
+/** Fictive start address of the hypervisor physical memory for MmMapIoSpace. */
+#define VBOXGUEST_HYPERVISOR_PHYSICAL_START         UINT32_C(0xf8000000)
+
+#ifdef RT_OS_DARWIN
+/** Cookie used to fend off some unwanted clients to the IOService. */
+# define VBOXGUEST_DARWIN_IOSERVICE_COOKIE          UINT32_C(0x56426f78) /* 'VBox' */
+#endif
+
+
+#if defined(RT_OS_WINDOWS)
+# ifndef CTL_CODE
+#  include <iprt/win/windows.h>
+# endif
+  /* Automatic buffering, size not encoded. */
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       CTL_CODE(FILE_DEVICE_UNKNOWN, 2048 + (Function), METHOD_BUFFERED, FILE_WRITE_ACCESS)
+# define VBGL_IOCTL_CODE_BIG(Function)              CTL_CODE(FILE_DEVICE_UNKNOWN, 2048 + (Function), METHOD_BUFFERED, FILE_WRITE_ACCESS)
+# define VBGL_IOCTL_CODE_FAST(Function)             CTL_CODE(FILE_DEVICE_UNKNOWN, 2048 + (Function), METHOD_NEITHER,  FILE_WRITE_ACCESS)
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         (a_uIOCtl)
+# define VBOXGUEST_DEVICE_NAME                      "\\\\.\\VBoxGuest"
+/** The support service name. */
+# define VBOXGUEST_SERVICE_NAME                     "VBoxGuest"
+/** Global name for Win2k+ */
+# define VBOXGUEST_DEVICE_NAME_GLOBAL               "\\\\.\\Global\\VBoxGuest"
+/** Win32 driver name */
+# define VBOXGUEST_DEVICE_NAME_NT                   L"\\Device\\VBoxGuest"
+/** Device name. */
+# define VBOXGUEST_DEVICE_NAME_DOS                  L"\\DosDevices\\VBoxGuest"
+
+#elif defined(RT_OS_OS2)
+  /* No automatic buffering, size not encoded. */
+# define VBGL_IOCTL_CATEGORY                        0xc2
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       ((unsigned char)(Function))
+# define VBGL_IOCTL_CODE_BIG(Function)              ((unsigned char)(Function))
+# define VBGL_IOCTL_CATEGORY_FAST                   0xc3 /**< Also defined in VBoxGuestA-os2.asm. */
+# define VBGL_IOCTL_CODE_FAST(Function)             ((unsigned char)(Function))
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         (a_uIOCtl)
+# define VBOXGUEST_DEVICE_NAME                      "\\Dev\\VBoxGst$"
+/** Short device name for AttachDD.
+ * @note Case sensitive. Must match what VBoxGuestA-os2.asm says! */
+# define VBOXGUEST_DEVICE_NAME_SHORT                "vboxgst$"
+
+#elif defined(RT_OS_SOLARIS)
+  /* No automatic buffering, size limited to 255 bytes => use VBGLBIGREQ for everything. */
+# include <sys/ioccom.h>
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       ((uintptr_t)(_IOWRN('V', (Function), sizeof(VBGLREQHDR))))
+# define VBGL_IOCTL_CODE_BIG(Function)              _IOWRN('V', (Function), sizeof(VBGLREQHDR))
+# define VBGL_IOCTL_CODE_FAST(Function)             _IO(   'F', (Function))
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         (a_uIOCtl)
+# define VBGL_IOCTL_IS_FAST(a_uIOCtl)               ( ((a_uIOCtl) & 0x0000ff00) == ('F' << 8) )
+
+#elif defined(RT_OS_LINUX)
+  /* No automatic buffering, size limited to 16KB. */
+# include <linux/ioctl.h>
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       _IOC(_IOC_READ | _IOC_WRITE, 'V', (Function), (Size))
+# define VBGL_IOCTL_CODE_BIG(Function)              _IO('V', (Function))
+# define VBGL_IOCTL_CODE_FAST(Function)             _IO('F', (Function))
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         _IOC_NR((a_uIOCtl))
+# define VBOXGUEST_USER_DEVICE_NAME                 "/dev/vboxuser"
+
+#elif defined(RT_OS_HAIKU)
+  /* No automatic buffering, size not encoded. */
+  /** @todo do something better */
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       (0x56420000 | (Function))
+# define VBGL_IOCTL_CODE_BIG(Function)              (0x56420000 | (Function))
+# define VBGL_IOCTL_CODE_FAST(Function)             (0x56420000 | (Function))
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         (a_uIOCtl)
+# define VBOXGUEST_DEVICE_NAME                      "/dev/misc/vboxguest"
+
+#else /* BSD Like */
+  /* Automatic buffering, size limited to 4KB on *BSD and 8KB on Darwin - commands the limit, 4KB. */
+# include <sys/ioccom.h>
+# define VBGL_IOCTL_CODE_SIZE(Function, Size)       _IOC(IOC_INOUT, 'V', (Function), (Size))
+# define VBGL_IOCTL_CODE_BIG(Function)              _IO('V', (Function))
+# define VBGL_IOCTL_CODE_FAST(Function)             _IO('F', (Function))
+# define VBGL_IOCTL_CODE_STRIPPED(a_uIOCtl)         ((a_uIOCtl) & ~(_IOC(0,0,0,IOCPARM_MASK)))
+# define VBGL_IOCTL_IS_FAST(a_uIOCtl)               ( IOCGROUP(a_uIOCtl) == 'F' )
+# if defined(RT_OS_DARWIN)
+#  define VBOXGUEST_DEVICE_NAME                     "/dev/vboxguest"
+#  define VBOXGUEST_USER_DEVICE_NAME                "/dev/vboxguestu"
+# endif
+
+#endif
+
+/** @todo It would be nice if we could have two defines without paths. */
+
+/** @def VBOXGUEST_DEVICE_NAME
+ * The support device name. */
+#ifndef VBOXGUEST_DEVICE_NAME /* PORTME */
+# define VBOXGUEST_DEVICE_NAME          "/dev/vboxguest"
+#endif
+
+/** @def VBOXGUEST_USER_DEVICE_NAME
+ * The support device name of the user accessible device node. */
+#ifndef VBOXGUEST_USER_DEVICE_NAME
+# define VBOXGUEST_USER_DEVICE_NAME     VBOXGUEST_DEVICE_NAME
+#endif
+
 
 /**
- * VMMDev request types.
- * @note when updating this, adjust vmmdevGetRequestSize() as well
+ * The VBoxGuest I/O control version.
+ *
+ * As usual, the high word contains the major version and changes to it
+ * signifies incompatible changes.
+ *
+ * The lower word is the minor version number, it is increased when new
+ * functions are added or existing changed in a backwards compatible manner.
  */
-typedef enum
-{
-    VMMDevReq_InvalidRequest             =  0,
-    VMMDevReq_GetMouseStatus             =  1,
-    VMMDevReq_SetMouseStatus             =  2,
-    VMMDevReq_SetPointerShape            =  3,
-    /** @todo implement on host side */
-    VMMDevReq_GetHostVersion             =  4,
-    VMMDevReq_Idle                       =  5,
-    VMMDevReq_GetHostTime                = 10,
-    VMMDevReq_GetHypervisorInfo          = 20,
-    VMMDevReq_SetHypervisorInfo          = 21,
-    VMMDevReq_SetPowerStatus             = 30,
-    VMMDevReq_AcknowledgeEvents          = 41,
-    VMMDevReq_CtlGuestFilterMask         = 42,
-    VMMDevReq_ReportGuestInfo            = 50,
-    VMMDevReq_GetDisplayChangeRequest    = 51,
-    VMMDevReq_VideoModeSupported         = 52,
-    VMMDevReq_GetHeightReduction         = 53,
-#ifdef VBOX_HGCM
-    VMMDevReq_HGCMConnect                = 60,
-    VMMDevReq_HGCMDisconnect             = 61,
-    VMMDevReq_HGCMCall                   = 62,
-#endif
-    VMMDevReq_VideoAccelEnable           = 70,
-    VMMDevReq_VideoAccelFlush            = 71,
-    VMMDevReq_QueryCredentials           = 100,
-    VMMDevReq_ReportCredentialsJudgement = 101,
-    VMMDevReq_SizeHack                   = 0x7fffffff
-} VMMDevRequestType;
+#define VBGL_IOC_VERSION                          UINT32_C(0x00010000)
 
-/** Version of VMMDevRequestHeader structure. */
-#define VMMDEV_REQUEST_HEADER_VERSION (0x10001)
 
-#pragma pack(4)
-/** generic VMMDev request header */
-typedef struct
-{
-    /** size of the structure in bytes (including body). Filled by caller */
-    uint32_t size;
-    /** version of the structure. Filled by caller */
-    uint32_t version;
-    /** type of the request */
-    VMMDevRequestType requestType;
-    /** return code. Filled by VMMDev */
-    int32_t  rc;
-    /** reserved fields */
-    uint32_t reserved1;
-    uint32_t reserved2;
-} VMMDevRequestHeader;
 
-/** mouse status request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** mouse feature mask */
-    uint32_t mouseFeatures;
-    /** mouse x position */
-    uint32_t pointerXPos;
-    /** mouse y position */
-    uint32_t pointerYPos;
-} VMMDevReqMouseStatus;
-
-/** Note VBOX_MOUSE_POINTER_* flags are used in guest video driver,
- *  values must be <= 0x8000 and must not be changed.
+/** @name VBGL_IOCTL_DRIVER_INFO
+ * Adjust and get driver information.
+ *
+ * @note May switch the session to a backwards compatible interface version if
+ *       uClientVersion indicates older client code.
+ *
+ * @{
  */
-
-/** pointer is visible */
-#define VBOX_MOUSE_POINTER_VISIBLE (0x0001)
-/** pointer has alpha channel */
-#define VBOX_MOUSE_POINTER_ALPHA   (0x0002)
-/** pointerData contains new pointer shape */
-#define VBOX_MOUSE_POINTER_SHAPE   (0x0004)
-
-/** mouse pointer shape/visibility change request */
-typedef struct
+#define VBGL_IOCTL_DRIVER_VERSION_INFO              VBGL_IOCTL_CODE_SIZE(0, VBGL_IOCTL_DRIVER_VERSION_INFO_SIZE)
+#define VBGL_IOCTL_DRIVER_VERSION_INFO_SIZE         sizeof(VBGLIOCDRIVERVERSIONINFO)
+#define VBGL_IOCTL_DRIVER_VERSION_INFO_SIZE_IN      RT_UOFFSET_AFTER(VBGLIOCDRIVERVERSIONINFO, u.In)
+#define VBGL_IOCTL_DRIVER_VERSION_INFO_SIZE_OUT     sizeof(VBGLIOCDRIVERVERSIONINFO)
+typedef struct VBGLIOCDRIVERVERSIONINFO
 {
-    /** header */
-    VMMDevRequestHeader header;
-    /** VBOX_MOUSE_POINTER_* bit flags */
-    uint32_t fFlags;
-    /** x coordinate of hot spot */
-    uint32_t xHot;
-    /** y coordinate of hot spot */
-    uint32_t yHot;
-    /** width of the pointer in pixels */
-    uint32_t width;
-    /** height of the pointer in scanlines */
-    uint32_t height;
-    /** Pointer data.
-     *
-     ****
-     * The data consists of 1 bpp AND mask followed by 32 bpp XOR (color) mask.
-     *
-     * For pointers without alpha channel the XOR mask pixels are 32 bit values: (lsb)BGR0(msb).
-     * For pointers with alpha channel the XOR mask consists of (lsb)BGRA(msb) 32 bit values.
-     *
-     * Guest driver must create the AND mask for pointers with alpha channel, so if host does not
-     * support alpha, the pointer could be displayed as a normal color pointer. The AND mask can
-     * be constructed from alpha values. For example alpha value >= 0xf0 means bit 0 in the AND mask.
-     *
-     * The AND mask is 1 bpp bitmap with byte aligned scanlines. Size of AND mask,
-     * therefore, is cbAnd = (width + 7) / 8 * height. The padding bits at the
-     * end of any scanline are undefined.
-     *
-     * The XOR mask follows the AND mask on the next 4 bytes aligned offset:
-     * uint8_t *pXor = pAnd + (cbAnd + 3) & ~3
-     * Bytes in the gap between the AND and the XOR mask are undefined.
-     * XOR mask scanlines have no gap between them and size of XOR mask is:
-     * cXor = width * 4 * height.
-     ****
-     *
-     * Preallocate 4 bytes for accessing actual data as p->pointerData
-     */
-    char pointerData[4];
-} VMMDevReqMousePointer;
-
-/** host version request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** major version */
-    uint32_t major;
-    /** minor version */
-    uint32_t minor;
-    /** build number */
-    uint32_t build;
-} VMMDevReqHostVersion;
-
-/** idle request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-} VMMDevReqIdle;
-
-/** host time request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** time in milliseconds since unix epoch. Filled by VMMDev. */
-    uint64_t time;
-} VMMDevReqHostTime;
-
-/** hypervisor info structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** guest virtual address of proposed hypervisor start */
-    RTGCPTR hypervisorStart;
-    /** hypervisor size in bytes */
-    uint32_t hypervisorSize;
-} VMMDevReqHypervisorInfo;
-
-/** system power requests */
-typedef enum
-{
-    VMMDevPowerState_Invalid   = 0,
-    VMMDevPowerState_Pause     = 1,
-    VMMDevPowerState_PowerOff  = 2,
-    VMMDevPowerState_SaveState = 3,
-    VMMDevPowerState_SizeHack = 0x7fffffff
-} VMMDevPowerState;
-
-/** system power status structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** power state request */
-    VMMDevPowerState powerState;
-} VMMDevPowerStateRequest;
-
-/** pending events structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** pending event bitmap */
-    uint32_t events;
-} VMMDevEvents;
-
-/** guest filter mask control */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** mask of events to be added to filter */
-    uint32_t u32OrMask;
-    /** mask of events to be removed from filter */
-    uint32_t u32NotMask;
-} VMMDevCtlGuestFilterMask;
-
-/** guest information structure */
-typedef struct
-{
-    /** The VMMDev interface version expected by additions. */
-    uint32_t additionsVersion;
-    /** guest OS type */
-    OSType osType;
-    /** @todo */
-} VBoxGuestInfo;
-
-/** guest information structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** Guest information. */
-    VBoxGuestInfo guestInfo;
-} VMMDevReportGuestInfo;
-
-/** display change request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** horizontal pixel resolution (0 = do not change) */
-    uint32_t xres;
-    /** vertical pixel resolution (0 = do not change) */
-    uint32_t yres;
-    /** bits per pixel (0 = do not change) */
-    uint32_t bpp;
-    /** Flag that the request is an acknowlegement for the VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST.
-     *  Values: 0 - just querying, VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST - event acknowledged.
-     */
-    uint32_t eventAck;
-} VMMDevDisplayChangeRequest;
-
-/** video mode supported request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** horizontal pixel resolution (input) */
-    uint32_t width;
-    /** vertical pixel resolution (input) */
-    uint32_t height;
-    /** bits per pixel (input) */
-    uint32_t bpp;
-    /** supported flag (output) */
-    bool fSupported;
-} VMMDevVideoModeSupportedRequest;
-
-/** video modes height reduction request structure */
-typedef struct
-{
-    /** header */
-    VMMDevRequestHeader header;
-    /** height reduction in pixels (output) */
-    uint32_t heightReduction;
-} VMMDevGetHeightReductionRequest;
-
-#pragma pack()
-
-#ifdef VBOX_HGCM
-
-/** HGCM flags.
- *  @{
- */
-#define VBOX_HGCM_REQ_DONE      (0x1)
-#define VBOX_HGCM_REQ_CANCELLED (0x2)
-/** @} */
-
-#pragma pack(4)
-typedef struct _VMMDevHGCMRequestHeader
-{
-    /** Request header. */
-    VMMDevRequestHeader header;
-
-    /** HGCM flags. */
-    uint32_t fu32Flags;
-
-    /** Result code. */
-    int32_t result;
-} VMMDevHGCMRequestHeader;
-
-/** HGCM service location types. */
-typedef enum
-{
-    VMMDevHGCMLoc_Invalid    = 0,
-    VMMDevHGCMLoc_LocalHost  = 1,
-    VMMDevHGCMLoc_LocalHost_Existing = 2,
-    VMMDevHGCMLoc_SizeHack   = 0x7fffffff
-} HGCMServiceLocationType;
-
-typedef struct
-{
-    char achName[128];
-} HGCMServiceLocationHost;
-
-typedef struct HGCMSERVICELOCATION
-{
-    /** Type of the location. */
-    HGCMServiceLocationType type;
-
+    /** The header. */
+    VBGLREQHDR          Hdr;
     union
     {
-        HGCMServiceLocationHost host;
-    } u;
-} HGCMServiceLocation;
-
-typedef struct
-{
-    /* request header */
-    VMMDevHGCMRequestHeader header;
-
-    /** IN: Description of service to connect to. */
-    HGCMServiceLocation loc;
-
-    /** OUT: Client identifier assigned by local instance of HGCM. */
-    uint32_t u32ClientID;
-} VMMDevHGCMConnect;
-
-typedef struct
-{
-    /* request header */
-    VMMDevHGCMRequestHeader header;
-
-    /** IN: Client identifier. */
-    uint32_t u32ClientID;
-} VMMDevHGCMDisconnect;
-
-typedef enum
-{
-    VMMDevHGCMParmType_Invalid    = 0,
-    VMMDevHGCMParmType_32bit      = 1,
-    VMMDevHGCMParmType_64bit      = 2,
-    VMMDevHGCMParmType_PhysAddr   = 3,
-    VMMDevHGCMParmType_LinAddr    = 4, /**< In and Out */
-    VMMDevHGCMParmType_LinAddr_In = 5, /**< In (read) */
-    VMMDevHGCMParmType_LinAddr_Out= 6, /**< Out (write) */
-    VMMDevHGCMParmType_SizeHack   = 0x7fffffff
-} HGCMFunctionParameterType;
-
-typedef struct _HGCMFUNCTIONPARAMETER
-{
-    HGCMFunctionParameterType type;
-    union
-    {
-        uint32_t   value32;
-        uint64_t   value64;
         struct
         {
-            uint32_t size;
-
-            union
-            {
-                RTGCPHYS physAddr;
-                RTGCPTR  linearAddr;
-            } u;
-        } Pointer;
+            /** The requested interface version number (VBGL_IOC_VERSION). */
+            uint32_t        uReqVersion;
+            /** The minimum interface version number
+             * (typically the major version part of VBGL_IOC_VERSION). */
+            uint32_t        uMinVersion;
+            /** Reserved, MBZ. */
+            uint32_t        uReserved1;
+            /** Reserved, MBZ. */
+            uint32_t        uReserved2;
+        } In;
+        struct
+        {
+            /** Interface version for this session (typically VBGL_IOC_VERSION). */
+            uint32_t        uSessionVersion;
+            /** The version of the IDC interface (VBGL_IOC_VERSION). */
+            uint32_t        uDriverVersion;
+            /** The SVN revision of the driver.
+             * This will be set to 0 if not compiled into the driver. */
+            uint32_t        uDriverRevision;
+            /** Reserved \#1 (will be returned as zero until defined). */
+            uint32_t        uReserved1;
+            /** Reserved \#2 (will be returned as zero until defined). */
+            uint32_t        uReserved2;
+        } Out;
     } u;
-} HGCMFunctionParameter;
-
-typedef struct
-{
-    /* request header */
-    VMMDevHGCMRequestHeader header;
-
-    /** IN: Client identifier. */
-    uint32_t u32ClientID;
-    /** IN: Service function number. */
-    uint32_t u32Function;
-    /** IN: Number of parameters. */
-    uint32_t cParms;
-    /** Parameters follow in form: HGCMFunctionParameter aParms[X]; */
-} VMMDevHGCMCall;
-#pragma pack()
-
-#define VMMDEV_HGCM_CALL_PARMS(a) ((HGCMFunctionParameter *)((char *)a + sizeof (VMMDevHGCMCall)))
-
-#endif /* VBOX_HGCM */
-
-
-#define VBVA_F_STATUS_ACCEPTED (0x01)
-#define VBVA_F_STATUS_ENABLED  (0x02)
-
-#pragma pack(4)
-
-typedef struct _VMMDevVideoAccelEnable
-{
-    /* request header */
-    VMMDevRequestHeader header;
-
-    /** 0 - disable, !0 - enable. */
-    uint32_t u32Enable;
-
-    /** The size of VBVAMEMORY::au8RingBuffer expected by driver.
-     *  The host will refuse to enable VBVA if the size is not equal to
-     *  VBVA_RING_BUFFER_SIZE.
-     */
-    uint32_t cbRingBuffer;
-
-    /** Guest initializes the status to 0. Host sets appropriate VBVA_F_STATUS_ flags. */
-    uint32_t fu32Status;
-
-} VMMDevVideoAccelEnable;
-
-typedef struct _VMMDevVideoAccelFlush
-{
-    /* request header */
-    VMMDevRequestHeader header;
-
-} VMMDevVideoAccelFlush;
-
-#pragma pack()
-
-#pragma pack(1)
-
-/** VBVA command header. */
-typedef struct _VBVACMDHDR
-{
-   /** Coordinates of affected rectangle. */
-   int16_t x;
-   int16_t y;
-   uint16_t w;
-   uint16_t h;
-} VBVACMDHDR;
-
-/* VBVA order codes. Must be >= 0, because the VRDP server internally
- * uses negative values to mark some operations.
- * Values are important since they are used as an index in the
- * "supported orders" bit mask.
- */
-#define VBVA_VRDP_DIRTY_RECT     (0)
-#define VBVA_VRDP_SOLIDRECT      (1)
-#define VBVA_VRDP_SOLIDBLT       (2)
-#define VBVA_VRDP_DSTBLT         (3)
-#define VBVA_VRDP_SCREENBLT      (4)
-#define VBVA_VRDP_PATBLT_BRUSH   (5)
-#define VBVA_VRDP_MEMBLT         (6)
-#define VBVA_VRDP_CACHED_BITMAP  (7)
-#define VBVA_VRDP_DELETED_BITMAP (8)
-#define VBVA_VRDP_LINE           (9)
-#define VBVA_VRDP_BOUNDS         (10)
-#define VBVA_VRDP_REPEAT         (11)
-#define VBVA_VRDP_POLYLINE       (12)
-#define VBVA_VRDP_ELLIPSE        (13)
-#define VBVA_VRDP_SAVESCREEN     (14)
-
-#define VBVA_VRDP_INDEX_TO_BIT(__index) (1 << (__index))
-
-/* 128 bit bitmap hash. */
-typedef uint8_t VRDPBITMAPHASH[16];
-
-typedef struct _VRDPORDERPOINT
-{
-    int16_t  x;
-    int16_t  y;
-} VRDPORDERPOINT;
-
-typedef struct _VRDPORDERPOLYPOINTS
-{
-    uint8_t  c;
-    VRDPORDERPOINT a[16];
-} VRDPORDERPOLYPOINTS;
-
-typedef struct _VRDPORDERAREA
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-} VRDPORDERAREA;
-
-typedef struct _VRDPORDERBOUNDS
-{
-    VRDPORDERPOINT pt1;
-    VRDPORDERPOINT pt2;
-} VRDPORDERBOUNDS;
-
-typedef struct _VRDPORDERREPEAT
-{
-    VRDPORDERBOUNDS bounds;
-} VRDPORDERREPEAT;
-
-
-/* Header for bitmap bits in VBVA VRDP operations. */
-typedef struct _VRDPDATABITS
-{
-    /* Size of bitmap data without the header. */
-    uint32_t cb;
-    int16_t  x;
-    int16_t  y;
-    uint16_t cWidth;
-    uint16_t cHeight;
-    uint8_t cbPixel;
-} VRDPDATABITS;
-
-typedef struct _VRDPORDERSOLIDRECT
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    uint32_t rgb;
-} VRDPORDERSOLIDRECT;
-
-typedef struct _VRDPORDERSOLIDBLT
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    uint32_t rgb;
-    uint8_t  rop;
-} VRDPORDERSOLIDBLT;
-
-typedef struct _VRDPORDERDSTBLT
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    uint8_t  rop;
-} VRDPORDERDSTBLT;
-
-typedef struct _VRDPORDERSCREENBLT
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    int16_t  xSrc;
-    int16_t  ySrc;
-    uint8_t  rop;
-} VRDPORDERSCREENBLT;
-
-typedef struct _VRDPORDERPATBLTBRUSH
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    int8_t   xSrc;
-    int8_t   ySrc;
-    uint32_t rgbFG;
-    uint32_t rgbBG;
-    uint8_t  rop;
-    uint8_t  pattern[8];
-} VRDPORDERPATBLTBRUSH;
-
-typedef struct _VRDPORDERMEMBLT
-{
-    int16_t  x;
-    int16_t  y;
-    uint16_t w;
-    uint16_t h;
-    int16_t  xSrc;
-    int16_t  ySrc;
-    uint8_t  rop;
-    VRDPBITMAPHASH hash;
-} VRDPORDERMEMBLT;
-
-typedef struct _VRDPORDERCACHEDBITMAP
-{
-    VRDPBITMAPHASH hash;
-    /* VRDPDATABITS and the bitmap data follows. */
-} VRDPORDERCACHEDBITMAP;
-
-typedef struct _VRDPORDERDELETEDBITMAP
-{
-    VRDPBITMAPHASH hash;
-} VRDPORDERDELETEDBITMAP;
-
-typedef struct _VRDPORDERLINE
-{
-    int16_t  x1;
-    int16_t  y1;
-    int16_t  x2;
-    int16_t  y2;
-    int16_t  xBounds1;
-    int16_t  yBounds1;
-    int16_t  xBounds2;
-    int16_t  yBounds2;
-    uint8_t  mix;
-    uint32_t rgb;
-} VRDPORDERLINE;
-
-typedef struct _VRDPORDERPOLYLINE
-{
-    VRDPORDERPOINT ptStart;
-    uint8_t  mix;
-    uint32_t rgb;
-    VRDPORDERPOLYPOINTS points;
-} VRDPORDERPOLYLINE;
-
-typedef struct _VRDPORDERELLIPSE
-{
-    VRDPORDERPOINT pt1;
-    VRDPORDERPOINT pt2;
-    uint8_t  mix;
-    uint8_t  fillMode;
-    uint32_t rgb;
-} VRDPORDERELLIPSE;
-
-typedef struct _VRDPORDERSAVESCREEN
-{
-    VRDPORDERPOINT pt1;
-    VRDPORDERPOINT pt2;
-    uint8_t ident;
-    uint8_t restore;
-} VRDPORDERSAVESCREEN;
-#pragma pack()
-
-/* The VBVA ring buffer is suitable for transferring large (< 2gb) amount of data.
- * For example big bitmaps which do not fit to the buffer.
- *
- * Guest starts writing to the buffer by initializing a record entry in the
- * aRecords queue. VBVA_F_RECORD_PARTIAL indicates that the record is being
- * written. As data is written to the ring buffer, the guest increases off32End
- * for the record.
- *
- * The host reads the aRecords on flushes and processes all completed records.
- * When host encounters situation when only a partial record presents and
- * cbRecord & ~VBVA_F_RECORD_PARTIAL >= VBVA_RING_BUFFER_SIZE - VBVA_RING_BUFFER_THRESHOLD,
- * the host fetched all record data and updates off32Head. After that on each flush
- * the host continues fetching the data until the record is completed.
- *
- */
-
-#define VBVA_RING_BUFFER_SIZE        (_4M - _1K)
-#define VBVA_RING_BUFFER_THRESHOLD   (4 * _1K)
-
-#define VBVA_MAX_RECORDS (64)
-
-#define VBVA_F_MODE_ENABLED         (0x00000001)
-#define VBVA_F_MODE_VRDP            (0x00000002)
-#define VBVA_F_MODE_VRDP_RESET      (0x00000004)
-#define VBVA_F_MODE_VRDP_ORDER_MASK (0x00000008)
-
-#define VBVA_F_RECORD_PARTIAL   (0x80000000)
-
-#pragma pack(1)
-typedef struct _VBVARECORD
-{
-    /** The length of the record. Changed by guest. */
-    uint32_t cbRecord;
-} VBVARECORD;
-
-typedef struct _VBVAMEMORY
-{
-    /** VBVA_F_MODE_* */
-    uint32_t fu32ModeFlags;
-
-    /** The offset where the data start in the buffer. */
-    uint32_t off32Data;
-    /** The offset where next data must be placed in the buffer. */
-    uint32_t off32Free;
-
-    /** The ring buffer for data. */
-    uint8_t  au8RingBuffer[VBVA_RING_BUFFER_SIZE];
-
-    /** The queue of record descriptions. */
-    VBVARECORD aRecords[VBVA_MAX_RECORDS];
-    uint32_t indexRecordFirst;
-    uint32_t indexRecordFree;
-
-    /* RDP orders supported by the client. The guest reports only them
-     * and falls back to DIRTY rects for not supported ones.
-     *
-     * (1 << VBVA_VRDP_*)
-     */
-    uint32_t fu32SupportedOrders;
-
-} VBVAMEMORY;
-#pragma pack()
-
-/** @} */
-
-
-/**
- * VMMDev RAM
- * @{
- */
-
-#pragma pack(1)
-/** Layout of VMMDEV RAM region that contains information for guest */
-typedef struct
-{
-    /** size */
-    uint32_t u32Size;
-    /** version */
-    uint32_t u32Version;
-
-    union {
-        /** Flag telling that VMMDev set the IRQ and acknowlegment is required */
-        struct {
-            bool fHaveEvents;
-        } V1_04;
-
-        struct {
-            /** Pending events flags, set by host. */
-            uint32_t u32HostEvents;
-            /** Mask of events the guest wants to see, set by guest. */
-            uint32_t u32GuestEventMask;
-        } V1_03;
-    } V;
-
-    VBVAMEMORY vbvaMemory;
-
-} VMMDevMemory;
-#pragma pack()
-
-/** Version of VMMDevMemory structure. */
-#define VMMDEV_MEMORY_VERSION (1)
-
-/** @} */
-
-
-/**
- * VMMDev events.
- * @{
- */
-
-/** Host mouse capabilities has been changed. */
-#define VMMDEV_EVENT_MOUSE_CAPABILITIES_CHANGED BIT(0)
-/** HGCM event. */
-#define VMMDEV_EVENT_HGCM                       BIT(1)
-/** A display change request has been issued. */
-#define VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST     BIT(2)
-/** Credentials are available for judgement. */
-#define VMMDEV_EVENT_JUDGE_CREDENTIALS          BIT(3)
-/** The guest has been restored. */
-#define VMMDEV_EVENT_RESTORED                   BIT(4)
-
-/** @} */
-
-
-/**
- * VBoxGuest IOCTL codes and structures.
- * @{
- * IOCTL function numbers start from 2048, because MSDN says the
- * second parameter of CTL_CODE macro (function) must be <= 2048 and <= 4095 for IHVs.
- * The IOCTL number algorithm corresponds to CTL_CODE on Windows but for Linux IOCTLs,
- * we also encode the data size, so we need an additional parameter.
- */
-#if defined(__WIN32__)
-#define IOCTL_CODE(DeviceType, Function, Method, Access, DataSize_ignored) \
-    ( ((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
-#else /* unix: */
-#define IOCTL_CODE(DeviceType, Function, Method_ignored, Access_ignored, DataSize) \
-    ( (3 << 30) | ((DeviceType) << 8) | (Function) | ((DataSize) << 16) )
-#define METHOD_BUFFERED        0
-#define FILE_WRITE_ACCESS      0x0002
-#define FILE_DEVICE_UNKNOWN    0x00000022
+} VBGLIOCDRIVERVERSIONINFO, RT_FAR *PVBGLIOCDRIVERVERSIONINFO;
+AssertCompileSize(VBGLIOCDRIVERVERSIONINFO, 24 + 20);
+#if  !defined(__GNUC__) /* Some GCC versions can't handle the complicated RT_UOFFSET_AFTER macro, it seems. */ \
+  && (!defined(RT_OS_OS2) || (!defined(__IBMC__) && !defined(__IBMCPP__) && (!defined(__WATCOMC__) || !defined(__cplusplus))))
+AssertCompile(VBGL_IOCTL_DRIVER_VERSION_INFO_SIZE_IN == 24 + 16);
 #endif
-
-/** IOCTL to VBoxGuest to query the VMMDev IO port region start. */
-#define IOCTL_VBOXGUEST_GETVMMDEVPORT IOCTL_CODE(FILE_DEVICE_UNKNOWN, 2048, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VBoxGuestPortInfo))
-
-#pragma pack(4)
-typedef struct _VBoxGuestPortInfo
-{
-    uint32_t portAddress;
-    VMMDevMemory *pVMMDevMemory;
-} VBoxGuestPortInfo;
-
-/** IOCTL to VBoxGuest to wait for a VMMDev host notification */
-#define IOCTL_VBOXGUEST_WAITEVENT IOCTL_CODE(FILE_DEVICE_UNKNOWN, 2049, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VBoxGuestWaitEventInfo))
-
-/**
- * Result codes for VBoxGuestWaitEventInfo::u32Result
- * @{
- */
-/** Successful completion, an event occured. */
-#define VBOXGUEST_WAITEVENT_OK          (0)
-/** Successful completion, timed out. */
-#define VBOXGUEST_WAITEVENT_TIMEOUT     (1)
-/** Wait was interrupted. */
-#define VBOXGUEST_WAITEVENT_INTERRUPTED (2)
-/** An error occured while processing the request. */
-#define VBOXGUEST_WAITEVENT_ERROR       (3)
 /** @} */
 
-/** Input and output buffers layout of the IOCTL_VBOXGUEST_WAITEVENT */
-typedef struct _VBoxGuestWaitEventInfo
-{
-    /** timeout in milliseconds */
-    uint32_t u32TimeoutIn;
-    /** events to wait for */
-    uint32_t u32EventMaskIn;
-    /** result code */
-    uint32_t u32Result;
-    /** events occured */
-    uint32_t u32EventFlagsOut;
-} VBoxGuestWaitEventInfo;
 
-/** IOCTL to VBoxGuest to perform a VMM request */
-#define IOCTL_VBOXGUEST_VMMREQUEST IOCTL_CODE(FILE_DEVICE_UNKNOWN, 2050, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VMMDevRequestHeader))
-
-/** IOCTL to VBoxGuest to control event filter mask */
-
-typedef struct _VBoxGuestFilterMaskInfo
-{
-    uint32_t u32OrMask;
-    uint32_t u32NotMask;
-} VBoxGuestFilterMaskInfo;
-#pragma pack()
-
-#define IOCTL_VBOXGUEST_CTL_FILTER_MASK IOCTL_CODE(FILE_DEVICE_UNKNOWN, 2051, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof (VBoxGuestFilterMaskInfo))
-
-#ifdef VBOX_HGCM
-/* These structures are shared between the driver and other binaries,
- * therefore packing must be defined explicitely.
+/** @name VBGL_IOCTL_GET_PORT_INFO
+ * Query VMMDev I/O port region and MMIO mapping address.
+ * @remarks Ring-0 only.
+ * @{
  */
-#pragma pack(1)
-typedef struct _VBoxGuestHGCMConnectInfo
+#define VBGL_IOCTL_GET_VMMDEV_IO_INFO               VBGL_IOCTL_CODE_SIZE(1, VBGL_IOCTL_GET_VMMDEV_IO_INFO_SIZE)
+#define VBGL_IOCTL_GET_VMMDEV_IO_INFO_SIZE          sizeof(VBGLIOCGETVMMDEVIOINFO)
+#define VBGL_IOCTL_GET_VMMDEV_IO_INFO_SIZE_IN       sizeof(VBGLREQHDR)
+#define VBGL_IOCTL_GET_VMMDEV_IO_INFO_SIZE_OUT      sizeof(VBGLIOCGETVMMDEVIOINFO)
+typedef struct VBGLIOCGETVMMDEVIOINFO
 {
-    uint32_t result;          /**< OUT */
-    HGCMServiceLocation Loc;  /**< IN */
-    uint32_t u32ClientID;     /**< OUT */
-} VBoxGuestHGCMConnectInfo;
-
-typedef struct _VBoxGuestHGCMDisconnectInfo
-{
-    uint32_t result;          /**< OUT */
-    uint32_t u32ClientID;     /**< IN */
-} VBoxGuestHGCMDisconnectInfo;
-
-typedef struct _VBoxGuestHGCMCallInfo
-{
-    uint32_t result;          /**< OUT Host HGCM return code.*/
-    uint32_t u32ClientID;     /**< IN  The id of the caller. */
-    uint32_t u32Function;     /**< IN  Function number. */
-    uint32_t cParms;          /**< IN  How many parms. */
-    /* Parameters follow in form HGCMFunctionParameter aParms[cParms] */
-} VBoxGuestHGCMCallInfo;
-#pragma pack()
-
-#define IOCTL_VBOXGUEST_HGCM_CONNECT    IOCTL_CODE(FILE_DEVICE_UNKNOWN, 3072, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VBoxGuestHGCMConnectInfo))
-#define IOCTL_VBOXGUEST_HGCM_DISCONNECT IOCTL_CODE(FILE_DEVICE_UNKNOWN, 3073, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VBoxGuestHGCMDisconnectInfo))
-#define IOCTL_VBOXGUEST_HGCM_CALL       IOCTL_CODE(FILE_DEVICE_UNKNOWN, 3074, METHOD_BUFFERED, FILE_WRITE_ACCESS, sizeof(VBoxGuestHGCMCallInfo))
-
-#define VBOXGUEST_HGCM_CALL_PARMS(a) ((HGCMFunctionParameter *)((uint8_t *)(a) + sizeof (VBoxGuestHGCMCallInfo)))
-
-#endif /* VBOX_HGCM */
-
-/*
- * Credentials request flags and structure
- */
-
-#define VMMDEV_CREDENTIALS_STRLEN           128
-
-/** query from host whether credentials are present */
-#define VMMDEV_CREDENTIALS_QUERYPRESENCE     BIT(1)
-/** read credentials from host (can be combined with clear) */
-#define VMMDEV_CREDENTIALS_READ              BIT(2)
-/** clear credentials on host (can be combined with read) */
-#define VMMDEV_CREDENTIALS_CLEAR             BIT(3)
-/** read credentials for judgement in the guest */
-#define VMMDEV_CREDENTIALS_READJUDGE         BIT(8)
-/** clear credentials for judegement on the host */
-#define VMMDEV_CREDENTIALS_CLEARJUDGE        BIT(9)
-/** report credentials acceptance by guest */
-#define VMMDEV_CREDENTIALS_JUDGE_OK          BIT(10)
-/** report credentials denial by guest */
-#define VMMDEV_CREDENTIALS_JUDGE_DENY        BIT(11)
-/** report that no judgement could be made by guest */
-#define VMMDEV_CREDENTIALS_JUDGE_NOJUDGEMENT BIT(12)
-
-/** flag telling the guest that credentials are present */
-#define VMMDEV_CREDENTIALS_PRESENT           BIT(16)
-/** flag telling guest that local logons should be prohibited */
-#define VMMDEV_CREDENTIALS_NOLOCALLOGON      BIT(17)
-
-/** credentials request structure */
-#pragma pack(4)
-typedef struct _VMMDevCredentials
-{
-    /* request header */
-    VMMDevRequestHeader header;
-    /* request flags (in/out) */
-    uint32_t u32Flags;
-    /* user name (UTF-8) (out) */
-    char szUserName[VMMDEV_CREDENTIALS_STRLEN];
-    /* password (UTF-8) (out) */
-    char szPassword[VMMDEV_CREDENTIALS_STRLEN];
-    /* domain name (UTF-8) (out) */
-    char szDomain[VMMDEV_CREDENTIALS_STRLEN];
-} VMMDevCredentials;
-#pragma pack()
-
-/** inline helper to determine the request size for the given operation */
-DECLINLINE(size_t) vmmdevGetRequestSize(VMMDevRequestType requestType)
-{
-    switch (requestType)
+    /** The header. */
+    VBGLREQHDR  Hdr;
+    union
     {
-        case VMMDevReq_GetMouseStatus:
-        case VMMDevReq_SetMouseStatus:
-            return sizeof(VMMDevReqMouseStatus);
-        case VMMDevReq_SetPointerShape:
-            return sizeof(VMMDevReqMousePointer);
-        case VMMDevReq_GetHostVersion:
-            return sizeof(VMMDevReqHostVersion);
-        case VMMDevReq_Idle:
-            return sizeof(VMMDevReqIdle);
-        case VMMDevReq_GetHostTime:
-            return sizeof(VMMDevReqHostTime);
-        case VMMDevReq_GetHypervisorInfo:
-        case VMMDevReq_SetHypervisorInfo:
-            return sizeof(VMMDevReqHypervisorInfo);
-        case VMMDevReq_SetPowerStatus:
-            return sizeof(VMMDevPowerStateRequest);
-        case VMMDevReq_AcknowledgeEvents:
-            return sizeof(VMMDevEvents);
-        case VMMDevReq_ReportGuestInfo:
-            return sizeof(VMMDevReportGuestInfo);
-        case VMMDevReq_GetDisplayChangeRequest:
-            return sizeof(VMMDevDisplayChangeRequest);
-        case VMMDevReq_VideoModeSupported:
-            return sizeof(VMMDevVideoModeSupportedRequest);
-        case VMMDevReq_GetHeightReduction:
-            return sizeof(VMMDevGetHeightReductionRequest);
-#ifdef VBOX_HGCM
-        case VMMDevReq_HGCMConnect:
-            return sizeof(VMMDevHGCMConnect);
-        case VMMDevReq_HGCMDisconnect:
-            return sizeof(VMMDevHGCMDisconnect);
-        case VMMDevReq_HGCMCall:
-            return sizeof(VMMDevHGCMCall);
+        struct
+        {
+            /** The MMIO mapping.  NULL if no MMIO region. */
+            struct VMMDevMemory volatile RT_FAR *pvVmmDevMapping;
+            /** The MMIO region for the request port, NULL if not available. */
+            uintptr_t volatile RT_FAR           *pMmioReq;
+            /** The I/O port address. */
+            RTIOPORT                        IoPort;
+            /** Padding, ignore. */
+            RTIOPORT                        auPadding[HC_ARCH_BITS == 64 ? 3 : 1];
+        } Out;
+    } u;
+} VBGLIOCGETVMMDEVIOINFO, RT_FAR *PVBGLIOCGETVMMDEVIOINFO;
+AssertCompileSize(VBGLIOCGETVMMDEVIOINFO, 24 + (HC_ARCH_BITS == 64 ? 24 : 12));
+/** @} */
+
+
+/** @name VBGL_IOCTL_VMMDEV_REQUEST
+ * IOCTL to VBoxGuest to perform a VMM Device request less than 1KB in size.
+ * @{
+ */
+#define VBGL_IOCTL_VMMDEV_REQUEST(a_cb)             VBGL_IOCTL_CODE_SIZE(2, (a_cb))
+/** @} */
+
+
+/** @name VBGL_IOCTL_VMMDEV_REQUEST_BIG
+ * IOCTL to VBoxGuest to perform a VMM Device request that can 1KB or larger.
+ * @{
+ */
+#define VBGL_IOCTL_VMMDEV_REQUEST_BIG               VBGL_IOCTL_CODE_BIG(3)
+/** @} */
+
+#ifdef VBOX_WITH_HGCM
+
+/** @name VBGL_IOCTL_HGCM_CONNECT
+ * Connect to a HGCM service.
+ * @{ */
+# define VBGL_IOCTL_HGCM_CONNECT                    VBGL_IOCTL_CODE_SIZE(4, VBGL_IOCTL_HGCM_CONNECT_SIZE)
+# define VBGL_IOCTL_HGCM_CONNECT_SIZE               sizeof(VBGLIOCHGCMCONNECT)
+# define VBGL_IOCTL_HGCM_CONNECT_SIZE_IN            sizeof(VBGLIOCHGCMCONNECT)
+# define VBGL_IOCTL_HGCM_CONNECT_SIZE_OUT           RT_UOFFSET_AFTER(VBGLIOCHGCMCONNECT, u.Out)
+typedef struct VBGLIOCHGCMCONNECT
+{
+    /** The header. */
+    VBGLREQHDR                  Hdr;
+    union
+    {
+        struct
+        {
+            HGCMServiceLocation Loc;
+        } In;
+        struct
+        {
+            uint32_t            idClient;
+        } Out;
+    } u;
+} VBGLIOCHGCMCONNECT, RT_FAR *PVBGLIOCHGCMCONNECT;
+AssertCompileSize(VBGLIOCHGCMCONNECT, 24 + 132);
+#if !defined(__GNUC__)  /* Some GCC versions can't handle the complicated RT_UOFFSET_AFTER macro, it seems. */ \
+  && (!defined(RT_OS_OS2) || (!defined(__IBMC__) && !defined(__IBMCPP__) && (!defined(__WATCOMC__) || !defined(__cplusplus))))
+AssertCompile(VBGL_IOCTL_HGCM_CONNECT_SIZE_OUT == 24 + 4);
 #endif
-        case VMMDevReq_VideoAccelEnable:
-            return sizeof(VMMDevVideoAccelEnable);
-        case VMMDevReq_VideoAccelFlush:
-            return sizeof(VMMDevVideoAccelFlush);
-        case VMMDevReq_QueryCredentials:
-            return sizeof(VMMDevCredentials);
-        default:
-            return 0;
-    }
-}
+/** @} */
+
+
+/** @name VBGL_IOCTL_HGCM_DISCONNECT
+ * Disconnect from a HGCM service.
+ * @{ */
+# define VBGL_IOCTL_HGCM_DISCONNECT                 VBGL_IOCTL_CODE_SIZE(5, VBGL_IOCTL_HGCM_DISCONNECT_SIZE)
+# define VBGL_IOCTL_HGCM_DISCONNECT_SIZE            sizeof(VBGLIOCHGCMDISCONNECT)
+# define VBGL_IOCTL_HGCM_DISCONNECT_SIZE_IN         sizeof(VBGLIOCHGCMDISCONNECT)
+# define VBGL_IOCTL_HGCM_DISCONNECT_SIZE_OUT        sizeof(VBGLREQHDR)
+/** @note This is also used by a VbglR0 API.  */
+typedef struct VBGLIOCHGCMDISCONNECT
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    union
+    {
+        struct
+        {
+            uint32_t    idClient;
+        } In;
+    } u;
+} VBGLIOCHGCMDISCONNECT, RT_FAR *PVBGLIOCHGCMDISCONNECT;
+AssertCompileSize(VBGLIOCHGCMDISCONNECT, 24 + 4);
+/** @} */
+
+
+/** @name VBGL_IOCTL_HGCM_CALL, VBGL_IOCTL_HGCM_CALL_WITH_USER_DATA
+ *
+ * Make a call to a HGCM service.  There are several variations here.
+ *
+ * The VBGL_IOCTL_HGCM_CALL_WITH_USER_DATA variation is for other drivers (like
+ * the graphics ones) passing on requests from user land that contains user
+ * data.  These calls are always interruptible.
+ *
+ * @{ */
+# define VBGL_IOCTL_HGCM_CALL_32(a_cb)              VBGL_IOCTL_CODE_SIZE(6, (a_cb))
+# define VBGL_IOCTL_HGCM_CALL_64(a_cb)              VBGL_IOCTL_CODE_SIZE(7, (a_cb))
+# if ARCH_BITS == 64
+#  define VBGL_IOCTL_HGCM_CALL(a_cb)                VBGL_IOCTL_HGCM_CALL_64(a_cb)
+# else
+#  define VBGL_IOCTL_HGCM_CALL(a_cb)                VBGL_IOCTL_HGCM_CALL_32(a_cb)
+# endif
+# define VBGL_IOCTL_HGCM_CALL_WITH_USER_DATA(a_cb)  VBGL_IOCTL_CODE_SIZE(8, (a_cb))
+/** @} */
+
+
+/** @name VBGL_IOCTL_IDC_HGCM_FAST_CALL
+ *
+ * Variant of VBGL_IOCTL_HGCM_CALL for drivers that submits the request as-is to
+ * the host and handles the waiting, the caller does all the rest.
+ *
+ * @note ring-0 only.
+ * @note Size is not encoded in the I/O control code.
+ * @{
+ */
+#define VBGL_IOCTL_IDC_HGCM_FAST_CALL               VBGL_IOCTL_CODE_SIZE(61, sizeof(VBGLIOCIDCHGCMFASTCALL))
+#define VBGL_IOCTL_IDC_HGCM_FAST_CALL_SIZE(a_cb)    (a_cb)
+#define VBGL_IOCTL_IDC_HGCM_FAST_CALL_SIZE_IN(a_cb) (a_cb)
+#define VBGL_IOCTL_IDC_HGCM_FAST_CALL_SIZE_OUT(a_cb) (a_cb)
+#pragma pack(4) /* Want it to fit nicely with the 44 byte VMMDevHGCMCall and optimally align 64-bit parameters structures.  */
+typedef struct VBGLIOCIDCHGCMFASTCALL
+{
+    /** The header. */
+    VBGLREQHDR      Hdr;
+    /** The physical address of the following VMMDevHGCMCall structure. */
+    RTGCPHYS64      GCPhysReq;
+    uint64_t        uTimestamp[2]; /** @todo Looks completely unused. */
+    /** Set if interruptible. */
+    bool            fInterruptible;
+    /** Reserved. */
+    uint8_t         abReserved0[3];
+    /* After this structure follows a VMMDevHGCMCall strcuture (44 bytes), then
+       zero or more HGCMFunctionParameter structures (12 or 16 bytes), and finally
+       page lists and embedded buffers. */
+} VBGLIOCIDCHGCMFASTCALL, RT_FAR *PVBGLIOCIDCHGCMFASTCALL;
+#pragma pack()
+AssertCompileSize(VBGLIOCIDCHGCMFASTCALL, /* 24 + 8 + 2*8 + 1 + 3 = 0x34 (52) = */ 0x34);
 
 /**
- * Initializes a request structure.
+ * Macro for initializing VBGLIOCIDCHGCMFASTCALL and the following
+ * VMMDevHGCMCall structures.
  *
+ * @param   a_pHdr      The request header to initialize.
+ * @param   a_HdrPhys   The physical address corresponding to @a a_pHdr.
+ * @param   a_pCall     Pointer to the VMMDevHGCMCall structure.
+ * @param   a_idClient  The HGCM client ID.
+ * @param   a_uFunction The HGCM function number.
+ * @param   a_cParms    The number of parameters following @a a_pCall.
+ * @param   a_cbReq     The size of the whole request.
  */
-DECLINLINE(int) vmmdevInitRequest(VMMDevRequestHeader *req, VMMDevRequestType type)
-{
-    uint32_t requestSize;
-    if (!req)
-        return VERR_INVALID_PARAMETER;
-    requestSize = (uint32_t)vmmdevGetRequestSize(type);
-    if (!requestSize)
-        return VERR_INVALID_PARAMETER;
-    req->size        = requestSize;
-    req->version     = VMMDEV_REQUEST_HEADER_VERSION;
-    req->requestType = type;
-    req->rc          = VERR_GENERAL_FAILURE;
-    req->reserved1   = 0;
-    req->reserved2   = 0;
-    return VINF_SUCCESS;
-}
+#define VBGLIOCIDCHGCMFASTCALL_INIT(a_pHdr, a_HdrPhys, a_pCall, a_idClient, a_uFunction, a_cParms, a_cbReq) \
+    do { \
+        Assert((uintptr_t)(a_pHdr) + sizeof(VBGLIOCIDCHGCMFASTCALL) == (uintptr_t)(a_pCall)); \
+        VBGLREQHDR_INIT_EX(&(a_pHdr)->Hdr, a_cbReq, a_cbReq); \
+        pReq->Hdr.GCPhysReq      = (a_HdrPhys) + sizeof(VBGLIOCIDCHGCMFASTCALL); \
+        pReq->Hdr.fInterruptible = false; \
+        \
+        (a_pCall)->header.header.size       = (a_cbReq) - sizeof(VBGLIOCIDCHGCMFASTCALL); \
+        (a_pCall)->header.header.version    = VBGLREQHDR_VERSION; \
+        (a_pCall)->header.header.requestType= (ARCH_BITS == 64 ? VMMDevReq_HGCMCall64 : VMMDevReq_HGCMCall32); \
+        (a_pCall)->header.header.rc         = VERR_INTERNAL_ERROR; \
+        (a_pCall)->header.header.reserved1  = 0; \
+        (a_pCall)->header.header.fRequestor = VMMDEV_REQUESTOR_KERNEL        | VMMDEV_REQUESTOR_USR_DRV_OTHER \
+                                            | VMMDEV_REQUESTOR_CON_DONT_KNOW | VMMDEV_REQUESTOR_TRUST_NOT_GIVEN; \
+        (a_pCall)->header.fu32Flags         = 0; \
+        (a_pCall)->header.result            = VERR_INTERNAL_ERROR; \
+        (a_pCall)->u32ClientID              = (a_idClient); \
+        (a_pCall)->u32Function              = (a_uFunction); \
+        (a_pCall)->cParms                   = (a_cParms); \
+    } while (0)
+
 
 /** @} */
 
-#endif /* __VBox_VBoxGuest_h__ */
+#endif /* VBOX_WITH_HGCM */
+
+
+/** @name VBGL_IOCTL_LOG
+ * IOCTL to VBoxGuest to perform backdoor logging.
+ * @{ */
+#define VBOXGUEST_IOCTL_LOG(Size)
+#define VBGL_IOCTL_LOG(a_cchMsg)                    VBGL_IOCTL_CODE_BIG(9)
+#define VBGL_IOCTL_LOG_SIZE(a_cchMsg)               (sizeof(VBGLREQHDR) + (a_cchMsg) + 1)
+#define VBGL_IOCTL_LOG_SIZE_IN(a_cchMsg)            (sizeof(VBGLREQHDR) + (a_cchMsg) + 1)
+#define VBGL_IOCTL_LOG_SIZE_OUT                     sizeof(VBGLREQHDR)
+typedef struct VBGLIOCLOG
+{
+    /** The header. */
+    VBGLREQHDR                      Hdr;
+    union
+    {
+        struct
+        {
+            /** The log message.
+             * The length is determined from the input size and zero termination. */
+            char                    szMsg[RT_FLEXIBLE_ARRAY_IN_NESTED_UNION];
+        } In;
+    } u;
+} VBGLIOCLOG, RT_FAR *PVBGLIOCLOG;
+/** @} */
+
+
+/** @name VBGL_IOCTL_WAIT_FOR_EVENTS
+ * Wait for a VMMDev host event notification.
+ * @{
+ */
+#define VBGL_IOCTL_WAIT_FOR_EVENTS                  VBGL_IOCTL_CODE_SIZE(10, VBGL_IOCTL_WAIT_FOR_EVENTS_SIZE)
+#define VBGL_IOCTL_WAIT_FOR_EVENTS_SIZE             sizeof(VBGLIOCWAITFOREVENTS)
+#define VBGL_IOCTL_WAIT_FOR_EVENTS_SIZE_IN          sizeof(VBGLIOCWAITFOREVENTS)
+#define VBGL_IOCTL_WAIT_FOR_EVENTS_SIZE_OUT         RT_UOFFSET_AFTER(VBGLIOCWAITFOREVENTS, u.Out)
+typedef struct VBGLIOCWAITFOREVENTS
+{
+    /** The header. */
+    VBGLREQHDR                      Hdr;
+    union
+    {
+        struct
+        {
+            /** Timeout in milliseconds. */
+            uint32_t                cMsTimeOut;
+            /** Events to wait for. */
+            uint32_t                fEvents;
+        } In;
+        struct
+        {
+            /** Events that occurred. */
+            uint32_t                fEvents;
+        } Out;
+    } u;
+} VBGLIOCWAITFOREVENTS, RT_FAR *PVBGLIOCWAITFOREVENTS;
+AssertCompileSize(VBGLIOCWAITFOREVENTS, 24 + 8);
+/** @} */
+
+
+/** @name VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS
+ * IOCTL to VBoxGuest to interrupt (cancel) any pending
+ * VBGL_IOCTL_WAIT_FOR_EVENTS and return.
+ *
+ * Handled inside the guest additions and not seen by the host at all.
+ * After calling this, VBGL_IOCTL_WAIT_FOR_EVENTS should no longer be called in
+ * the same session.  At the time of writing this is not enforced; at the time
+ * of reading it may be.
+ * @see VBGL_IOCTL_WAIT_FOR_EVENTS
+ *
+ * @{
+ */
+#define VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS    VBGL_IOCTL_CODE_SIZE(11, VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS_SIZE)
+#define VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS_SIZE       sizeof(VBGLREQHDR)
+#define VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS_SIZE_IN    sizeof(VBGLREQHDR)
+#define VBGL_IOCTL_INTERRUPT_ALL_WAIT_FOR_EVENTS_SIZE_OUT   sizeof(VBGLREQHDR)
+/** @} */
+
+
+/** @name VBGL_IOCTL_CHANGE_FILTER_MASK
+ * IOCTL to VBoxGuest to control the event filter mask.
+ * @{ */
+#define VBGL_IOCTL_CHANGE_FILTER_MASK               VBGL_IOCTL_CODE_SIZE(12, VBGL_IOCTL_CHANGE_FILTER_MASK_SIZE)
+#define VBGL_IOCTL_CHANGE_FILTER_MASK_SIZE          sizeof(VBGLIOCCHANGEFILTERMASK)
+#define VBGL_IOCTL_CHANGE_FILTER_MASK_SIZE_IN       sizeof(VBGLIOCCHANGEFILTERMASK)
+#define VBGL_IOCTL_CHANGE_FILTER_MASK_SIZE_OUT      sizeof(VBGLREQHDR)
+typedef struct VBGLIOCCHANGEFILTERMASK
+{
+    /** The header. */
+    VBGLREQHDR                      Hdr;
+    union
+    {
+        struct
+        {
+            /** Flags to set. */
+            uint32_t fOrMask;
+            /** Flags to remove. */
+            uint32_t fNotMask;
+        } In;
+    } u;
+} VBGLIOCCHANGEFILTERMASK, RT_FAR *PVBGLIOCCHANGEFILTERMASK;
+AssertCompileSize(VBGLIOCCHANGEFILTERMASK, 24 + 8);
+/** @} */
+
+
+/** @name VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES
+ * IOCTL to for acquiring and releasing guest capabilities.
+ *
+ * This is used for multiple purposes:
+ * 1. By doing @a acquire r3 client application (e.g. VBoxTray) claims it will
+ *    use the given session for performing operations like @a seamless or
+ *    @a auto-resize, thus, if the application terminates, the driver will
+ *    automatically cleanup the caps reported to host, so that host knows guest
+ *    does not support them anymore
+ * 2. In a multy-user environment this will not allow r3 applications (like
+ *    VBoxTray) running in different user sessions simultaneously to interfere
+ *    with each other.  An r3 client application (like VBoxTray) is responsible
+ *    for Acquiring/Releasing caps properly as needed.
+ *
+ *
+ * VERR_RESOURCE_BUSY is returned if any capabilities in the fOrMask are
+ * currently acquired by some other VBoxGuest session.
+ *
+ * @todo Rename to VBGL_IOCTL_ACQUIRE_GUEST_CAPS
+ * @{
+ */
+#define VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES           VBGL_IOCTL_CODE_SIZE(13, VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES_SIZE)
+#define VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES_SIZE      sizeof(VBGLIOCACQUIREGUESTCAPS)
+#define VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES_SIZE_IN   sizeof(VBGLIOCACQUIREGUESTCAPS)
+#define VBGL_IOCTL_ACQUIRE_GUEST_CAPABILITIES_SIZE_OUT  sizeof(VBGLREQHDR)
+
+/** Default operation (full acquire/release). */
+#define VBGL_IOC_AGC_FLAGS_DEFAULT                      UINT32_C(0x00000000)
+/** Configures VBoxGuest to use the specified caps in Acquire mode, w/o making
+ * any caps acquisition/release.  This is only possible to set acquire mode for
+ * caps, but not clear it, so fNotMask is ignored when this flag is set. */
+#define VBGL_IOC_AGC_FLAGS_CONFIG_ACQUIRE_MODE          UINT32_C(0x00000001)
+/** Valid flag mask. */
+#define VBGL_IOC_AGC_FLAGS_VALID_MASK                   UINT32_C(0x00000001)
+
+typedef struct VBGLIOCACQUIREGUESTCAPS
+{
+    /** The header. */
+    VBGLREQHDR              Hdr;
+    union
+    {
+        struct
+        {
+            /** Acquire flags (VBGL_IOC_AGC_FLAGS_XXX). */
+            uint32_t        fFlags;
+            /** Guest capabilities to acquire (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fOrMask;
+            /** Guest capabilities to release (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fNotMask;
+        } In;
+    } u;
+} VBGLIOCACQUIREGUESTCAPS, RT_FAR *PVBGLIOCACQUIREGUESTCAPS;
+AssertCompileSize(VBGLIOCACQUIREGUESTCAPS, 24 + 12);
+/** @} */
+
+
+/** @name VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES
+ * IOCTL to VBoxGuest to set guest capabilities.
+ * @{ */
+#define VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES            VBGL_IOCTL_CODE_SIZE(14, VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES_SIZE)
+#define VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES_SIZE       sizeof(VBGLIOCSETGUESTCAPS)
+#define VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES_SIZE_IN    sizeof(VBGLIOCSETGUESTCAPS)
+#define VBGL_IOCTL_CHANGE_GUEST_CAPABILITIES_SIZE_OUT   sizeof(VBGLIOCSETGUESTCAPS)
+typedef struct VBGLIOCSETGUESTCAPS
+{
+    /** The header. */
+    VBGLREQHDR              Hdr;
+    union
+    {
+        struct
+        {
+            /** The capabilities to set (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fOrMask;
+            /** The capabilities to drop (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fNotMask;
+        } In;
+        struct
+        {
+            /** The capabilities held by the session after the call (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fSessionCaps;
+            /** The capabilities for all the sessions after the call (VMMDEV_GUEST_SUPPORTS_XXX). */
+            uint32_t        fGlobalCaps;
+        } Out;
+    } u;
+} VBGLIOCSETGUESTCAPS, RT_FAR *PVBGLIOCSETGUESTCAPS;
+AssertCompileSize(VBGLIOCSETGUESTCAPS, 24 + 8);
+typedef VBGLIOCSETGUESTCAPS VBoxGuestSetCapabilitiesInfo;
+/** @} */
+
+
+/** @name VBGL_IOCTL_SET_MOUSE_STATUS
+ * IOCTL to VBoxGuest to update the mouse status features.
+ * @{ */
+#define VBGL_IOCTL_SET_MOUSE_STATUS                 VBGL_IOCTL_CODE_SIZE(15, VBGL_IOCTL_SET_MOUSE_STATUS_SIZE)
+#define VBGL_IOCTL_SET_MOUSE_STATUS_SIZE            sizeof(VBGLIOCSETMOUSESTATUS)
+#define VBGL_IOCTL_SET_MOUSE_STATUS_SIZE_IN         sizeof(VBGLIOCSETMOUSESTATUS)
+#define VBGL_IOCTL_SET_MOUSE_STATUS_SIZE_OUT        sizeof(VBGLREQHDR)
+typedef struct VBGLIOCSETMOUSESTATUS
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    union
+    {
+        struct
+        {
+            /** Mouse status flags (VMMDEV_MOUSE_XXX). */
+            uint32_t    fStatus;
+        } In;
+    } u;
+} VBGLIOCSETMOUSESTATUS, RT_FAR *PVBGLIOCSETMOUSESTATUS;
+/** @} */
+
+
+/** @name VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK
+ *
+ * IOCTL to for setting the mouse driver callback.
+ * @note The callback will be called in interrupt context with the VBoxGuest
+ *       device event spinlock held.
+ * @note ring-0 only.
+ *
+ * @{ */
+#define VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK            VBGL_IOCTL_CODE_SIZE(16, VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK_SIZE)
+#define VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK_SIZE       sizeof(VBGLIOCSETMOUSENOTIFYCALLBACK)
+#define VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK_SIZE_IN    sizeof(VBGLIOCSETMOUSENOTIFYCALLBACK)
+#define VBGL_IOCTL_SET_MOUSE_NOTIFY_CALLBACK_SIZE_OUT   sizeof(VBGLREQHDR)
+typedef struct VBGLIOCSETMOUSENOTIFYCALLBACK
+{
+    /** The header. */
+    VBGLREQHDR              Hdr;
+    union
+    {
+        struct
+        {
+            /** Mouse notification callback function. */
+            PFNVBOXGUESTMOUSENOTIFY     pfnNotify;
+            /** The callback argument. */
+            void                RT_FAR *pvUser;
+        } In;
+    } u;
+} VBGLIOCSETMOUSENOTIFYCALLBACK, RT_FAR *PVBGLIOCSETMOUSENOTIFYCALLBACK;
+/** @} */
+
+
+/** @name VBGL_IOCTL_CHECK_BALLOON
+ * IOCTL to VBoxGuest to check memory ballooning.
+ *
+ * The guest kernel module / device driver will ask the host for the current size of
+ * the balloon and adjust the size. Or it will set fHandledInR0 = false and R3 is
+ * responsible for allocating memory and calling R0 (VBGL_IOCTL_CHANGE_BALLOON).
+ * @{ */
+#define VBGL_IOCTL_CHECK_BALLOON                    VBGL_IOCTL_CODE_SIZE(17, VBGL_IOCTL_CHECK_BALLOON_SIZE)
+#define VBGL_IOCTL_CHECK_BALLOON_SIZE               sizeof(VBGLIOCCHECKBALLOON)
+#define VBGL_IOCTL_CHECK_BALLOON_SIZE_IN            sizeof(VBGLREQHDR)
+#define VBGL_IOCTL_CHECK_BALLOON_SIZE_OUT           sizeof(VBGLIOCCHECKBALLOON)
+typedef struct VBGLIOCCHECKBALLOON
+{
+    /** The header. */
+    VBGLREQHDR                      Hdr;
+    union
+    {
+        struct
+        {
+            /** The size of the balloon in chunks of 1MB. */
+            uint32_t                cBalloonChunks;
+            /** false = handled in R0, no further action required.
+             *   true = allocate balloon memory in R3. */
+            bool                    fHandleInR3;
+            /** Explicit padding, please ignore. */
+            bool                    afPadding[3];
+        } Out;
+    } u;
+} VBGLIOCCHECKBALLOON, RT_FAR *PVBGLIOCCHECKBALLOON;
+AssertCompileSize(VBGLIOCCHECKBALLOON, 24 + 8);
+typedef VBGLIOCCHECKBALLOON VBoxGuestCheckBalloonInfo;
+/** @} */
+
+
+/** @name VBGL_IOCTL_CHANGE_BALLOON
+ * IOCTL to VBoxGuest to supply or revoke one chunk for ballooning.
+ *
+ * The guest kernel module / device driver will lock down supplied memory or
+ * unlock reclaimed memory and then forward the physical addresses of the
+ * changed balloon chunk to the host.
+ *
+ * @{ */
+#define VBGL_IOCTL_CHANGE_BALLOON                   VBGL_IOCTL_CODE_SIZE(18, VBGL_IOCTL_CHANGE_BALLOON_SIZE)
+#define VBGL_IOCTL_CHANGE_BALLOON_SIZE              sizeof(VBGLIOCCHANGEBALLOON)
+#define VBGL_IOCTL_CHANGE_BALLOON_SIZE_IN           sizeof(VBGLIOCCHANGEBALLOON)
+#define VBGL_IOCTL_CHANGE_BALLOON_SIZE_OUT          sizeof(VBGLREQHDR)
+typedef struct VBGLIOCCHANGEBALLOON
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    union
+    {
+        struct
+        {
+            /** Address of the chunk (user space address). */
+            RTR3PTR     pvChunk;
+            /** Explicit alignment padding, MBZ. */
+            uint8_t     abPadding[ARCH_BITS == 64 ? 0 + 7 : 4 + 7];
+            /** true = inflate, false = deflate. */
+            bool        fInflate;
+        } In;
+    } u;
+} VBGLIOCCHANGEBALLOON, RT_FAR *PVBGLIOCCHANGEBALLOON;
+AssertCompileSize(VBGLIOCCHANGEBALLOON, 24+16);
+/** @} */
+
+
+/** @name VBGL_IOCTL_WRITE_CORE_DUMP
+ * IOCTL to VBoxGuest to write guest core.
+ * @{ */
+#define VBGL_IOCTL_WRITE_CORE_DUMP                  VBGL_IOCTL_CODE_SIZE(19, VBGL_IOCTL_WRITE_CORE_DUMP_SIZE)
+#define VBGL_IOCTL_WRITE_CORE_DUMP_SIZE             sizeof(VBGLIOCWRITECOREDUMP)
+#define VBGL_IOCTL_WRITE_CORE_DUMP_SIZE_IN          sizeof(VBGLIOCWRITECOREDUMP)
+#define VBGL_IOCTL_WRITE_CORE_DUMP_SIZE_OUT         sizeof(VBGLREQHDR)
+typedef struct VBGLIOCWRITECOREDUMP
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    union
+    {
+        struct
+        {
+            /** Flags (reserved, MBZ). */
+            uint32_t    fFlags;
+        } In;
+    } u;
+} VBGLIOCWRITECOREDUMP, RT_FAR *PVBGLIOCWRITECOREDUMP;
+AssertCompileSize(VBGLIOCWRITECOREDUMP, 24 + 4);
+typedef VBGLIOCWRITECOREDUMP VBoxGuestWriteCoreDump;
+/** @} */
+
+
+#ifdef VBOX_WITH_DPC_LATENCY_CHECKER
+/** @name VBGL_IOCTL_DPC_LATENCY_CHECKER
+ * IOCTL to VBoxGuest to perform DPC latency tests, printing the result in
+ * the release log on the host.  Takes no data, returns no data.
+ * @{ */
+# define VBGL_IOCTL_DPC_LATENCY_CHECKER             VBGL_IOCTL_CODE_SIZE(20, VBGL_IOCTL_DPC_LATENCY_CHECKER_SIZE)
+# define VBGL_IOCTL_DPC_LATENCY_CHECKER_SIZE        sizeof(VBGLREQHDR)
+# define VBGL_IOCTL_DPC_LATENCY_CHECKER_SIZE_IN     sizeof(VBGLREQHDR)
+# define VBGL_IOCTL_DPC_LATENCY_CHECKER_SIZE_OUT    sizeof(VBGLREQHDR)
+/** @} */
+#endif
+
+
+#ifdef RT_OS_OS2
+/**
+ * The data buffer layout for the IDC entry point (AttachDD).
+ *
+ * @remark  This is defined in multiple 16-bit headers / sources.
+ *          Some places it's called VBGOS2IDC to short things a bit.
+ */
+typedef struct VBGLOS2ATTACHDD
+{
+    /** VBGL_IOC_VERSION. */
+    uint32_t u32Version;
+    /** Opaque session handle. */
+    uint32_t u32Session;
+
+    /**
+     * The 32-bit service entry point.
+     *
+     * @returns VBox status code.
+     * @param   u32Session          The session handle (PVBOXGUESTSESSION).
+     * @param   iFunction           The requested function.
+     * @param   pReqHdr             The input/output data buffer.  The caller
+     *                              ensures that this cannot be swapped out, or that
+     *                              it's acceptable to take a page in fault in the
+     *                              current context.  If the request doesn't take
+     *                              input or produces output, apssing NULL is okay.
+     * @param   cbReq               The size of the data buffer.
+     */
+# if ARCH_BITS == 32 || defined(DOXYGEN_RUNNING)
+    DECLCALLBACKMEMBER(int, pfnServiceEP,(uint32_t u32Session, unsigned iFunction, PVBGLREQHDR pReqHdr, size_t cbReq));
+# else
+    uint32_t pfnServiceEP;
+#endif
+
+    /** The 16-bit service entry point for C code (cdecl).
+     *
+     * It's the same as the 32-bit entry point, but the types has
+     * changed to 16-bit equivalents.
+     *
+     * @code
+     * int far cdecl
+     * VBoxGuestOs2IDCService16(uint32_t u32Session, uint16_t iFunction,
+     *                          PVBGLREQHDR fpvData, uint16_t cbData);
+     * @endcode
+     */
+# if ARCH_BITS == 16 || defined(DOXYGEN_RUNNING)
+    DECLCALLBACKMEMBER(int, fpfnServiceEP,(uint32_t u32Session, uint16_t iFunction, PVBGLREQHDR fpvData, uint16_t cbData));
+# else
+    RTFAR16 fpfnServiceEP;
+# endif
+
+    /** The 16-bit service entry point for Assembly code (register).
+     *
+     * This is just a wrapper around fpfnServiceEP to simplify calls
+     * from 16-bit assembly code.
+     *
+     * @returns (e)ax: VBox status code; cx: The amount of data returned.
+     *
+     * @param   u32Session          eax   - The above session handle.
+     * @param   iFunction           dl    - The requested function.
+     * @param   pvData              es:bx - The input/output data buffer.
+     * @param   cbData              cx    - The size of the data buffer.
+     */
+    RTFAR16 fpfnServiceAsmEP;
+} VBGLOS2ATTACHDD;
+/** Pointer to VBOXGUESTOS2IDCCONNECT buffer. */
+typedef VBGLOS2ATTACHDD RT_FAR *PVBGLOS2ATTACHDD;
+
+/**
+ * Prototype for the 16-bit callback returned by AttachDD on OS/2.
+ * @param   pAttachInfo     Pointer to structure to fill in.
+ */
+# if defined(__IBMC__) || defined(__IBMCPP__)
+typedef void (* __cdecl RT_FAR_CODE PFNVBGLOS2ATTACHDD)(PVBGLOS2ATTACHDD pAttachInfo);
+# else
+typedef void (__cdecl RT_FAR_CODE *PFNVBGLOS2ATTACHDD)(PVBGLOS2ATTACHDD pAttachInfo);
+# endif
+#endif /* RT_OS_OS2 */
+
+
+/** @name VBGL_IOCL_IDC_CONNECT
+ * IDC client connect request.
+ *
+ * On platforms other than Windows and OS/2, this will also create a kernel
+ * session for the caller.
+ *
+ * @note ring-0 only.
+ * @{
+ */
+#define VBGL_IOCTL_IDC_CONNECT                      VBGL_IOCTL_CODE_SIZE(63, VBGL_IOCTL_IDC_CONNECT_SIZE)
+#define VBGL_IOCTL_IDC_CONNECT_SIZE                 sizeof(VBGLIOCIDCCONNECT)
+#define VBGL_IOCTL_IDC_CONNECT_SIZE_IN              RT_UOFFSET_AFTER(VBGLIOCIDCCONNECT, u.In)
+#define VBGL_IOCTL_IDC_CONNECT_SIZE_OUT             sizeof(VBGLIOCIDCCONNECT)
+typedef struct VBGLIOCIDCCONNECT
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    /** The payload union. */
+    union
+    {
+        struct
+        {
+            /** VBGL_IOCTL_IDC_CONNECT_MAGIC_COOKIE. */
+            uint32_t        u32MagicCookie;
+            /** The desired version of the I/O control interface (VBGL_IOC_VERSION). */
+            uint32_t        uReqVersion;
+            /** The minimum version of the I/O control interface (VBGL_IOC_VERSION). */
+            uint32_t        uMinVersion;
+            /** Reserved, MBZ. */
+            uint32_t        uReserved;
+        } In;
+        struct
+        {
+            /** The session handle (opaque). */
+#if ARCH_BITS >= 32
+            void    RT_FAR *pvSession;
+#else
+            uint32_t        pvSession;
+#endif
+            /** The version of the I/O control interface for this session
+             * (typically VBGL_IOC_VERSION). */
+            uint32_t        uSessionVersion;
+            /** The I/O control interface version for of the driver (VBGL_IOC_VERSION). */
+            uint32_t        uDriverVersion;
+            /** The SVN revision of the driver.
+             * This will be set to 0 if not compiled into the driver. */
+            uint32_t        uDriverRevision;
+            /** Reserved \#1 (will be returned as zero until defined). */
+            uint32_t        uReserved1;
+            /** Reserved \#2 (will be returned as NULL until defined). */
+            void    RT_FAR *pvReserved2;
+        } Out;
+    } u;
+} VBGLIOCIDCCONNECT, RT_FAR *PVBGLIOCIDCCONNECT;
+AssertCompileSize(VBGLIOCIDCCONNECT, 24 + 16 + (ARCH_BITS == 64 ? 8 : 4) * 2);
+#if  !defined(__GNUC__) /* Some GCC versions can't handle the complicated RT_UOFFSET_AFTER macro, it seems. */ \
+  && (!defined(RT_OS_OS2) || (!defined(__IBMC__) && !defined(__IBMCPP__) && (!defined(__WATCOMC__) || !defined(__cplusplus))))
+AssertCompile(VBGL_IOCTL_IDC_CONNECT_SIZE_IN == 24 + 16);
+#endif
+#define VBGL_IOCTL_IDC_CONNECT_MAGIC_COOKIE         UINT32_C(0x55aa4d5a) /**< Magic value for doing an IDC connect. */
+/** @} */
+
+
+/** @name VBGL_IOCL_IDC_DISCONNECT
+ * IDC client disconnect request.
+ *
+ * This will destroy the kernel session associated with the IDC connection.
+ *
+ * @note ring-0 only.
+ * @{
+ */
+#define VBGL_IOCTL_IDC_DISCONNECT                   VBGL_IOCTL_CODE_SIZE(62, VBGL_IOCTL_IDC_DISCONNECT_SIZE)
+#define VBGL_IOCTL_IDC_DISCONNECT_SIZE              sizeof(VBGLIOCIDCDISCONNECT)
+#define VBGL_IOCTL_IDC_DISCONNECT_SIZE_IN           sizeof(VBGLIOCIDCDISCONNECT)
+#define VBGL_IOCTL_IDC_DISCONNECT_SIZE_OUT          sizeof(VBGLREQHDR)
+typedef struct VBGLIOCIDCDISCONNECT
+{
+    /** The header. */
+    VBGLREQHDR          Hdr;
+    union
+    {
+        struct
+        {
+            /** The session handle for platforms where this is needed. */
+#if ARCH_BITS >= 32
+            void RT_FAR *pvSession;
+#else
+            uint32_t     pvSession;
+#endif
+        } In;
+    } u;
+} VBGLIOCIDCDISCONNECT, RT_FAR *PVBGLIOCIDCDISCONNECT;
+AssertCompileSize(VBGLIOCIDCDISCONNECT, 24 + (ARCH_BITS == 64 ? 8 : 4));
+/** @} */
+
+
+#if !defined(RT_OS_WINDOWS) && !defined(RT_OS_OS2)
+RT_C_DECLS_BEGIN
+/**
+ * The VBoxGuest IDC entry point.
+ *
+ * @returns VBox status code.
+ * @param   pvSession   The session.
+ * @param   uReq        The request code.
+ * @param   pReqHdr     The request.
+ * @param   cbReq       The request size.
+ */
+int VBOXCALL VBoxGuestIDC(void RT_FAR *pvSession, uintptr_t uReq, PVBGLREQHDR pReqHdr, size_t cbReq);
+RT_C_DECLS_END
+#endif
+
+
+#if defined(RT_OS_LINUX) || defined(RT_OS_SOLARIS) || defined(RT_OS_FREEBSD)
+
+/* Private IOCtls between user space and the kernel video driver.  DRM private
+ * IOCtls always have the type 'd' and a number between 0x40 and 0x99 (0x9F?) */
+
+# define VBOX_DRM_IOCTL(a) (0x40 + DRM_VBOX_ ## a)
+
+/** Stop using HGSMI in the kernel driver until it is re-enabled, so that a
+ *  user-space driver can use it.  It must be re-enabled before the kernel
+ *  driver can be used again in a sensible way. */
+/** @note These IOCtls was removed from the code, but are left here as
+ * templates as we may need similar ones in future. */
+# define DRM_VBOX_DISABLE_HGSMI    0
+# define DRM_IOCTL_VBOX_DISABLE_HGSMI    VBOX_DRM_IOCTL(DISABLE_HGSMI)
+# define VBOXVIDEO_IOCTL_DISABLE_HGSMI   _IO('d', DRM_IOCTL_VBOX_DISABLE_HGSMI)
+/** Enable HGSMI in the kernel driver after it was previously disabled. */
+# define DRM_VBOX_ENABLE_HGSMI     1
+# define DRM_IOCTL_VBOX_ENABLE_HGSMI     VBOX_DRM_IOCTL(ENABLE_HGSMI)
+# define VBOXVIDEO_IOCTL_ENABLE_HGSMI    _IO('d', DRM_IOCTL_VBOX_ENABLE_HGSMI)
+
+#endif /* RT_OS_LINUX || RT_OS_SOLARIS || RT_OS_FREEBSD */
+
+#endif /* !defined(IN_RC) && !defined(IN_RING0_AGNOSTIC) && !defined(IPRT_NO_CRT) */
+
+/** @} */
+
+/** @} */
+#endif /* !VBOX_INCLUDED_VBoxGuest_h */
+

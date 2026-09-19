@@ -1,250 +1,135 @@
 /** @file
- *
- * MS COM / XPCOM Abstraction Layer:
- * Assertion macros for COM/XPCOM
+ * MS COM / XPCOM Abstraction Layer - Assertion macros for COM/XPCOM.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __VBox_com_assert_h__
-#define __VBox_com_assert_h__
+#ifndef VBOX_INCLUDED_com_assert_h
+#define VBOX_INCLUDED_com_assert_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include <iprt/assert.h>
+
+/** @defgroup grp_com_assert    Assertion Macros for COM/XPCOM
+ * @ingroup grp_com
+ * @{
+ */
+
 
 /**
  *  Asserts that the COM result code is succeeded in strict builds.
  *  In non-strict builds the result code will be NOREF'ed to kill compiler warnings.
  *
- *  @param rc   COM result code
+ *  @param hrc      The COM result code
  */
-#define AssertComRC(rc)      \
-    do { AssertMsg (SUCCEEDED (rc), ("COM RC = 0x%08X\n", rc)); NOREF (rc); } while (0)
+#define AssertComRC(hrc) \
+    do { AssertMsg(SUCCEEDED(hrc), ("COM RC = %Rhrc (0x%08X)\n", hrc, hrc)); NOREF(hrc); } while (0)
+
+/**
+ *  Same as AssertComRC, except the caller already knows we failed.
+ *
+ *  @param hrc      The COM result code
+ */
+#define AssertComRCFailed(hrc) \
+    do { AssertMsgFailed(("COM RC = %Rhrc (0x%08X)\n", hrc, hrc)); NOREF(hrc); } while (0)
 
 /**
  *  A special version of AssertComRC that returns the given expression
  *  if the result code is failed.
  *
- *  @param rc   COM result code
- *  @param ret  the expression to return
+ *  @param hrc      The COM result code
+ *  @param RetExpr  The expression to return
  */
-#define AssertComRCReturn(rc, ret)      \
-    AssertMsgReturn (SUCCEEDED (rc), ("COM RC = 0x%08X\n", rc), ret)
+#define AssertComRCReturn(hrc, RetExpr) \
+    AssertMsgReturn(SUCCEEDED(hrc), ("COM RC = %Rhrc (0x%08X)\n", hrc, hrc), RetExpr)
 
 /**
  *  A special version of AssertComRC that returns the given result code
  *  if it is failed.
  *
- *  @param rc   COM result code
- *  @param ret  the expression to return
+ *  @param hrc      The COM result code
  */
-#define AssertComRCReturnRC(rc)         \
-    AssertMsgReturn (SUCCEEDED (rc), ("COM RC = 0x%08X\n", rc), rc)
+#define AssertComRCReturnRC(hrc) \
+    AssertMsgReturn(SUCCEEDED(hrc), ("COM RC = %Rhrc (0x%08X)\n", hrc, hrc), hrc)
 
 /**
  *  A special version of AssertComRC that returns if the result code is failed.
  *
- *  @param rc   COM result code
- *  @param ret  the expression to return
+ *  @param hrc      The COM result code
  */
-#define AssertComRCReturnVoid(rc)      \
-    AssertMsgReturnVoid (SUCCEEDED (rc), ("COM RC = 0x%08X\n", rc))
+#define AssertComRCReturnVoid(hrc) \
+    AssertMsgReturnVoid(SUCCEEDED(hrc), ("COM RC = %Rhrc (0x%08X)\n", hrc, hrc))
 
 /**
  *  A special version of AssertComRC that evaluates the given expression and
  *  breaks if the result code is failed.
  *
- *  @param rc   COM result code
- *  @param eval the expression to evaluate
+ *  @param hrc          The COM result code
+ *  @param PreBreakExpr The expression to evaluate on failure.
  */
-#define AssertComRCBreak(rc, eval)      \
-    if (1) { AssertComRC (rc); if (!SUCCEEDED (rc)) { eval; break; } } else do {} while (0)
+#define AssertComRCBreak(hrc, PreBreakExpr) \
+    if (!SUCCEEDED(hrc)) { AssertComRCFailed(hrc); PreBreakExpr; break; } else do {} while (0)
+
+/**
+ *  A special version of AssertComRC that evaluates the given expression and
+ *  throws it if the result code is failed.
+ *
+ *  @param hrc          The COM result code
+ *  @param ThrowMeExpr  The expression which result to be thrown on failure.
+ */
+#define AssertComRCThrow(hrc, ThrowMeExpr) \
+    do { if (SUCCEEDED(hrc)) { /*likely*/} else { AssertComRCFailed(hrc); throw (ThrowMeExpr); } } while (0)
 
 /**
  *  A special version of AssertComRC that just breaks if the result code is
  *  failed.
  *
- *  @param rc   COM result code
+ *  @param hrc      The COM result code
  */
-#define AssertComRCBreakRC(rc)          \
-    if (1) { AssertComRC (rc); if (!SUCCEEDED (rc)) { break; } } else do {} while (0)
+#define AssertComRCBreakRC(hrc) \
+    if (!SUCCEEDED(hrc)) { AssertComRCFailed(hrc); break; } else do {} while (0)
 
 /**
- *  Checks whether the given COM result code is successful.
- *  If not, executes the return statement with this result code.
+ *  A special version of AssertComRC that just throws @a hrc if the result code
+ *  is failed.
  *
- *  @param rc   COM result code
+ *  @param hrc      The COM result code
  */
-#define CheckComRCReturnRC(rc)      \
-    if (1) { if (!SUCCEEDED (rc)) return (rc); } else do {} while (0)
+#define AssertComRCThrowRC(hrc) \
+    do { if (SUCCEEDED(hrc)) { /*likely*/ } else { AssertComRCFailed(hrc); throw hrc; } } while (0)
 
-/**
- *  Checks whether the given COM result code is successful.
- *  If not, executes the break statement.
- *
- *  @param rc   COM result code
- */
-#define CheckComRCBreakRC(rc)      \
-    if (1) { if (!SUCCEEDED (rc)) { break; } } else do {} while (0)
+/** @} */
 
-/*
- * A section of helpful macros for error output
- */
-
-/**
- *  Prints a line describing the given COM result code.
- *  Used by command line tools or for debugging.
- */
-#define PRINT_RC_MESSAGE(rc) \
-    RTPrintf ("[!] Primary RC  = %Rwa\n", rc)
-
-/**
- *  Prints the extended error information.
- *  Used by command line tools or for debugging.
- *
- *  @param info com::ErrorInfo instance
- */
-#define PRINT_ERROR_INFO(info) \
-    do { \
-        info.print ("[!] "); \
-    } while (0)
-
-/**
- *  Calls the given interface method and then checks if the return value
- *  (COM result code) indicates a failure. If so, prints the failed
- *  function/line/file and the description of the result code.
- *
- *  Used by command line tools or for debugging and assumes the |HRESULT rc|
- *  variable is accessible for assigning in the current scope.
- */
-#define CHECK_RC(method) \
-    do { \
-        rc = method; \
-        if (FAILED (rc)) { \
-            RTPrintf("[!] FAILED calling " #method " at line %d!\n", __LINE__); \
-            PRINT_RC_MESSAGE(rc); \
-        } \
-    } while (0)
-
-/**
- *  Does the same as CHECK_RC(), but executes the |return rc| statement on
- *  failure.
- */
-#define CHECK_RC_RET(method) \
-    do { CHECK_RC (method); if (FAILED (rc)) return rc; } while (0)
-
-/**
- *  Does the same as CHECK_RC(), but executes the |break| statement on
- *  failure.
- */
-#define CHECK_RC_BREAK(method) \
-    if (1) { CHECK_RC (method); if (FAILED (rc)) break; } else do {} while (0)
-
-/**
- *  Calls the given method of the given interface and then checks if the return
- *  value (COM result code) indicates a failure. If so, prints the failed
- *  function/line/file, the description of the result code and attempts to
- *  query the extended error information on the current thread (using
- *  com::ErrorInfo) if the interface reports that it supports error information.
- *
- *  Used by command line tools or for debugging and assumes the |HRESULT rc|
- *  variable is accessible for assigning in the current scope.
- */
-#define CHECK_ERROR(iface, method) \
-    do \
-    { \
-        CHECK_RC(iface->method); \
-        if (FAILED(rc)) { \
-            com::ErrorInfo info (iface); \
-            info.print ("[!] "); \
-        } \
-    } while (0)
-
-/**
- *  Does the same as CHECK_ERROR(), but executes the |return ret| statement on
- *  failure.
- */
-#define CHECK_ERROR_RET(iface, method, ret) \
-    do { CHECK_ERROR (iface, method); if (FAILED (rc)) return (ret); } while (0)
-
-/**
- *  Does the same as CHECK_ERROR(), but executes the |break| statement on
- *  failure.
- */
-#define CHECK_ERROR_BREAK(iface, method) \
-    if (1) { CHECK_ERROR (iface, method); if (FAILED (rc)) break; } else do {} while (0)
-
-#define CHECK_ERROR_NOCALL() \
-    do { \
-        com::ErrorInfo info; \
-        PRINT_ERROR_INFO (info); \
-    } while (0)
-
-/**
- *  Does the same as CHECK_ERROR(), but doesn't need the interface pointer
- *  because doesn't do a check whether the interface supports error info or not.
- */
-#define CHECK_ERROR_NI(method) \
-    do { \
-        CHECK_RC (method); \
-        if (FAILED (rc)) { \
-            com::ErrorInfo info; \
-            PRINT_ERROR_INFO (info); \
-        } \
-    } while (0)
-
-/**
- *  Does the same as CHECK_ERROR_NI(), but executes the |return rc| statement
- *  on failure.
- */
-#define CHECK_ERROR_NI_RET(method) \
-    do { CHECK_ERROR_NI (method); if (FAILED (rc)) return rc; } while (0)
-
-/**
- *  Does the same as CHECK_ERROR_NI(), but executes the |break| statement
- *  on failure.
- */
-#define CHECK_ERROR_NI_BREAK(method) \
-    if (1) { CHECK_ERROR_NI (method); if (FAILED (rc)) break; } else do {} while (0)
-
-
-/**
- *  Asserts the given expression is true. When the expression is false, prints
- *  a line containing the failied function/line/file; otherwise does nothing.
- */
-#define ASSERT(expr) \
-    do { \
-        if (!(expr)) \
-            RTPrintf("[!] ASSERTION FAILED at line %d: %s\n", __LINE__, #expr); \
-    } while (0)
-
-/**
- *  Does the same as ASSERT(), but executes the |return ret| statement if the
- *  expression to assert is false.
- */
-#define ASSERT_RET(expr, ret) \
-    do { ASSERT (expr); if (!(expr)) return (ret); } while (0)
-
-/**
- *  Does the same as ASSERT(), but executes the |break| statement if the
- *  expression to assert is false.
- */
-#define ASSERT_BREAK(expr) \
-    if (1) { ASSERT (expr); if (!(expr)) break; } else do {} while (0)
-
-
-#endif // __VBox_com_assert_h__
+#endif /* !VBOX_INCLUDED_com_assert_h */
 

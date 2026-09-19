@@ -6,171 +6,68 @@
 #
 
 #
-# Copyright (C) 2006 InnoTek Systemberatung GmbH
+# Copyright (C) 2006-2026 Oracle and/or its affiliates.
 #
-# This file is part of VirtualBox Open Source Edition (OSE), as
-# available from http://www.virtualbox.org. This file is free software;
-# you can redistribute it and/or modify it under the terms of the GNU
-# General Public License as published by the Free Software Foundation,
-# in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
-# distribution. VirtualBox OSE is distributed in the hope that it will
-# be useful, but WITHOUT ANY WARRANTY of any kind.
+# This file is part of VirtualBox base platform packages, as
+# available from https://www.virtualbox.org.
 #
-# If you received this file as part of a commercial VirtualBox
-# distribution, then only the terms of your commercial VirtualBox
-# license agreement apply instead of the previous paragraph.
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, in version 3 of the
+# License.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <https://www.gnu.org/licenses>.
+#
+# SPDX-License-Identifier: GPL-3.0-only
 #
 
 TEMPLATE	= app
 LANGUAGE	= C++
 
-FORMS	= ui/VBoxDiskImageManagerDlg.ui \
-	ui/VBoxVMNetworkSettings.ui \
-	ui/VBoxUSBFilterSettings.ui \
-	ui/VBoxNewVMWzd.ui \
-	ui/VBoxCloseVMDlg.ui \
-	ui/VBoxTakeSnapshotDlg.ui \
-	ui/VBoxVMSettingsDlg.ui \
-	ui/VBoxSnapshotDetailsDlg.ui \
-	ui/VBoxGlobalSettingsDlg.ui \
-	ui/VBoxNewHDWzd.ui \
-	ui/VBoxSnapshotsWgt.ui \
-	ui/VBoxAboutDlg.ui
+TRANSLATIONS = \
+	nls/VirtualBox_bg.ts \
+	nls/VirtualBox_ca.ts \
+	nls/VirtualBox_ca_VA.ts \
+	nls/VirtualBox_cs.ts \
+	nls/VirtualBox_da.ts \
+	nls/VirtualBox_de.ts \
+	nls/VirtualBox_el.ts \
+	nls/VirtualBox_en.ts \
+	nls/VirtualBox_es.ts \
+	nls/VirtualBox_eu.ts \
+	nls/VirtualBox_fa.ts \
+	nls/VirtualBox_fi.ts \
+	nls/VirtualBox_fr.ts \
+	nls/VirtualBox_gl.ts \
+	nls/VirtualBox_he.ts \
+	nls/VirtualBox_hr_HR.ts \
+	nls/VirtualBox_hu.ts \
+	nls/VirtualBox_id.ts \
+	nls/VirtualBox_it.ts \
+	nls/VirtualBox_ja.ts \
+	nls/VirtualBox_ka.ts \
+	nls/VirtualBox_km_KH.ts \
+	nls/VirtualBox_ko.ts \
+	nls/VirtualBox_lt.ts \
+	nls/VirtualBox_nl.ts \
+	nls/VirtualBox_pl.ts \
+	nls/VirtualBox_pt.ts \
+	nls/VirtualBox_pt_BR.ts \
+	nls/VirtualBox_ro.ts \
+	nls/VirtualBox_ru.ts \
+	nls/VirtualBox_sk.ts \
+	nls/VirtualBox_sl.ts \
+	nls/VirtualBox_sr.ts \
+	nls/VirtualBox_sv.ts \
+	nls/VirtualBox_th.ts \
+	nls/VirtualBox_tr.ts \
+	nls/VirtualBox_uk.ts \
+	nls/VirtualBox_zh_CN.ts \
+	nls/VirtualBox_zh_TW.ts
 
-IMAGES	= images/tpixel.png \
-	images/vm_new.png \
-	images/vm_new_dis.png \
-	images/vm_settings.png \
-	images/vm_settings_dis.png \
-	images/vm_delete.png \
-	images/vm_delete_dis.png \
-	images/vm_start.png \
-	images/vm_start_dis.png \
-	images/vm_discard.png \
-	images/vm_discard_dis.png \
-	images/vm_pause_s.png \
-	images/vm_pause_16px.png \
-	images/os_freebsd.png \
-	images/os_openbsd.png \
-	images/os_netbsd.png \
-	images/os_dos.png \
-	images/os_linux.png \
-	images/os_l4.png \
-	images/os_netware.png \
-	images/os_os2.png \
-	images/os_other.png \
-	images/os_solaris.png \
-	images/os_win2000.png \
-	images/os_win2003.png \
-	images/os_win31.png \
-	images/os_win95.png \
-	images/os_win98.png \
-	images/os_winme.png \
-	images/os_winnt.png \
-	images/os_winvista.png \
-	images/os_winxp.png \
-	images/state_aborted_16px.png \
-	images/state_discarding_16px.png \
-	images/state_paused_16px.png \
-	images/state_running_16px.png \
-	images/state_saved_16px.png \
-	images/state_saving_16px.png \
-	images/state_powered_off_16px.png \
-	images/state_restoring_16px.png \
-	images/offline_snapshot_16px.png \
-	images/online_snapshot_16px.png \
-	images/vmw_new_welcome.png \
-	images/vmw_new_harddisk.png \
-	images/fd_16px.png \
-	images/fd_read_16px.png \
-	images/fd_write_16px.png \
-	images/fd_disabled_16px.png \
-	images/cd_16px.png \
-	images/cd_read_16px.png \
-	images/cd_write_16px.png \
-	images/cd_disabled_16px.png \
-	images/cd_unmount_16px.png \
-	images/cd_unmount_dis_16px.png \
-	images/hd_16px.png \
-	images/hd_read_16px.png \
-	images/hd_write_16px.png \
-	images/hd_disabled_16px.png \
-	images/mouse_16px.png \
-	images/mouse_disable_16px.png \
-	images/mouse_disabled_16px.png \
-	images/mouse_seamless_16px.png \
-	images/mouse_can_seamless_16px.png \
-	images/mouse_seamless_disabled_16px.png \
-	images/hostkey_16px.png \
-	images/hostkey_pressed_16px.png \
-	images/hostkey_captured_16px.png \
-	images/hostkey_captured_pressed_16px.png \
-	images/hostkey_disabled_16px.png \
-	images/machine_16px.png \
-	images/ico16x01.png \
-	images/ico20x01.png \
-	images/ico32x01.png \
-	images/ico40x01.png \
-	images/ico64x01.png \
-	images/about_16px.png \
-	images/site_16px.png \
-	images/reset_16px.png \
-	images/reset_disabled_16px.png \
-	images/pause_16px.png \
-	images/fullscreen_16px.png \
-	images/fullscreen_disabled_16px.png \
-	images/exit_16px.png \
-	images/fd_unmount_16px.png \
-	images/fd_unmount_dis_16px.png \
-	images/guesttools_16px.png \
-	images/guesttools_disabled_16px.png \
-	images/diskim_16px.png \
-	images/settings_16px.png \
-	images/delete_16px.png \
-	images/new_16px.png \
-	images/start_16px.png \
-	images/start_dis_16px.png \
-	images/discard_16px.png \
-	images/discard_dis_16px.png \
-	images/settings_dis_16px.png \
-	images/delete_dis_16px.png \
-	images/sound_16px.png \
-	images/nw_16px.png \
-	images/nw_read_16px.png \
-	images/nw_write_16px.png \
-	images/nw_disabled_16px.png \
-	images/usb_16px.png \
-	images/usb_disabled_16px.png \
-	images/usb_read_16px.png \
-	images/usb_write_16px.png \
-	images/usb_add_16px.png \
-	images/usb_add_disabled_16px.png \
-	images/usb_movedown_16px.png \
-	images/usb_movedown_disabled_16px.png \
-	images/usb_moveup_16px.png \
-	images/usb_moveup_disabled_16px.png \
-	images/usb_remove_16px.png \
-	images/usb_remove_disabled_16px.png \
-	images/select_file_16px.png \
-	images/select_file_dis_16px.png \
-	images/discard_cur_state_16px.png \
-	images/discard_cur_state_22px.png \
-	images/discard_cur_state_dis_16px.png \
-	images/discard_cur_state_dis_22px.png \
-	images/discard_cur_state_snapshot_16px.png \
-	images/discard_cur_state_snapshot_22px.png \
-	images/discard_cur_state_snapshot_dis_16px.png \
-	images/discard_cur_state_snapshot_dis_22px.png \
-	images/discard_snapshot_16px.png \
-	images/discard_snapshot_22px.png \
-	images/discard_snapshot_dis_16px.png \
-	images/discard_snapshot_dis_22px.png \
-	images/take_snapshot_16px.png \
-	images/take_snapshot_22px.png \
-	images/take_snapshot_dis_16px.png \
-	images/take_snapshot_dis_22px.png \
-	images/show_snapshot_details_16px.png \
-	images/show_snapshot_details_22px.png \
-	images/show_snapshot_details_dis_16px.png \
-	images/show_snapshot_details_dis_22px.png \
-	images/about_600px.png

@@ -44,6 +44,32 @@
 
 #include "xpt_struct.h"
 
+#ifdef VBOX_WITH_XPCOM_NAMESPACE_CLEANUP
+#define XPT_Do8 VBoxNsxpXPT_Do8
+#define XPT_Do16 VBoxNsxpXPT_Do16
+#define XPT_Do32 VBoxNsxpXPT_Do32
+#define XPT_Do64 VBoxNsxpXPT_Do64
+#define XPT_DoIID VBoxNsxpXPT_DoIID
+#define XPT_DoCString VBoxNsxpXPT_DoCString
+#define XPT_DoString VBoxNsxpXPT_DoString
+#define XPT_DoStringInline VBoxNsxpXPT_DoStringInline
+#define XPT_NewXDRState VBoxNsxpXPT_NewXDRState
+#define XPT_SetDataOffset VBoxNsxpXPT_SetDataOffset
+#define XPT_SeekTo VBoxNsxpXPT_SeekTo
+#define XPT_MakeCursor VBoxNsxpXPT_MakeCursor
+#define XPT_DestroyXDRState VBoxNsxpXPT_DestroyXDRState
+#define XPT_GetXDRData VBoxNsxpXPT_GetXDRData
+#define XPT_GetXDRDataLength VBoxNsxpXPT_GetXDRDataLength
+#define XPT_DoHeader VBoxNsxpXPT_DoHeader
+#define XPT_DoHeaderPrologue VBoxNsxpXPT_DoHeaderPrologue
+#define XPT_UpdateFileLength VBoxNsxpXPT_UpdateFileLength
+#define XPT_DataOffset VBoxNsxpXPT_DataOffset
+#define XPT_GetOffsetForAddr VBoxNsxpXPT_GetOffsetForAddr
+#define XPT_SetOffsetForAddr VBoxNsxpXPT_SetOffsetForAddr
+#define XPT_SetAddrForOffset VBoxNsxpXPT_SetAddrForOffset
+#define XPT_GetAddrForOffset VBoxNsxpXPT_GetAddrForOffset
+#endif /* VBOX_WITH_XPCOM_NAMESPACE_CLEANUP */
+
 PR_BEGIN_EXTERN_C
 
 typedef struct XPTState         XPTState;
@@ -159,6 +185,9 @@ XPT_GetAddrForOffset(XPTCursor *cursor, PRUint32 offset);
 /* all data structures are big-endian */
 
 #if defined IS_BIG_ENDIAN
+# ifdef VBOX
+#  error "Misconfigured endian!"
+# endif
 #  define XPT_SWAB32(x) x
 #  define XPT_SWAB16(x) x
 #elif defined IS_LITTLE_ENDIAN
@@ -187,7 +216,7 @@ XPT_GetAddrForOffset(XPTCursor *cursor, PRUint32 offset);
     XPTMode mode = cursor->state->mode;                                       \
     if (!(mode == XPT_ENCODE || XPT_Do32(cursor, &new_curs.offset)) ||        \
         !CheckForRepeat(cursor, (void **)addrp, pool,                         \
-                        mode == XPT_ENCODE ? size : 0u, &new_curs,            \
+                        mode == XPT_ENCODE ? size : 0, &new_curs,            \
                         &already) ||                                          \
         !(mode == XPT_DECODE || XPT_Do32(cursor, &new_curs.offset)))          \
         return PR_FALSE;                                                      \

@@ -1,32 +1,38 @@
+/* $Id: TMAllReal.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * TM - Timeout Manager, Real Time, All Contexts.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP LOG_GROUP_TM
-#include <VBox/tm.h>
+#include <VBox/vmm/tm.h>
 #include "TMInternal.h"
-#include <VBox/vm.h>
+#include <VBox/vmm/vmcc.h>
 #include <iprt/time.h>
 
 
@@ -34,10 +40,11 @@
  * Gets the current TMCLOCK_REAL time.
  *
  * @returns Real time.
- * @param   pVM             The VM handle.
+ * @param   pVM             The cross context VM structure.
  */
-TMDECL(uint64_t) TMRealGet(PVM pVM)
+VMM_INT_DECL(uint64_t) TMRealGet(PVM pVM)
 {
+    NOREF(pVM);
     return RTTimeMilliTS();
 }
 
@@ -46,10 +53,11 @@ TMDECL(uint64_t) TMRealGet(PVM pVM)
  * Gets the frequency of the TMCLOCK_REAL clock.
  *
  * @returns frequency.
- * @param   pVM             The VM handle.
+ * @param   pVM             The cross context VM structure.
  */
-TMDECL(uint64_t) TMRealGetFreq(PVM pVM)
+VMM_INT_DECL(uint64_t) TMRealGetFreq(PVM pVM)
 {
+    NOREF(pVM);
     return TMCLOCK_FREQ_REAL;
 }
 

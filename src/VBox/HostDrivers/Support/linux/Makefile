@@ -1,151 +1,219 @@
-#
+# $Id: Makefile 113547 2026-03-24 23:42:47Z knut.osmundsen@oracle.com $
+## @file
 # Makefile for the VirtualBox Linux Host Driver.
-# (For 2.6.x this file must be called 'Makefile'!)
 #
 
 #
+# Copyright (C) 2006-2026 Oracle and/or its affiliates.
 #
-# Copyright (C) 2006 InnoTek Systemberatung GmbH
+# This file is part of VirtualBox base platform packages, as
+# available from https://www.virtualbox.org.
 #
-# This file is part of VirtualBox Open Source Edition (OSE), as
-# available from http://www.virtualbox.org. This file is free software;
-# you can redistribute it and/or modify it under the terms of the GNU
-# General Public License as published by the Free Software Foundation,
-# in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
-# distribution. VirtualBox OSE is distributed in the hope that it will
-# be useful, but WITHOUT ANY WARRANTY of any kind.
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, in version 3 of the
+# License.
 #
-# If you received this file as part of a commercial VirtualBox
-# distribution, then only the terms of your commercial VirtualBox
-# license agreement apply instead of the previous paragraph.
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <https://www.gnu.org/licenses>.
+#
+# The contents of this file may alternatively be used under the terms
+# of the Common Development and Distribution License Version 1.0
+# (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+# in the VirtualBox distribution, in which case the provisions of the
+# CDDL are applicable instead of those of the GPL.
+#
+# You may elect to license modified versions of this file under the
+# terms and conditions of either the GPL or the CDDL or both.
+#
+# SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
 #
 
-MODULE = vboxdrv
-OBJS   = \
+# Linux kbuild sets this to our source directory if we are called from there
+obj ?= $(CURDIR)
+include $(obj)/Makefile-header.gmk
+VBOXDRV_DIR := $(VBOX_MODULE_SRC_DIR)
+
+VBOXMOD_NAME = vboxdrv
+VBOXMOD_OBJS = \
 	linux/SUPDrv-linux.o \
-	SUPDRVShared.o \
+	SUPDrv.o \
+	SUPDrvGip.o \
+	SUPDrvSem.o \
+	SUPDrvTracer.o \
+	SUPLibAll.o \
+	common/string/strformatrt.o
+
+ifndef VBOX_WITHOUT_COMBINED_SOURCES
+VBOXMOD_OBJS += \
+	combined-agnostic1.o \
+	combined-agnostic2.o \
+	combined-os-specific.o
+else  # VBOX_WITHOUT_COMBINED_SOURCES
+VBOXMOD_OBJS += \
 	r0drv/alloc-r0drv.o \
+	r0drv/initterm-r0drv.o \
+	r0drv/memobj-r0drv.o \
+	r0drv/mpnotification-r0drv.o \
+	r0drv/powernotification-r0drv.o \
+	r0drv/linux/assert-r0drv-linux.o \
 	r0drv/linux/alloc-r0drv-linux.o \
-	r0drv/linux/semaphore-r0drv-linux.o \
+	r0drv/linux/fileio-r0drv-linux.o \
+	r0drv/linux/initterm-r0drv-linux.o \
+	r0drv/linux/dbgkrnlinfo-r0drv-linux.o \
+	r0drv/linux/memobj-r0drv-linux.o \
+	r0drv/linux/memuserkernel-r0drv-linux.o \
+	r0drv/linux/mp-r0drv-linux.o \
+	r0drv/linux/mpnotification-r0drv-linux.o \
+	r0drv/linux/process-r0drv-linux.o \
+	r0drv/linux/rtStrFormatKernelAddress-r0drv-linux.o \
+	r0drv/linux/semevent-r0drv-linux.o \
+	r0drv/linux/semeventmulti-r0drv-linux.o \
+	r0drv/linux/semfastmutex-r0drv-linux.o \
+	r0drv/linux/semmutex-r0drv-linux.o \
 	r0drv/linux/spinlock-r0drv-linux.o \
 	r0drv/linux/thread-r0drv-linux.o \
+	r0drv/linux/thread2-r0drv-linux.o \
+	r0drv/linux/threadctxhooks-r0drv-linux.o \
+	r0drv/linux/time-r0drv-linux.o \
+	r0drv/linux/timer-r0drv-linux.o \
+	r0drv/generic/semspinmutex-r0drv-generic.o \
+	r0drv/RTR0DbgKrnlInfoGetFunction.o \
+	r0drv/RTR0DbgKrnlInfoGetSymbol.o \
+	common/alloc/alloc.o \
+	common/checksum/crc32.o \
+	common/checksum/ipv4.o \
+	common/checksum/ipv6.o \
+	common/err/RTErrConvertFromErrno.o \
+	common/err/RTErrConvertToErrno.o \
+	common/err/errinfo.o \
+	common/log/log.o \
+	common/log/logellipsis.o \
+	common/log/logrel.o \
+	common/log/logrelellipsis.o \
+	common/log/logcom.o \
+	common/log/logformat.o \
+	common/log/RTLogCreateEx.o \
+	common/misc/RTAssertMsg1Weak.o \
+	common/misc/RTAssertMsg2.o \
+	common/misc/RTAssertMsg2Add.o \
+	common/misc/RTAssertMsg2AddWeak.o \
+	common/misc/RTAssertMsg2AddWeakV.o \
+	common/misc/RTAssertMsg2Weak.o \
+	common/misc/RTAssertMsg2WeakV.o \
+	common/misc/assert.o \
+	common/misc/handletable.o \
+	common/misc/handletablectx.o \
+	common/misc/thread.o \
+	common/string/RTStrCat.o \
+	common/string/RTStrCopy.o \
+	common/string/RTStrCopyEx.o \
+	common/string/RTStrCopyP.o \
+	common/string/RTStrEnd.o \
+	common/string/RTStrNCmp.o \
+	common/string/RTStrNLen.o \
+	common/string/stringalloc.o \
+	common/string/strformat.o \
+	common/string/RTStrFormat.o \
+	common/string/strformatnum.o \
+	common/string/strformattype.o \
+	common/string/strprintf.o \
+	common/string/strprintf-ellipsis.o \
+	common/string/strprintf2.o \
+	common/string/strprintf2-ellipsis.o \
+	common/string/strtonum.o \
+	common/table/avlpv.o \
+	common/time/time.o \
+	r0drv/linux/RTLogWriteDebugger-r0drv-linux.o \
+	generic/RTAssertShouldPanic-generic.o \
+	generic/RTLogWriteStdErr-stub-generic.o \
+	generic/RTLogWriteStdOut-stub-generic.o \
+	generic/RTLogWriteUser-generic.o \
+	generic/RTMpGetArraySize-generic.o \
+	generic/RTMpGetCoreCount-generic.o \
+	generic/RTSemEventWait-2-ex-generic.o \
+	generic/RTSemEventWaitNoResume-2-ex-generic.o \
+	generic/RTSemEventMultiWait-2-ex-generic.o \
+	generic/RTSemEventMultiWaitNoResume-2-ex-generic.o \
+	generic/RTTimerCreate-generic.o \
+	generic/errvars-generic.o \
+	generic/mppresent-generic.o \
+	generic/uuid-generic.o \
+	VBox/log-vbox.o
+ ifeq ($(VBOX_KBUILD_TARGET_ARCH),amd64)
+VBOXMOD_OBJS += \
+	VBox/RTLogWriteVmm-amd64-x86.o \
+	common/alloc/heapsimple.o
+ else
+VBOXMOD_OBJS += \
+	generic/RTLogWriteVmm-stub-generic.o \
+	common/asm/ASMMultU64ByU32DivByU32-generic.o
+ endif
+ ifeq ($(VBOX_KBUILD_TARGET_ARCH),amd64)
+ endif
+endif # VBOX_WITHOUT_COMBINED_SOURCES
+ifeq ($(VBOX_KBUILD_TARGET_ARCH),x86)
+VBOXMOD_OBJS += \
+	math/gcc/divdi3.o \
+	math/gcc/divmoddi4.o \
+	math/gcc/moddi3.o \
+	math/gcc/qdivrem.o \
+	math/gcc/udivdi3.o \
+	math/gcc/udivmoddi4.o \
+	math/gcc/divdi3.o \
+	math/gcc/umoddi3.o
+endif
+ifdef VBOX_WITH_NATIVE_DTRACE
+VBOXMOD_OBJS += SUPDrvDTrace.o
+endif
 
-#
-# Where is everything?
-#
-KERN_DIR_CUR := /lib/modules/$(shell uname -r)/build
-ifndef $(KERN_DIR)
-KERN_DIR := $(KERN_DIR_CUR)
-endif
-ifneq ($(shell if test -d $(KERN_DIR); then echo yes; fi),yes)
-ifneq ($(shell if test -d /usr/src/linux; then echo yes; fi),yes)
-$(error Error: unable to find the sources of your current Linux kernel. Specify KERN_DIR=<directory> and run Make again.)
-endif
-KERN_DIR := /usr/src/linux
-$(warning Warning: using /usr/src/linux as the source directory of your Linux kernel. If this is not correct, specify KERN_DIR=<directory> and run Make again.)
+VBOXMOD_INCL  = \
+	$(VBOXDRV_DIR) \
+	$(VBOXDRV_DIR)include \
+	$(VBOXDRV_DIR)r0drv/linux
+ifdef VBOX_WITH_NATIVE_DTRACE
+VBOXMOD_INCL += \
+	/usr/include/linux \
+	/usr/include
 endif
 
-# includes
-ifndef $(KERN_INCL)
-KERN_INCL = $(KERN_DIR)/include
-$(info Info: using $(KERN_INCL) as the include directory of your Linux kernel. If this is not correct, specify KERN_INFO=<directory> and run Make again.)
-endif
-ifneq ($(shell if test -d $(KERN_INFO); then echo yes; fi),yes)
-$(error Error: unable to find the include directory for your current Linux kernel. Specify $KERN_INCL=<directory> and run Make again.)
-endif
-
-# Module install dir.
-ifndef MODULE_DIR
-MODULE_DIR_TST := /lib/modules/$(shell uname -r)
-ifeq ($(shell if test -d $(MODULE_DIR_TST); then echo yes; fi),yes)
-MODULE_DIR := $(MODULE_DIR_TST)/misc
-else
-$(error Error: could not find the module directory for your current Linux kernel)
-endif
-endif # MODULE_DIR unspecified
-
-# guess kernel version (24 or 26)
-KERN_VERSION := $(if $(wildcard $(KERN_DIR)/Rules.make),24,26)
-
-# debug - show guesses.
-ifdef DEBUG
-$(warning dbg: KERN_DIR     = $(KERN_DIR))
-$(warning dbg: KERN_INCL    = $(KERN_INCL))
-$(warning dbg: MODULE_DIR   = $(MODULE_DIR))
-$(warning dbg: KERN_VERSION = $(KERN_VERSION))
-endif
-
-#
-# Compiler options
-#
-ifndef INCL
-INCL     := -I$(KERN_INCL) -I$(shell pwd) -I$(shell pwd)/include -I$(shell pwd)/r0drv/linux
-export INCL
-endif
-KFLAGS   := -D__KERNEL__ -DMODULE -D__LINUX__ -DIN_RING0 -DIN_RT_R0 -DIN_SUP_R0
+VBOXMOD_DEFS = \
+	RT_OS_LINUX \
+	IN_RING0 \
+	IN_RT_R0 \
+	IN_SUP_R0 \
+	VBOX \
+	RT_WITH_VBOX \
+	VBOX_WITH_HARDENING \
+	SUPDRV_WITH_RELEASE_LOGGER \
+	VBOX_WITHOUT_EFLAGS_AC_SET_IN_VBOXDRV \
+	IPRT_WITHOUT_EFLAGS_AC_PRESERVING \
+	VBOX_WITH_HOST_VMX
 ifndef CONFIG_VBOXDRV_FIXEDMAJOR
-KFLAGS   += -DCONFIG_VBOXDRV_AS_MISC
+VBOXMOD_DEFS += CONFIG_VBOXDRV_AS_MISC
 endif
-ifeq ($(filter-out x86_64 amd64 AMD64,$(shell uname -m)),)
-KFLAGS   += -D__AMD64__
-else
-KFLAGS   += -D__X86__
+ifdef VBOX_WITH_NATIVE_DTRACE
+VBOXMOD_DEFS += VBOX_WITH_NATIVE_DTRACE
 endif
-#ifeq ($(BUILD_TYPE),debug) - you'll have to enable this manually to get debug stuff.
-#KFLAGS   += -DDEBUG
-#endif
-
-ifeq ($(KERN_VERSION), 24)
-#
-# 2.4
-#
-
-TOPDIR = $(KERN_DIR)
-
-MODULE_EXT := o
-
-EXTRA_CFLAGS := -DVBOX_LINUX_2_4
-
-$(MODULE)-objs = $(OBJS)
-
-else
-#
-# 2.6 and later
-#
-
-MODULE_EXT := ko
-
-$(MODULE)-y  := $(OBJS)
-
+ifdef VBOX_WITH_TEXT_MODMEM_HACK
+VBOXMOD_DEFS += RTMEMALLOC_EXEC_HEAP VBOX_WITH_TEXT_MODMEM_HACK
 endif
+VBOXMOD_CFLAGS = -include $(VBOXDRV_DIR)include/VBox/SUPDrvMangling.h \
+	-fno-omit-frame-pointer -fno-pie -Wno-declaration-after-statement
 
-# build defs
-EXTRA_CFLAGS += $(INCL) $(KFLAGS) $(KDEBUG)
 
-all: $(MODULE)
+include $(obj)/Makefile-footer.gmk
 
-obj-m += $(MODULE).o
-
-$(MODULE):
-	$(MAKE) KBUILD_VERBOSE=1 -C $(KERN_DIR) SUBDIRS=$(CURDIR) SRCROOT=$(CURDIR) modules
-
-ifeq ($(KERN_VERSION), 24)
-#
-# 2.4 Module linking
-#
-$(MODULE).o: $(OBJS)
-	$(LD) -o $@ -r $(OBJS)
-
-include $(KERN_DIR)/Rules.make
-
-endif
-
-install: $(MODULE)
-	@mkdir -p $(MODULE_DIR); \
-	install -m 0664 -o root -g root $(MODULE).$(MODULE_EXT) $(MODULE_DIR); \
-        PATH="$(PATH):/bin:/sbin" depmod -ae;
-
-clean:
-	for f in . linux r0drv r0drv/linux; do rm -f $$f/*.o $$f/.*.cmd $$f/.*.flags; done
-	rm -rf .vboxdrv* .tmp_ver* vboxdrv.* Module.symvers
+check: $(VBOXMOD_0_TARGET)
+	@if ! readelf -p __ksymtab_strings vboxdrv.ko | grep -E "\[.*\]  *(RT|g_..*RT.*)"; then \
+	    echo "All exported IPRT symbols are properly renamed!"; \
+	 else \
+	    echo "error: Some exported IPRT symbols was not properly renamed! See above." >&2; \
+	    false; \
+	 fi
 

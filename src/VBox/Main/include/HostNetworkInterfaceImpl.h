@@ -1,126 +1,148 @@
+/* $Id: HostNetworkInterfaceImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
+
 /** @file
  *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_HOSTNETWORKINTERFACEIMPL
-#define ____H_HOSTNETWORKINTERFACEIMPL
-
-#ifndef __WIN__
-#error This is Windows only stuff!
+#ifndef MAIN_INCLUDED_HostNetworkInterfaceImpl_h
+#define MAIN_INCLUDED_HostNetworkInterfaceImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
 #endif
 
-#include "VirtualBoxBase.h"
-#include "Collection.h"
+#include "HostNetworkInterfaceWrap.h"
+
+#ifdef VBOX_WITH_HOSTNETIF_API
+struct NETIFINFO;
+#endif
+
+class PerformanceCollector;
 
 class ATL_NO_VTABLE HostNetworkInterface :
-    public VirtualBoxSupportErrorInfoImpl <HostNetworkInterface, IHostNetworkInterface>,
-    public VirtualBoxSupportTranslation <HostNetworkInterface>,
-    public VirtualBoxBase,
-    public IHostNetworkInterface
+    public HostNetworkInterfaceWrap
 {
 public:
-    HostNetworkInterface();
-    virtual ~HostNetworkInterface();
 
-    DECLARE_NOT_AGGREGATABLE(HostNetworkInterface)
+    DECLARE_COMMON_CLASS_METHODS(HostNetworkInterface)
 
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(HostNetworkInterface)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IHostNetworkInterface)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    HRESULT FinalConstruct();
+    void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT init (Bstr interfaceName, Guid guid);
+    HRESULT init(Utf8Str aInterfaceName, Utf8Str aShortName, Guid aGuid, HostNetworkInterfaceType_T ifType);
+#ifdef VBOX_WITH_HOSTNETIF_API
+    HRESULT init(Utf8Str aInterfaceName, HostNetworkInterfaceType_T ifType, struct NETIFINFO *pIfs);
+    HRESULT updateConfig();
+#endif
 
-    // IHostNetworkInterface properties
-    STDMETHOD(COMGETTER(Name)) (BSTR *interfaceName);
-    STDMETHOD(COMGETTER(Id)) (GUIDPARAMOUT guid);
+    HRESULT i_setVirtualBox(VirtualBox *pVirtualBox);
+#ifdef RT_OS_WINDOWS
+    HRESULT i_updatePersistentConfig();
+#endif /* RT_OS_WINDOWS */
 
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"HostNetworkInterface"; }
+#ifdef VBOX_WITH_RESOURCE_USAGE_API
+    void i_registerMetrics(PerformanceCollector *aCollector, ComPtr<IUnknown> objptr);
+    void i_unregisterMetrics(PerformanceCollector *aCollector, ComPtr<IUnknown> objptr);
+#endif
 
 private:
-    Bstr mInterfaceName;
-    Guid mGuid;
+
+    // Wrapped IHostNetworkInterface properties
+    HRESULT getName(com::Utf8Str &aName);
+    HRESULT getShortName(com::Utf8Str &aShortName);
+    HRESULT getId(com::Guid &aGuiId);
+    HRESULT getDHCPEnabled(BOOL *aDHCPEnabled);
+    HRESULT getIPAddress(com::Utf8Str &aIPAddress);
+    HRESULT getNetworkMask(com::Utf8Str &aNetworkMask);
+    HRESULT getIPV6Supported(BOOL *aIPV6Supported);
+    HRESULT getIPV6Address(com::Utf8Str &aIPV6Address);
+    HRESULT getIPV6NetworkMaskPrefixLength(ULONG *aIPV6NetworkMaskPrefixLength);
+    HRESULT getHardwareAddress(com::Utf8Str &aHardwareAddress);
+    HRESULT getMediumType(HostNetworkInterfaceMediumType_T *aType);
+    HRESULT getStatus(HostNetworkInterfaceStatus_T *aStatus);
+    HRESULT getInterfaceType(HostNetworkInterfaceType_T *aType);
+    HRESULT getNetworkName(com::Utf8Str &aNetworkName);
+    HRESULT getWireless(BOOL *aWireless);
+
+    // Wrapped IHostNetworkInterface methods
+    HRESULT enableStaticIPConfig(const com::Utf8Str &aIPAddress,
+                                 const com::Utf8Str &aNetworkMask);
+    HRESULT enableStaticIPConfigV6(const com::Utf8Str &aIPV6Address,
+                                   ULONG aIPV6NetworkMaskPrefixLength);
+    HRESULT enableDynamicIPConfig();
+    HRESULT dHCPRediscover();
+
+    Utf8Str i_composeNetworkName(const Utf8Str szShortName);
+
+#if defined(RT_OS_WINDOWS)
+    HRESULT eraseAdapterConfigParameter(const char *szParamName);
+    HRESULT saveAdapterConfigParameter(const char *szParamName, const Utf8Str& strValue);
+    HRESULT saveAdapterConfigIPv4Dhcp();
+    HRESULT saveAdapterConfigIPv4(ULONG addr, ULONG mask);
+    HRESULT saveAdapterConfigIPv6(const Utf8Str& addr, ULONG prefix);
+    HRESULT saveAdapterConfig();
+    bool    isInConfigFile();
+#endif /* defined(RT_OS_WINDOWS) */
+
+    const Utf8Str mInterfaceName;
+    const Guid mGuid;
+    const Utf8Str mNetworkName;
+    const Utf8Str mShortName;
+    HostNetworkInterfaceType_T mIfType;
+
+    VirtualBox * const  mVirtualBox;
+
+    struct Data
+    {
+        Data() : IPAddress(0), networkMask(0),
+            IPV6NetworkMaskPrefixLength(0),
+            realIPAddress(0), realNetworkMask(0), realIPV6PrefixLength(0),
+            dhcpEnabled(FALSE),
+            mediumType(HostNetworkInterfaceMediumType_Unknown),
+            status(HostNetworkInterfaceStatus_Down), speedMbits(0), wireless(FALSE) {}
+
+        ULONG IPAddress;
+        ULONG networkMask;
+        Utf8Str IPV6Address;
+        ULONG IPV6NetworkMaskPrefixLength;
+        ULONG realIPAddress;
+        ULONG realNetworkMask;
+        Utf8Str realIPV6Address;
+        ULONG realIPV6PrefixLength;
+        BOOL dhcpEnabled;
+        Utf8Str hardwareAddress;
+        HostNetworkInterfaceMediumType_T mediumType;
+        HostNetworkInterfaceStatus_T status;
+        ULONG speedMbits;
+        BOOL wireless;
+    } m;
+
 };
 
-COM_DECL_READONLY_ENUM_AND_COLLECTION_BEGIN (HostNetworkInterface)
+typedef std::list<ComObjPtr<HostNetworkInterface> > HostNetworkInterfaceList;
 
-    STDMETHOD(FindByName) (INPTR BSTR name, IHostNetworkInterface **networkInterface)
-    {
-        if (!name)
-            return E_INVALIDARG;
-        if (!networkInterface)
-            return E_POINTER;
-
-        *networkInterface = NULL;
-        Vector::value_type found;
-        Vector::iterator it = vec.begin();
-        while (it != vec.end() && !found)
-        {
-            Bstr n;
-            (*it)->COMGETTER(Name) (n.asOutParam());
-            if (n == name)
-                found = *it;
-            ++ it;
-        }
-
-        if (!found)
-            return setError (E_INVALIDARG, HostNetworkInterfaceCollection::tr (
-                "The host network interface with the given name could not be found"));
-
-        return found.queryInterfaceTo (networkInterface);
-    }
-
-    STDMETHOD(FindById) (INPTR GUIDPARAM id, IHostNetworkInterface **networkInterface)
-    {
-        if (Guid(id).isEmpty())
-            return E_INVALIDARG;
-        if (!networkInterface)
-            return E_POINTER;
-
-        *networkInterface = NULL;
-        Vector::value_type found;
-        Vector::iterator it = vec.begin();
-        while (it != vec.end() && !found)
-        {
-            Guid g;
-            (*it)->COMGETTER(Id) (g.asOutParam());
-            if (g == Guid(id))
-                found = *it;
-            ++ it;
-        }
-
-        if (!found)
-            return setError (E_INVALIDARG, HostNetworkInterfaceCollection::tr (
-                "The host network interface with the given GUID could not be found"));
-
-        return found.queryInterfaceTo (networkInterface);
-    }
-
-
-COM_DECL_READONLY_ENUM_AND_COLLECTION_END (HostNetworkInterface)
-
-
-#endif // ____H_H_HOSTNETWORKINTERFACEIMPL
+#endif /* !MAIN_INCLUDED_HostNetworkInterfaceImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

@@ -1,46 +1,75 @@
-/* $Id: fs.h 1  klaus.espenlaub@oracle.com $ */
+/* $Id: fs.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Internal RTFs header.
+ * IPRT - Internal RTFs header.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __fs_h__
-#define __fs_h__
-
-#include <iprt/types.h>
-#ifndef __WIN__
-# include <sys/stat.h>
+#ifndef IPRT_INCLUDED_INTERNAL_fs_h
+#define IPRT_INCLUDED_INTERNAL_fs_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
 #endif
 
-__BEGIN_DECLS
+#include <iprt/types.h>
+#ifndef RT_OS_WINDOWS
+# include <sys/stat.h>
+#endif
+#ifdef RT_OS_FREEBSD
+# include <osreldate.h>
+#endif
 
-RTFMODE rtFsModeFromDos(RTFMODE fMode, const char *pszName, unsigned cbName);
-RTFMODE rtFsModeFromUnix(RTFMODE fMode);
-RTFMODE rtFsModeNormalize(RTFMODE fMode, const char *pszName, unsigned cbName);
+RT_C_DECLS_BEGIN
+
+/** IO_REPARSE_TAG_SYMLINK */
+#define RTFSMODE_SYMLINK_REPARSE_TAG UINT32_C(0xa000000c)
+
+RTFMODE rtFsModeFromDos(RTFMODE fMode, const char *pszName, size_t cbName, uint32_t uReparseTag, RTFMODE fType);
+RTFMODE rtFsModeFromUnix(RTFMODE fMode, const char *pszName, size_t cbName, RTFMODE fType);
+RTFMODE rtFsModeNormalize(RTFMODE fMode, const char *pszName, size_t cbName, RTFMODE fType);
 bool    rtFsModeIsValid(RTFMODE fMode);
 bool    rtFsModeIsValidPermissions(RTFMODE fMode);
 
-size_t  rtPathVolumeSpecLen(const char *pszPath);
-#ifndef __WIN__
-void    rtFsConvertStatToObjInfo(PRTFSOBJINFO pObjInfo, const struct stat *pStat);
-#endif
+#ifndef RT_OS_WINDOWS
+void    rtFsConvertStatToObjInfo(PRTFSOBJINFO pObjInfo, const struct stat *pStat, const char *pszName, unsigned cbName);
+void    rtFsObjInfoAttrSetUnixOwner(PRTFSOBJINFO pObjInfo, RTUID uid);
+void    rtFsObjInfoAttrSetUnixGroup(PRTFSOBJINFO pObjInfo, RTUID gid);
+#else  /* RT_OS_WINDOWS */
+# ifdef DECLARE_HANDLE
+int     rtNtQueryFsType(HANDLE hHandle, PRTFSTYPE penmType);
+# endif
+#endif /* RT_OS_WINDOWS */
 
-#ifdef __LINUX__
+#ifdef RT_OS_LINUX
 # ifdef __USE_MISC
 #  define HAVE_STAT_TIMESPEC_BRIEF
 # else
@@ -48,6 +77,20 @@ void    rtFsConvertStatToObjInfo(PRTFSOBJINFO pObjInfo, const struct stat *pStat
 # endif
 #endif
 
-__END_DECLS
-
+#ifdef RT_OS_FREEBSD
+# if __FreeBSD_version >= 500000 /* 5.0 */
+#  define HAVE_STAT_BIRTHTIME
+# endif
+# if __FreeBSD_version >= 900000 /* 9.0 */
+#  define HAVE_STAT_TIMESPEC_BRIEF
+# else
+#  ifndef __BSD_VISIBLE
+#   define __BSD_VISIBLE
+#  endif
+#  define HAVE_STAT_TIMESPEC
+# endif
 #endif
+
+RT_C_DECLS_END
+
+#endif /* !IPRT_INCLUDED_INTERNAL_fs_h */

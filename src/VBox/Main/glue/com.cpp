@@ -1,113 +1,185 @@
+/* $Id: com.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * MS COM / XPCOM Abstraction Layer
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2005-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#if defined (__WIN__)
 
-#include <objbase.h>
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
+#define LOG_GROUP LOG_GROUP_MAIN
+#if !defined(VBOX_WITH_XPCOM)
 
-#else // !defined (__WIN__)
+# include <iprt/win/objbase.h>
 
-#include <stdlib.h>
-#include <VBox/err.h>
-#include <iprt/path.h>
-
-#include <nsXPCOMGlue.h>
-#include <nsIComponentRegistrar.h>
-#include <nsIServiceManager.h>
-#include <nsCOMPtr.h>
-#include <nsEventQueueUtils.h>
-
-#endif // !defined (__WIN__)
+#else /* !defined (VBOX_WITH_XPCOM) */
+# include <stdlib.h>
+# include <nsCOMPtr.h>
+# include <nsIServiceManagerUtils.h>
+# include <nsIComponentManager.h>
+# include <ipcIService.h>
+# include <ipcCID.h>
+# include <ipcIDConnectService.h>
+# include <nsIInterfaceInfo.h>
+# include <nsIInterfaceInfoManager.h>
+# define IPC_DCONNECTSERVICE_CONTRACTID "@mozilla.org/ipc/dconnect-service;1" // official XPCOM headers don't define it yet
+#endif /* !defined (VBOX_WITH_XPCOM) */
 
 #include "VBox/com/com.h"
 #include "VBox/com/assert.h"
 
+#include "VBox/com/Guid.h"
+#include "VBox/com/array.h"
+
+#include <iprt/string.h>
+
+#include <iprt/errcore.h>
+#include <VBox/log.h>
+
+
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
 namespace com
 {
+/* static */
+const Guid Guid::Empty; /* default ctor is OK */
 
-HRESULT Initialize()
+const char Zeroes[16] = {0, };
+
+
+void GetInterfaceNameByIID(const GUID &aIID, BSTR *aName)
 {
-    HRESULT rc = E_FAIL;
+    AssertPtrReturnVoid(aName);
+    *aName = NULL;
 
-#if defined (__WIN__)
-    rc = CoInitializeEx (NULL, COINIT_MULTITHREADED |
-                               COINIT_DISABLE_OLE1DDE |
-                               COINIT_SPEED_OVER_MEMORY);
-#else
-    /*
-     * Set VBOX_XPCOM_HOME if not present
-     */
-    if (!getenv("VBOX_XPCOM_HOME"))
+#if !defined(VBOX_WITH_XPCOM)
+
+    LPOLESTR iidStr = NULL;
+    if (StringFromIID(aIID, &iidStr) == S_OK)
     {
-        /* get the executable path */
-        char szPathProgram[1024];
-        int rcVBox = RTPathProgram(szPathProgram, sizeof(szPathProgram));
-        if (VBOX_SUCCESS(rcVBox))
+        HKEY ifaceKey;
+        LSTATUS lrc = RegOpenKeyExW(HKEY_CLASSES_ROOT, L"Interface", 0, KEY_QUERY_VALUE, &ifaceKey);
+        if (lrc == ERROR_SUCCESS)
         {
-            setenv("VBOX_XPCOM_HOME", szPathProgram, 1);
+            HKEY iidKey;
+            lrc = RegOpenKeyExW(ifaceKey, iidStr, 0, KEY_QUERY_VALUE, &iidKey);
+            if (lrc == ERROR_SUCCESS)
+            {
+                /* determine the size and type */
+                DWORD sz, type;
+                lrc = RegQueryValueExW(iidKey, NULL, NULL, &type, NULL, &sz);
+                if (lrc == ERROR_SUCCESS && type == REG_SZ)
+                {
+                    /* query the value to BSTR */
+                    *aName = SysAllocStringLen(NULL, (sz + 1) / sizeof(TCHAR) + 1);
+                    lrc = RegQueryValueExW(iidKey, NULL, NULL, NULL, (LPBYTE) *aName, &sz);
+                    if (lrc != ERROR_SUCCESS)
+                    {
+                        SysFreeString(*aName);
+                        *aName = NULL;
+                    }
+                }
+                RegCloseKey(iidKey);
+            }
+            RegCloseKey(ifaceKey);
+        }
+        CoTaskMemFree(iidStr);
+    }
+
+#else /* !defined (VBOX_WITH_XPCOM) */
+
+    nsresult rv;
+    nsCOMPtr<nsIInterfaceInfoManager> iim =
+        do_GetService(NS_INTERFACEINFOMANAGER_SERVICE_CONTRACTID, &rv);
+    if (NS_SUCCEEDED(rv))
+    {
+        nsCOMPtr<nsIInterfaceInfo> iinfo;
+        rv = iim->GetInfoForIID(&aIID, getter_AddRefs(iinfo));
+        if (NS_SUCCEEDED(rv))
+        {
+            const char *iname = NULL;
+            iinfo->GetNameShared(&iname);
+            char *utf8IName = NULL;
+            if (RT_SUCCESS(RTStrCurrentCPToUtf8(&utf8IName, iname)))
+            {
+                PRTUTF16 utf16IName = NULL;
+                if (RT_SUCCESS(RTStrToUtf16(utf8IName, &utf16IName)))
+                {
+                    *aName = SysAllocString((OLECHAR *) utf16IName);
+                    RTUtf16Free(utf16IName);
+                }
+                RTStrFree(utf8IName);
+            }
         }
     }
 
-    nsCOMPtr <nsIEventQueue> eventQ;
-    rc = NS_GetMainEventQ (getter_AddRefs (eventQ));
-    if (rc == NS_ERROR_NOT_INITIALIZED)
-    {
-        XPCOMGlueStartup (nsnull);
-        nsCOMPtr <nsIServiceManager> serviceManager;
-        rc = NS_InitXPCOM2 (getter_AddRefs (serviceManager), nsnull, nsnull);
-        if (NS_SUCCEEDED (rc))
-        {
-            nsCOMPtr <nsIComponentRegistrar> registrar =
-                do_QueryInterface (serviceManager, &rc);
-            if (NS_SUCCEEDED (rc))
-                registrar->AutoRegister (nsnull);
-        }
-    }
-#endif
-
-    AssertComRC (rc);
-
-    return rc;
+#endif /* !defined (VBOX_WITH_XPCOM) */
 }
 
-void Shutdown()
+#ifdef VBOX_WITH_XPCOM
+
+HRESULT GlueCreateObjectOnServer(const CLSID &clsid,
+                                 const char *serverName,
+                                 const nsIID &id,
+                                 void** ppobj)
 {
-#if defined (__WIN__)
-    CoUninitialize();
-#else
-    nsCOMPtr <nsIEventQueue> eventQ;
-    nsresult rc = NS_GetMainEventQ (getter_AddRefs (eventQ));
-    if (NS_SUCCEEDED (rc))
+    HRESULT hrc = E_UNEXPECTED;
+    nsCOMPtr<ipcIService> ipcServ = do_GetService(IPC_SERVICE_CONTRACTID, &hrc);
+    if (SUCCEEDED(hrc))
     {
-        BOOL isOnMainThread = FALSE;
-        eventQ->IsOnCurrentThread (&isOnMainThread);
-        eventQ = nsnull; // early release
-        if (isOnMainThread)
+        PRUint32 serverID = 0;
+        hrc = ipcServ->ResolveClientName(serverName, &serverID);
+        if (SUCCEEDED (hrc))
         {
-            // only the main thread needs to uninitialize XPCOM
-            NS_ShutdownXPCOM (nsnull);
-            XPCOMGlueShutdown();
+            nsCOMPtr<ipcIDConnectService> dconServ = do_GetService(IPC_DCONNECTSERVICE_CONTRACTID, &hrc);
+            if (SUCCEEDED(hrc))
+                hrc = dconServ->CreateInstance(serverID,
+                                               clsid,
+                                               id,
+                                               ppobj);
         }
     }
-#endif
+    return hrc;
 }
 
-}; // namespace com
+HRESULT GlueCreateInstance(const CLSID &clsid,
+                           const nsIID &id,
+                           void** ppobj)
+{
+    nsCOMPtr<nsIComponentManager> manager;
+    HRESULT hrc = NS_GetComponentManager(getter_AddRefs(manager));
+    if (SUCCEEDED(hrc))
+        hrc = manager->CreateInstance(clsid,
+                                      nsnull,
+                                      id,
+                                      ppobj);
+    return hrc;
+}
+
+#endif // VBOX_WITH_XPCOM
+
+} /* namespace com */
+

@@ -1,91 +1,109 @@
+/* $Id: tstLow.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $  */
 /** @file
- *
- * VBox host drivers - Ring-0 support drivers - Testcases:
- * Test allocating physical memory below 4G
+ * SUP Testcase - Low (<4GB) Memory Allocate interface (ring 3).
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include <VBox/sup.h>
 #include <VBox/param.h>
-#include <VBox/err.h>
-#include <iprt/runtime.h>
+#include <iprt/errcore.h>
+#include <iprt/initterm.h>
 #include <iprt/stream.h>
+#include <iprt/string.h>
+#include <iprt/system.h>
 
-#include <string.h>
 
 int main(int argc, char **argv)
 {
     int rc;
     int rcRet = 0;
 
-    RTR3Init(false);
+    RTR3InitExe(argc, &argv, 0);
     RTPrintf("tstLow: TESTING...\n");
 
-    rc = SUPInit();
-    if (VBOX_SUCCESS(rc))
+    rc = SUPR3Init(NULL);
+    if (RT_SUCCESS(rc))
     {
+        uint32_t  const cbPage      = RTSystemGetPageSize();
+        uintptr_t const offPageMask = RTSystemGetPageOffsetMask();
+
         /*
          * Allocate a bit of contiguous memory.
          */
         SUPPAGE aPages0[128];
         void *pvPages0 = (void *)0x77777777;
         memset(&aPages0[0], 0x8f, sizeof(aPages0));
-        rc = SUPLowAlloc(ELEMENTS(aPages0), &pvPages0, aPages0);
-        if (VBOX_SUCCESS(rc))
+        rc = SUPR3LowAlloc(RT_ELEMENTS(aPages0), &pvPages0, NULL, aPages0);
+        if (RT_SUCCESS(rc))
         {
             /* check that the pages are below 4GB and valid. */
-            for (unsigned iPage = 0; iPage < ELEMENTS(aPages0); iPage++)
+            for (unsigned iPage = 0; iPage < RT_ELEMENTS(aPages0); iPage++)
             {
-                RTPrintf("%-4d: Phys=%VHp Reserved=%p\n", iPage, aPages0[iPage].Phys, aPages0[iPage].uReserved);
+                RTPrintf("%-4d: Phys=%RHp Reserved=%p\n", iPage, aPages0[iPage].Phys, aPages0[iPage].uReserved);
                 if (aPages0[iPage].uReserved != 0)
                 {
                     rcRet++;
                     RTPrintf("tstLow: error: aPages0[%d].uReserved=%#x expected 0!\n", iPage, aPages0[iPage].uReserved);
                 }
                 if (    aPages0[iPage].Phys >= _4G
-                    ||  (aPages0[iPage].Phys & PAGE_OFFSET_MASK))
+                    ||  (aPages0[iPage].Phys & offPageMask))
                 {
                     rcRet++;
-                    RTPrintf("tstLow: error: aPages0[%d].Phys=%VHp!\n", iPage, aPages0[iPage].Phys);
+                    RTPrintf("tstLow: error: aPages0[%d].Phys=%RHp!\n", iPage, aPages0[iPage].Phys);
                 }
             }
             if (!rcRet)
             {
-                for (unsigned iPage = 0; iPage < ELEMENTS(aPages0); iPage++)
-                    memset((char *)pvPages0 + iPage * PAGE_SIZE, iPage, PAGE_SIZE);
-                for (unsigned iPage = 0; iPage < ELEMENTS(aPages0); iPage++)
-                    for (uint8_t *pu8 = (uint8_t *)pvPages0 + iPage * PAGE_SIZE, *pu8End = pu8 + PAGE_SIZE; pu8 < pu8End; pu8++)
+                for (unsigned iPage = 0; iPage < RT_ELEMENTS(aPages0); iPage++)
+                    memset((char *)pvPages0 + iPage * cbPage, iPage, cbPage);
+                for (unsigned iPage = 0; iPage < RT_ELEMENTS(aPages0); iPage++)
+                    for (uint8_t *pu8 = (uint8_t *)pvPages0 + iPage * cbPage, *pu8End = pu8 + cbPage; pu8 < pu8End; pu8++)
                         if (*pu8 != (uint8_t)iPage)
                         {
-                            RTPrintf("tstLow: error: invalid page content %02x != %02x. iPage=%p off=%#x\n",
-                                     *pu8, (uint8_t)iPage, iPage, (uintptr_t)pu8 & PAGE_OFFSET_MASK);
+                            RTPrintf("tstLow: error: invalid page content %02x != %02x. iPage=%u off=%#x\n",
+                                     *pu8, (uint8_t)iPage, iPage, (uintptr_t)pu8 & offPageMask);
                             rcRet++;
                         }
             }
-            SUPLowFree(pvPages0);
+            SUPR3LowFree(pvPages0, RT_ELEMENTS(aPages0));
         }
         else
         {
-            RTPrintf("SUPLowAlloc(%d,,) failed -> rc=%Vrc\n", ELEMENTS(aPages0), rc);
+            RTPrintf("SUPR3LowAlloc(%d,,) failed -> rc=%Rrc\n", RT_ELEMENTS(aPages0), rc);
             rcRet++;
         }
 
@@ -97,43 +115,43 @@ int main(int argc, char **argv)
             SUPPAGE aPages1[128];
             void *pvPages1 = (void *)0x77777777;
             memset(&aPages1[0], 0x8f, sizeof(aPages1));
-            rc = SUPLowAlloc(cPages, &pvPages1, aPages1);
-            if (VBOX_SUCCESS(rc))
+            rc = SUPR3LowAlloc(cPages, &pvPages1, NULL, aPages1);
+            if (RT_SUCCESS(rc))
             {
                 /* check that the pages are below 4GB and valid. */
                 for (unsigned iPage = 0; iPage < cPages; iPage++)
                 {
-                    RTPrintf("%-4d::%-4d: Phys=%VHp Reserved=%p\n", cPages, iPage, aPages1[iPage].Phys, aPages1[iPage].uReserved);
+                    RTPrintf("%-4d::%-4d: Phys=%RHp Reserved=%p\n", cPages, iPage, aPages1[iPage].Phys, aPages1[iPage].uReserved);
                     if (aPages1[iPage].uReserved != 0)
                     {
                         rcRet++;
                         RTPrintf("tstLow: error: aPages1[%d].uReserved=%#x expected 0!\n", iPage, aPages1[iPage].uReserved);
                     }
                     if (    aPages1[iPage].Phys >= _4G
-                        ||  (aPages1[iPage].Phys & PAGE_OFFSET_MASK))
+                        ||  (aPages1[iPage].Phys & offPageMask))
                     {
                         rcRet++;
-                        RTPrintf("tstLow: error: aPages1[%d].Phys=%VHp!\n", iPage, aPages1[iPage].Phys);
+                        RTPrintf("tstLow: error: aPages1[%d].Phys=%RHp!\n", iPage, aPages1[iPage].Phys);
                     }
                 }
                 if (!rcRet)
                 {
                     for (unsigned iPage = 0; iPage < cPages; iPage++)
-                        memset((char *)pvPages1 + iPage * PAGE_SIZE, iPage, PAGE_SIZE);
+                        memset((char *)pvPages1 + iPage * cbPage, iPage, cbPage);
                     for (unsigned iPage = 0; iPage < cPages; iPage++)
-                        for (uint8_t *pu8 = (uint8_t *)pvPages1 + iPage * PAGE_SIZE, *pu8End = pu8 + PAGE_SIZE; pu8 < pu8End; pu8++)
+                        for (uint8_t *pu8 = (uint8_t *)pvPages1 + iPage * cbPage, *pu8End = pu8 + cbPage; pu8 < pu8End; pu8++)
                             if (*pu8 != (uint8_t)iPage)
                             {
                                 RTPrintf("tstLow: error: invalid page content %02x != %02x. iPage=%p off=%#x\n",
-                                         *pu8, (uint8_t)iPage, iPage, (uintptr_t)pu8 & PAGE_OFFSET_MASK);
+                                         *pu8, (uint8_t)iPage, iPage, (uintptr_t)pu8 & offPageMask);
                                 rcRet++;
                             }
                 }
-                SUPLowFree(pvPages1);
+                SUPR3LowFree(pvPages1, cPages);
             }
             else
             {
-                RTPrintf("SUPLowAlloc(%d,,) failed -> rc=%Vrc\n", cPages, rc);
+                RTPrintf("SUPR3LowAlloc(%d,,) failed -> rc=%Rrc\n", cPages, rc);
                 rcRet++;
             }
         }
@@ -141,7 +159,7 @@ int main(int argc, char **argv)
     }
     else
     {
-        RTPrintf("SUPInit -> rc=%Vrc\n", rc);
+        RTPrintf("SUPR3Init -> rc=%Rrc\n", rc);
         rcRet++;
     }
 

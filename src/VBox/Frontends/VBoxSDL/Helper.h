@@ -1,3 +1,4 @@
+/* $Id: Helper.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VBox frontends: VBoxSDL (simple frontend based on SDL):
@@ -5,25 +6,37 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __H_HELPER
-#define __H_HELPER
+#ifndef VBOX_INCLUDED_SRC_VBoxSDL_Helper_h
+#define VBOX_INCLUDED_SRC_VBoxSDL_Helper_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#ifdef __LINUX__
+#if defined(VBOX_WITH_XPCOM) && !defined(RT_OS_DARWIN) && !defined(RT_OS_OS2)
+
+/** Indicates that the XPCOM queue thread is needed for this platform. */
+# define USE_XPCOM_QUEUE_THREAD 1
 
 /**
  * Creates the XPCOM event thread
@@ -32,6 +45,11 @@
  * @param   eqFD XPCOM event queue file descriptor
  */
 int startXPCOMEventQueueThread(int eqFD);
+
+/*
+ * Notify the XPCOM thread that we consumed an XPCOM event
+ */
+void consumedXPCOMUserEvent(void);
 
 /**
  * Signal to the XPCOM even queue thread that it should select for more events.
@@ -43,7 +61,7 @@ void signalXPCOMEventQueueThread(void);
  */
 void terminateXPCOMQueueThread(void);
 
-#endif /* __LINUX__ */
+#endif /* defined(VBOX_WITH_XPCOM) && !defined(RT_OS_DARWIN) && !defined(RT_OS_OS2) */
 
-#endif // __H_HELPER
+#endif /* !VBOX_INCLUDED_SRC_VBoxSDL_Helper_h */
 

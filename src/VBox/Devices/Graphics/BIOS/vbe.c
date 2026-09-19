@@ -29,755 +29,230 @@
 // ============================================================================================
 
 
-// defines available
-// enable LFB support
-#define VBE_HAVE_LFB
+/*
+ * Oracle LGPL Disclaimer: For the avoidance of doubt, except that if any license choice
+ * other than GPL or LGPL is available it will apply instead, Oracle elects to use only
+ * the Lesser General Public License version 2.1 (LGPLv2) at this time for any software where
+ * a choice of LGPL license versions is made available with the language indicating
+ * that LGPLv2 or any later version may be used, or where a choice of which version
+ * of the LGPL is applied is otherwise unspecified.
+ */
+
+#include <inttypes.h>
+#include <stddef.h>
+#include "vbe.h"
+#include "vgadefs.h"
+#include "inlines.h"
 
 // disable VESA/VBE2 check in vbe info
 //#define VBE2_NO_VESA_CHECK
 
-// dynamicly generate a mode_info list
-#define DYN_LIST
-
-// use bytewise i/o by default (Longhorn issue)
+// use bytewise i/o (Longhorn beta issue, not in released Vista)
 #define VBE_BYTEWISE_IO
 
-// Use VBE new dynamic mode list.  Note that without this option, no
-// checks are currently done to make sure that modes fit into the
-// framebuffer!
-#define VBE_NEW_DYN_LIST
+#ifdef VBE_BYTEWISE_IO
+    extern void do_out_dx_ax();
+    #pragma aux do_out_dx_ax "*";
+    extern void out_w(uint16_t port, uint16_t value);
+    #pragma aux out_w =     \
+        "call do_out_dx_ax" \
+        parm [dx] [ax] modify nomemory;
+    extern void do_in_ax_dx();
+    #pragma aux do_in_ax_dx "*";
+    extern uint16_t in_w(uint16_t port);
+    #pragma aux in_w =     \
+        "call do_in_ax_dx" \
+        parm [dx] value [ax] modify nomemory;
+#else
+    #define out_w       outw
+    #define in_w        inw
+#endif
 
 
-#include "vbe.h"
-#include "vbetables.h"
+/* VESA signatures as integer constants. */
+#define SIG_VBE2    0x32454256  /* 'VBE2' */
+#define SIG_VESA    0x41534556  /* 'VESA' */
 
+
+/* Implemented in assembler. */
+extern void     __cdecl vga_compat_setup(void);
+extern void     dispi_set_enable(uint16_t enable);
+extern void     dispi_set_bank(uint16_t bank);
+extern uint16_t __cdecl dispi_get_max_bpp(void);
+extern void     __cdecl dispi_set_bank_farcall(void);
 
 // The current OEM Software Revision of this VBE Bios
-#define VBE_OEM_SOFTWARE_REV 0x0002;
+#define VBE_OEM_SOFTWARE_REV 0x0003
 
-extern char vbebios_copyright;
-extern char vbebios_vendor_name;
-extern char vbebios_product_name;
-extern char vbebios_product_revision;
-
-#ifndef DYN_LIST
-extern Bit16u vbebios_mode_list;
-#endif
-
-ASM_START
 // FIXME: 'merge' these (c) etc strings with the vgabios.c strings?
-_vbebios_copyright:
-.ascii       "VirtualBox VBE BIOS http://www.virtualbox.org/"
-.byte        0x00
+char vbebios_copyright[]        = "VirtualBox VESA BIOS";
+char vbebios_vendor_name[]      = VBOX_VENDOR;
+char vbebios_product_name[]     = VBOX_PRODUCT " VBE Adapter";
+char vbebios_product_revision[] = VBOX_PRODUCT " Version " VBOX_VERSION_STRING;
 
-_vbebios_vendor_name:
-.ascii       "InnoTek Systemberatung GmbH"
-.byte        0x00
+char vbebios_info_string[]    = "VirtualBox VBE Display Adapter enabled\r\n\r\n";
+char no_vbebios_info_string[] = "No VirtualBox VBE support available!\r\n\r\n";
 
-_vbebios_product_name:
-.ascii       "VirtualBox VBE Adapter"
-.byte        0x00
-
-_vbebios_product_revision:
-.ascii       "InnoTek VirtualBox Version "
-.ascii       VBOX_VERSION
-.byte        0x00
-
-_vbebios_info_string:
-//.ascii      "Bochs VBE Display Adapter enabled"
-.ascii       "InnoTek VirtualBox VBE Display Adapter enabled"
-.byte	0x0a,0x0d
-.byte	0x0a,0x0d
-.byte	0x00
-
-_no_vbebios_info_string:
-.ascii       "No VirtualBox VBE support available!"
-.byte	0x0a,0x0d
-.byte	0x0a,0x0d
-.byte 0x00
-
-msg_vbe_init:
-.ascii       "InnoTek VirtualBox Version "
-.ascii       VBOX_VERSION
-.ascii       " VBE Display Adapter"
-.byte	0x0a,0x0d, 0x00
-
-
-#ifndef DYN_LIST
-// FIXME: for each new mode add a statement here
-//        at least until dynamic list creation is working
-_vbebios_mode_list:
-
-.word VBE_VESA_MODE_640X400X8
-.word VBE_VESA_MODE_640X480X8
-.word VBE_VESA_MODE_800X600X4
-.word VBE_VESA_MODE_800X600X8
-.word VBE_VESA_MODE_1024X768X8
-.word VBE_VESA_MODE_640X480X1555
-.word VBE_VESA_MODE_640X480X565
-.word VBE_VESA_MODE_640X480X888
-.word VBE_VESA_MODE_800X600X1555
-.word VBE_VESA_MODE_800X600X565
-.word VBE_VESA_MODE_800X600X888
-.word VBE_VESA_MODE_1024X768X1555
-.word VBE_VESA_MODE_1024X768X565
-.word VBE_VESA_MODE_1024X768X888
-.word VBE_OWN_MODE_640X480X8888
-.word VBE_OWN_MODE_800X600X8888
-.word VBE_OWN_MODE_1024X768X8888
-.word VBE_OWN_MODE_320X200X8
-.word VBE_VESA_MODE_END_OF_LIST
+#ifdef VGA_DEBUG
+char msg_vbe_init[] = "VirtualBox Version " VBOX_VERSION_STRING " VBE Display Adapter\r\n";
 #endif
 
-;; Bytewise in/out
-#ifdef VBE_BYTEWISE_IO
-out_dx_ax:
-  xchg ah, al
-  out  dx, al
-  xchg ah, al
-  out  dx, al
-  ret
-
-in_ax_dx:
-  in   al, dx
-  xchg ah, al
-  in   al, dx
-  ret
-#endif
-
-; DISPI ioport functions
-
-dispi_get_id:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_ID
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
-
-dispi_set_id:
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_ID
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
-ASM_END
-
-static void dispi_set_xres(xres)
-  Bit16u xres;
+static void dispi_set_xres(uint16_t xres)
 {
-ASM_START
-  push bp
-  mov  bp, sp
-  push ax
-  push dx
-
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_XRES
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
+#ifdef VGA_DEBUG
+    printf("vbe_set_xres: %04x\n", xres);
 #endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-  mov  ax, 4[bp] ; xres
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  push ax
-  mov  dx, #0x03d4
-  mov  ax, #0x0011
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, #0x03d4
-  pop  ax
-  push ax
-  shr  ax, #3
-  dec  ax
-  mov  ah, al
-  mov  al, #0x01
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  call vga_set_virt_width
-
-  pop  dx
-  pop  ax
-  pop  bp
-ASM_END
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_XRES);
+    out_w(VBE_DISPI_IOPORT_DATA, xres);
 }
 
-static void dispi_set_yres(yres)
-  Bit16u yres;
+static void dispi_set_yres(uint16_t yres)
 {
-#ifdef VBOX
-ASM_START
-  push bp
-  mov  bp, sp
-  push ax
-  push dx
-
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_YRES
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
+#ifdef VGA_DEBUG
+    printf("vbe_set_yres: %04x\n", yres);
 #endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-  mov  ax, 4[bp] ; yres
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  pop  ax
-  pop  bp
-ASM_END
-#else
-  outw(VBE_DISPI_IOPORT_INDEX,VBE_DISPI_INDEX_YRES);
-  outw(VBE_DISPI_IOPORT_DATA,yres);
-#endif
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_YRES);
+    out_w(VBE_DISPI_IOPORT_DATA, yres);
 }
 
-static void dispi_set_bpp(bpp)
-  Bit16u bpp;
+static uint16_t dispi_get_yres(void)
 {
-#ifdef VBOX
-ASM_START
-  push bp
-  mov  bp, sp
-  push ax
-  push dx
-
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_BPP
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-  mov  ax, 4[bp] ; bpp
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  pop  ax
-  pop  bp
-ASM_END
-#else
-  outw(VBE_DISPI_IOPORT_INDEX,VBE_DISPI_INDEX_BPP);
-  outw(VBE_DISPI_IOPORT_DATA,bpp);
-#endif
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_YRES);
+    return in_w(VBE_DISPI_IOPORT_DATA);
 }
 
-ASM_START
-; AL = bits per pixel / AH = bytes per pixel
-dispi_get_bpp:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_BPP
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  mov  ah, al
-  shr  ah, 3
-  test al, #0x07
-  jz   get_bpp_noinc
-  inc  ah
-get_bpp_noinc:
-  pop  dx
-  ret
-
-_dispi_get_max_bpp:
-  push dx
-  push bx
-  call dispi_get_enable
-  mov  bx, ax
-  or   ax, # VBE_DISPI_GETCAPS
-  call _dispi_set_enable
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_BPP
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  push ax
-  mov  ax, bx
-  call _dispi_set_enable
-  pop  ax
-  pop  bx
-  pop  dx
-  ret
-
-_dispi_set_enable:
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_ENABLE
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
-
-dispi_get_enable:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_ENABLE
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
-
-_dispi_set_bank:
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_BANK
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
-
-dispi_get_bank:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_BANK
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
-ASM_END
-
-static void dispi_set_bank_farcall()
+static void dispi_set_bpp(uint16_t bpp)
 {
-ASM_START
-  cmp bx,#0x0100
-  je dispi_set_bank_farcall_get
-  or bx,bx
-  jnz dispi_set_bank_farcall_error
-  push dx
-  mov ax,# VBE_DISPI_INDEX_BANK
-  mov dx,# VBE_DISPI_IOPORT_INDEX
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out dx,ax
+#ifdef VGA_DEBUG
+    printf("vbe_set_bpp: %02x\n", bpp);
 #endif
-  pop ax
-  mov dx,# VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out dx,ax
-#endif
-  retf
-dispi_set_bank_farcall_get:
-  mov ax,# VBE_DISPI_INDEX_BANK
-  mov dx,# VBE_DISPI_IOPORT_INDEX
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out dx,ax
-#endif
-  mov dx,# VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in ax,dx
-#endif
-  mov dx,ax
-  retf
-dispi_set_bank_farcall_error:
-  mov ax,#0x014F
-  retf
-ASM_END
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_BPP);
+    out_w(VBE_DISPI_IOPORT_DATA, bpp);
 }
 
-ASM_START
-dispi_set_x_offset:
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_X_OFFSET
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
+static uint16_t dispi_get_bpp(void)
+{
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_BPP);
+    return in_w(VBE_DISPI_IOPORT_DATA);
+}
 
-dispi_get_x_offset:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_X_OFFSET
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
+static void dispi_set_virt_width(uint16_t vwidth)
+{
+#ifdef VGA_DEBUG
+    printf("vbe_set_virt_width: %04x\n", vwidth);
 #endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIRT_WIDTH);
+    out_w(VBE_DISPI_IOPORT_DATA, vwidth);
+}
 
-dispi_set_y_offset:
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_Y_OFFSET
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
+static uint16_t dispi_get_virt_width(void)
+{
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIRT_WIDTH);
+    return in_w(VBE_DISPI_IOPORT_DATA);
+}
 
-dispi_get_y_offset:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_Y_OFFSET
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
+static uint16_t dispi_get_virt_height(void)
+{
+    out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIRT_HEIGHT);
+    return in_w(VBE_DISPI_IOPORT_DATA);
+}
 
-vga_set_virt_width:
-  push ax
-  push bx
-  push dx
-  mov  bx, ax
-  call dispi_get_bpp
-  cmp  al, #0x04
-  ja   set_width_svga
-  shr  bx, #2
-set_width_svga:
-  shr  bx, #2
-  mov  dx, #0x03d4
-  mov  ah, bl
-  mov  al, #0x13
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  pop  bx
-  pop  ax
-  ret
-
-dispi_set_virt_width:
-  call vga_set_virt_width
-  push dx
-  push ax
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_VIRT_WIDTH
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  ax
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  pop  dx
-  ret
-
-dispi_get_virt_width:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_VIRT_WIDTH
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
-
-dispi_get_virt_height:
-  push dx
-  mov  dx, # VBE_DISPI_IOPORT_INDEX
-  mov  ax, # VBE_DISPI_INDEX_VIRT_HEIGHT
-#ifdef VBE_BYTEWISE_IO
-  call out_dx_ax
-#else
-  out  dx, ax
-#endif
-  mov  dx, # VBE_DISPI_IOPORT_DATA
-#ifdef VBE_BYTEWISE_IO
-  call in_ax_dx
-#else
-  in   ax, dx
-#endif
-  pop  dx
-  ret
-ASM_END
-
-
-#ifdef VBE_NEW_DYN_LIST
-Bit16u in_word(port, addr)
-  Bit16u port; Bit16u addr;
+uint16_t in_word(uint16_t port, uint16_t addr)
 {
     outw(port, addr);
     return inw(port);
 }
 
-Bit8u in_byte(port, addr)
-  Bit16u port; Bit16u addr;
+uint8_t in_byte(uint16_t port, uint16_t addr)
 {
     outw(port, addr);
     return inb(port);
 }
-#endif
 
-
-// ModeInfo helper function
-static ModeInfoListItem* mode_info_find_mode(mode, using_lfb)
-  Bit16u mode; Boolean using_lfb;
+/* Display "chip" identification helpers. */
+static uint16_t dispi_get_id(void)
 {
-#ifdef VBE_NEW_DYN_LIST
-  Bit16u sig, vmode, attrs;
-  ModeInfoListItem *cur_info; /* used to get the mode list offset. */
-
-  /* Read VBE Extra Data signature */
-  sig = in_word(VBE_EXTRA_PORT, 0);
-  if (sig != VBEHEADER_MAGIC)
-  {
-    printf("Signature NOT found! %x\n", sig);
-    return 0;
-  }
-
-  cur_info = sizeof(VBEHeader);
-
-  vmode = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-  while (vmode != VBE_VESA_MODE_END_OF_LIST)
-  {
-    attrs = in_word(VBE_EXTRA_PORT, &cur_info->info.ModeAttributes);
-
-    if (vmode == mode)
-    {
-      if (!using_lfb)
-      {
-        return cur_info;
-      }
-      else if (attrs & VBE_MODE_ATTRIBUTE_LINEAR_FRAME_BUFFER_MODE)
-      {
-        return cur_info;
-      }
-      else
-      {
-        cur_info++;
-        vmode = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-      }
-    }
-    else
-    {
-      cur_info++;
-      vmode = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-    }
-  }
-#else
-  ModeInfoListItem  *cur_info=&mode_info_list;
-
-  while (cur_info->mode != VBE_VESA_MODE_END_OF_LIST)
-  {
-    if (cur_info->mode == mode)
-    {
-      if (!using_lfb)
-      {
-        return cur_info;
-      }
-      else if (cur_info->info.ModeAttributes & VBE_MODE_ATTRIBUTE_LINEAR_FRAME_BUFFER_MODE)
-      {
-        return cur_info;
-      }
-      else
-      {
-        cur_info++;
-      }
-    }
-    else
-    {
-      cur_info++;
-    }
-  }
-#endif
-  return 0;
+    outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_ID);
+    return inw(VBE_DISPI_IOPORT_DATA);
 }
 
-ASM_START
+static void dispi_set_id(uint16_t chip_id)
+{
+    outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_ID);
+    outw(VBE_DISPI_IOPORT_DATA, chip_id);
+}
 
-; Has VBE display - Returns true if VBE display detected
+/* VBE Init - Initialise the VESA BIOS Extension (VBE) support
+ * This function does a sanity check on the host side display code interface.
+ */
+void vbe_init(void)
+{
+    dispi_set_id(VBE_DISPI_ID0);
+    if (dispi_get_id() == VBE_DISPI_ID0) {
+        /* VBE support was detected. */
+        write_byte(BIOSMEM_SEG, BIOSMEM_VBE_FLAG, 1);
+        dispi_set_id(VBE_DISPI_ID4);
+    }
+#ifdef DEBUG_VGA
+    printf(msg_vbe_init);
+#endif
+}
 
-_vbe_has_vbe_display:
-  push ds
-  push bx
-  mov  ax, # BIOSMEM_SEG
-  mov  ds, ax
-  mov  bx, # BIOSMEM_VBE_FLAG
-  mov  al, [bx]
-  and  al, #0x01
-  xor  ah, ah
-  pop  bx
-  pop  ds
-  ret
+/* Find the offset of the desired mode, given its number. */
+static uint16_t mode_info_find_mode(uint16_t mode, Boolean using_lfb)
+{
+    uint16_t    sig, vmode, attrs;
+    uint16_t    cur_info_ofs;   /* Current offset in mode list. */
 
-; VBE Init - Initialise the Vesa Bios Extension Code
-; This function does a sanity check on the host side display code interface.
+    /* Read and check the VBE Extra Data signature. */
+    sig = in_word(VBE_EXTRA_PORT, 0);
+    if (sig != VBEHEADER_MAGIC) {
+#ifdef DEBUG_VGA
+        printf("Signature NOT found! %x\n", sig);
+#endif
+        return 0;
+    }
 
-vbe_init:
-  mov  ax, # VBE_DISPI_ID0
-  call dispi_set_id
-  call dispi_get_id
-  cmp  ax, # VBE_DISPI_ID0
-  jne  no_vbe_interface
-  push ds
-  push bx
-  mov  ax, # BIOSMEM_SEG
-  mov  ds, ax
-  mov  bx, # BIOSMEM_VBE_FLAG
-  mov  al, #0x01
-  mov  [bx], al
-  pop  bx
-  pop  ds
-  mov  ax, # VBE_DISPI_ID3
-  call dispi_set_id
-no_vbe_interface:
-  mov  bx, #msg_vbe_init
-  push bx
-  call _printf
-  inc  sp
-  inc  sp
-  ret
+    /* The LFB may be disabled. If so, LFB modes must not be reported. */
+    if (using_lfb) {
+        uint16_t    lfb_addr_hi;
 
+        out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_FB_BASE_HI);
+        lfb_addr_hi = in_w(VBE_DISPI_IOPORT_DATA);
+        if (!lfb_addr_hi) {
+#ifdef DEBUG_VGA
+            printf("LFB disabled, LFB modes unavailable!\n");
+#endif
+            return 0;
+        }
+    }
+
+    cur_info_ofs = sizeof(VBEHeader);
+
+    vmode = in_word(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, mode)/*&cur_info->mode*/);
+    while (vmode != VBE_VESA_MODE_END_OF_LIST)
+    {
+        attrs = in_word(VBE_EXTRA_PORT, /*&cur_info->info.ModeAttributes*/cur_info_ofs + offsetof(ModeInfoListItem, info.ModeAttributes) );
+
+        if (vmode == mode)
+        {
+            if (!using_lfb)
+                return cur_info_ofs;
+            else if (attrs & VBE_MODE_ATTRIBUTE_LINEAR_FRAME_BUFFER_MODE)
+                return cur_info_ofs;
+            else {
+                cur_info_ofs += sizeof(ModeInfoListItem);
+                vmode = in_word(VBE_EXTRA_PORT, /*&cur_info->mode*/cur_info_ofs + offsetof(ModeInfoListItem, mode));
+            }
+        } else {
+            cur_info_ofs += sizeof(ModeInfoListItem);
+            vmode = in_word(VBE_EXTRA_PORT, /*&cur_info->mode*/cur_info_ofs + offsetof(ModeInfoListItem, mode));
+        }
+    }
+    return 0;
+}
+
+#ifndef VBOX
 ; VBE Display Info - Display information on screen about the VBE
 
 vbe_display_info:
@@ -793,7 +268,7 @@ no_vbe_flag:
   mov  ds, ax
   mov  si, #_no_vbebios_info_string
   jmp  _display_string
-ASM_END
+#endif
 
 /** Function 00h - Return VBE Controller Information
  *
@@ -806,170 +281,110 @@ ASM_END
  *              AX      = VBE Return Status
  *
  */
-void vbe_biosfn_return_controller_information(AX, ES, DI)
-Bit16u *AX;Bit16u ES;Bit16u DI;
+void vbe_biosfn_return_controller_information(uint16_t STACK_BASED *AX, uint16_t ES, uint16_t DI)
 {
-        Bit16u            ss=get_SS();
-        VbeInfoBlock      vbe_info_block;
-        Bit16u            status;
-        Bit16u            result;
-        Bit16u            vbe2_info;
-        Bit16u            cur_mode=0;
-        Bit16u            cur_ptr=34;
-#ifdef VBE_NEW_DYN_LIST
-        ModeInfoListItem  *cur_info; /* used to get the mode list offset. */
-        Bit16u            sig, vmode;
-#else
-        ModeInfoListItem  *cur_info=&mode_info_list;
+    uint16_t            status;
+    uint16_t            vbe2_info;
+    uint16_t            cur_mode = 0;
+    uint16_t            cur_ptr=34;
+    uint16_t            cur_info_ofs;
+    uint16_t            sig, vmode;
+    uint16_t            max_bpp = dispi_get_max_bpp();
+    VbeInfoBlock __far  *info_block;
+
+    info_block = ES :> (VbeInfoBlock *)DI;
+
+    /* Read VBE Extra Data signature */
+    sig = in_word(VBE_EXTRA_PORT, 0);
+    if (sig != VBEHEADER_MAGIC)
+    {
+        *AX = 0x0100;
+#ifdef DEBUG_VGA
+        printf("Signature NOT found\n");
 #endif
-#ifdef DYN_LIST
-        Bit16u            max_bpp=dispi_get_max_bpp();
-#endif
+        return;
+    }
+    cur_info_ofs = sizeof(VBEHeader);
+    status = *AX;
 
-#ifdef VBE_NEW_DYN_LIST
-        /* Read VBE Extra Data signature */
-        sig = in_word(VBE_EXTRA_PORT, 0);
-        if (sig != VBEHEADER_MAGIC)
-        {
-            result = 0x100;
-
-            write_word(ss, AX, result);
-
-            printf("Signature NOT found\n");
-            return;
-        }
-        cur_info = sizeof(VBEHeader);
-#endif
-        status = read_word(ss, AX);
-
-#ifdef DEBUG
-        printf("VBE vbe_biosfn_return_vbe_info ES%x DI%x AX%x\n",ES,DI,status);
+#ifdef VGA_DEBUG
+    printf("VBE vbe_biosfn_return_vbe_info ES%x DI%x AX%x\n",ES,DI,status);
 #endif
 
-        vbe2_info = 0;
+    vbe2_info = 0;
+
+    /* Don't use a local copy of VbeInfoBlock on the stack; it's too big.
+     * The Ubuntu 8.04 64 bits splash screen emulator can't handle this.
+     */
 #ifdef VBE2_NO_VESA_CHECK
-#else
-        // get vbe_info_block into local variable
-        memcpyb(ss, &vbe_info_block, ES, DI, sizeof(vbe_info_block));
-
-        // check for VBE2 signature
-        if (((vbe_info_block.VbeSignature[0] == 'V') &&
-             (vbe_info_block.VbeSignature[1] == 'B') &&
-             (vbe_info_block.VbeSignature[2] == 'E') &&
-             (vbe_info_block.VbeSignature[3] == '2')) ||
-
-            ((vbe_info_block.VbeSignature[0] == 'V') &&
-             (vbe_info_block.VbeSignature[1] == 'E') &&
-             (vbe_info_block.VbeSignature[2] == 'S') &&
-             (vbe_info_block.VbeSignature[3] == 'A')) )
-        {
-                vbe2_info = 1;
-#ifdef DEBUG
-                printf("VBE correct VESA/VBE2 signature found\n");
+#else  /* !VBE2_NO_VESA_CHECK */
+    // check for VBE2 signature
+    if (info_block->VbeSignature.Sig32 == SIG_VBE2 || info_block->VbeSignature.Sig32 == SIG_VESA)
+    {
+        vbe2_info = 1;
+#ifdef VGA_DEBUG
+        printf("VBE correct VESA/VBE2 signature found\n");
 #endif
+    }
+#endif /* !VBE2_NO_VESA_CHECK */
+
+    /* VBE Signature - the compiler will optimize this into something sane. */
+    info_block->VbeSignature.SigChr[0] = 'V';
+    info_block->VbeSignature.SigChr[1] = 'E';
+    info_block->VbeSignature.SigChr[2] = 'S';
+    info_block->VbeSignature.SigChr[3] = 'A';
+
+    /* VBE Version supported. */
+    info_block->VbeVersion = 0x0200;    /* Version 2.0. */
+
+    /* OEM String. */
+    info_block->OemString.Ptr = &vbebios_copyright;
+
+    /* Capabilities if this implementation. */
+    info_block->Capabilities[0] = VBE_CAPABILITY_8BIT_DAC;
+    info_block->Capabilities[1] = 0;
+    info_block->Capabilities[2] = 0;
+    info_block->Capabilities[3] = 0;
+
+    /* Video mode list pointer (dynamically generated). */
+    info_block->VideoModePtr_Seg = ES;
+    info_block->VideoModePtr_Off = DI + 34;
+
+    /* Total controller memory in 64K units. */
+    info_block->TotalMemory = in_word(VBE_EXTRA_PORT, 0xffff);
+
+    if (vbe2_info)
+    {
+        /* OEM information. */
+        info_block->OemSoftwareRev     = VBE_OEM_SOFTWARE_REV;
+        info_block->OemVendorName.Ptr  = &vbebios_vendor_name;
+        info_block->OemProductName.Ptr = &vbebios_product_name;
+        info_block->OemProductRev.Ptr  = &vbebios_product_revision;
+    }
+
+    do
+    {
+        uint8_t     data_b;
+
+        data_b = in_byte(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, info.BitsPerPixel) /*&cur_info->info.BitsPerPixel*/);
+        if (data_b <= max_bpp)
+        {
+            vmode = in_word(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, mode)/*&cur_info->mode*/);
+#ifdef VGA_DEBUG
+            printf("VBE found mode %x => %x\n", vmode, cur_mode);
+#endif
+            write_word(ES, DI + cur_ptr, vmode);
+            cur_mode++;
+            cur_ptr+=2;
         }
-#endif
+        cur_info_ofs += sizeof(ModeInfoListItem);
+        vmode = in_word(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, mode)/*&cur_info->mode*/);
+    } while (vmode != VBE_VESA_MODE_END_OF_LIST);
 
-        // VBE Signature
-        vbe_info_block.VbeSignature[0] = 'V';
-        vbe_info_block.VbeSignature[1] = 'E';
-        vbe_info_block.VbeSignature[2] = 'S';
-        vbe_info_block.VbeSignature[3] = 'A';
-
-        // VBE Version supported
-        vbe_info_block.VbeVersion = 0x0200;
-
-        // OEM String
-        vbe_info_block.OemStringPtr_Seg = 0xc000;
-        vbe_info_block.OemStringPtr_Off = &vbebios_copyright;
-
-        // Capabilities
-        vbe_info_block.Capabilities[0] = VBE_CAPABILITY_8BIT_DAC;
-        vbe_info_block.Capabilities[1] = 0;
-        vbe_info_block.Capabilities[2] = 0;
-        vbe_info_block.Capabilities[3] = 0;
-
-#ifdef DYN_LIST
-        // VBE Video Mode Pointer (dynamicly generated from the mode_info_list)
-        vbe_info_block.VideoModePtr_Seg= ES ;
-        vbe_info_block.VideoModePtr_Off= DI + 34;
-#else
-        // VBE Video Mode Pointer (staticly in rom)
-        vbe_info_block.VideoModePtr_Seg = 0xc000;
-        vbe_info_block.VideoModePtr_Off = &vbebios_mode_list;
-#endif
-
-        // VBE Total Memory (in 64b blocks)
-        vbe_info_block.TotalMemory = in_word(VBE_EXTRA_PORT, 0xffff);
-
-        if (vbe2_info)
-	{
-                // OEM Stuff
-                vbe_info_block.OemSoftwareRev = VBE_OEM_SOFTWARE_REV;
-                vbe_info_block.OemVendorNamePtr_Seg = 0xc000;
-                vbe_info_block.OemVendorNamePtr_Off = &vbebios_vendor_name;
-                vbe_info_block.OemProductNamePtr_Seg = 0xc000;
-                vbe_info_block.OemProductNamePtr_Off = &vbebios_product_name;
-                vbe_info_block.OemProductRevPtr_Seg = 0xc000;
-                vbe_info_block.OemProductRevPtr_Off = &vbebios_product_revision;
-
-                // copy updates in vbe_info_block back
-                memcpyb(ES, DI, ss, &vbe_info_block, sizeof(vbe_info_block));
-        }
-	else
-	{
-                // copy updates in vbe_info_block back (VBE 1.x compatibility)
-                memcpyb(ES, DI, ss, &vbe_info_block, 256);
-	}
-
-#ifdef VBE_NEW_DYN_LIST
-        do
-        {
-                Bit16u data;
-                Bit8u  data_b;
-
-                data_b = in_byte(VBE_EXTRA_PORT, &cur_info->info.BitsPerPixel);
-                if (data_b <= max_bpp)
-                {
-                  vmode = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-#ifdef DEBUG
-                  printf("VBE found mode %x => %x\n", vmode, cur_mode);
-#endif
-                  write_word(ES, DI + cur_ptr, vmode);
-                  cur_mode++;
-                  cur_ptr+=2;
-                }
-                cur_info++;
-                vmode = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-        } while (vmode != VBE_VESA_MODE_END_OF_LIST);
-
-        // Add vesa mode list terminator
-        write_word(ES, DI + cur_ptr, vmode);
-#else
-#ifdef DYN_LIST
-        do
-        {
-                if (cur_info->info.BitsPerPixel <= max_bpp) {
-#ifdef DEBUG
-                  printf("VBE found mode %x => %x\n", cur_info->mode,cur_mode);
-#endif
-                  write_word(ES, DI + cur_ptr, cur_info->mode);
-                  cur_mode++;
-                  cur_ptr+=2;
-                }
-                cur_info++;
-        } while (cur_info->mode != VBE_VESA_MODE_END_OF_LIST);
-
-        // Add vesa mode list terminator
-        write_word(ES, DI + cur_ptr, cur_info->mode);
-#endif
-#endif // VBE_NEW_DYN_LIST
-
-        result = 0x4f;
-
-        write_word(ss, AX, result);
+    // Add vesa mode list terminator
+    write_word(ES, DI + cur_ptr, vmode);
+    *AX = 0x004F;
 }
-
 
 /** Function 01h - Return VBE Mode Information
  *
@@ -981,67 +396,53 @@ Bit16u *AX;Bit16u ES;Bit16u DI;
  *              AX      = VBE Return Status
  *
  */
-void vbe_biosfn_return_mode_information(AX, CX, ES, DI)
-Bit16u *AX;Bit16u CX; Bit16u ES;Bit16u DI;
+void vbe_biosfn_return_mode_information(uint16_t STACK_BASED *AX, uint16_t CX, uint16_t ES, uint16_t DI)
 {
-        Bit16u            result=0x0100;
-        Bit16u            ss=get_SS();
-        ModeInfoBlock     info;
-        ModeInfoListItem  *cur_info;
-        Boolean           using_lfb;
+    uint16_t            result = 0x0100;
+    uint16_t            cur_info_ofs;
+    Boolean             using_lfb;
+    uint8_t             win_attr;
 
-#ifdef DEBUG
-        printf("VBE vbe_biosfn_return_mode_information ES%x DI%x CX%x\n",ES,DI,CX);
+#ifdef VGA_DEBUG
+    printf("VBE vbe_biosfn_return_mode_information ES%x DI%x CX%x\n",ES,DI,CX);
 #endif
 
-        using_lfb=((CX & VBE_MODE_LINEAR_FRAME_BUFFER) == VBE_MODE_LINEAR_FRAME_BUFFER);
+    using_lfb = ((CX & VBE_MODE_LINEAR_FRAME_BUFFER) == VBE_MODE_LINEAR_FRAME_BUFFER);
+    CX = (CX & 0x1ff);
 
-        CX = (CX & 0x1ff);
+    cur_info_ofs = mode_info_find_mode(CX, using_lfb);
 
-        cur_info = mode_info_find_mode(CX, using_lfb, &cur_info);
-
-        if (cur_info != 0)
-        {
-#ifdef VBE_NEW_DYN_LIST
-                Bit16u i;
+    if (cur_info_ofs) {
+        uint16_t    i;
+#ifdef VGA_DEBUG
+        printf("VBE found mode %x\n",CX);
 #endif
-#ifdef DEBUG
-                printf("VBE found mode %x\n",CX);
-#endif
-                memsetb(ss, &info, 0, sizeof(ModeInfoBlock));
-#ifdef VBE_NEW_DYN_LIST
-                for (i = 0; i < sizeof(ModeInfoBlockCompact); i++)
-                {
-                    Bit8u b;
+        memsetb(ES, DI, 0, 256);    // The mode info size is fixed
+        for (i = 0; i < sizeof(ModeInfoBlockCompact); i++) {
+            uint8_t b;
 
-                    b = in_byte(VBE_EXTRA_PORT, (char *)(&(cur_info->info)) + i);
-                    write_byte(ss, (char *)(&info) + i, b);
-                }
-#else
-                memcpyb(ss, &info, 0xc000, &(cur_info->info), sizeof(ModeInfoBlockCompact));
-#endif
-                if (info.WinAAttributes & VBE_WINDOW_ATTRIBUTE_RELOCATABLE) {
-                  info.WinFuncPtr = 0xC0000000UL;
-                  *(Bit16u *)&(info.WinFuncPtr) = (Bit16u)(dispi_set_bank_farcall);
-                }
-
-                result = 0x4f;
+            b = in_byte(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, info) + i/*(char *)(&(cur_info->info)) + i*/);
+            write_byte(ES, DI + i, b);
         }
-        else
-        {
-#ifdef DEBUG
-                printf("VBE *NOT* found mode %x\n",CX);
+        win_attr = read_byte(ES, DI + offsetof(ModeInfoBlock, WinAAttributes));
+        if (win_attr & VBE_WINDOW_ATTRIBUTE_RELOCATABLE) {
+            write_word(ES, DI + offsetof(ModeInfoBlock, WinFuncPtr), (uint16_t)(dispi_set_bank_farcall));
+            // If BIOS not at 0xC000 -> boom
+            write_word(ES, DI + offsetof(ModeInfoBlock, WinFuncPtr) + 2, 0xC000);
+        }
+        // Update the LFB physical address which may change at runtime
+        out_w(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_FB_BASE_HI);
+        write_word(ES, DI + offsetof(ModeInfoBlock, PhysBasePtr) + 2, in_w(VBE_DISPI_IOPORT_DATA));
+
+        result = 0x4f;
+    } else {
+#ifdef VGA_DEBUG
+        printf("VBE *NOT* found mode %x\n",CX);
 #endif
-                result = 0x100;
-        }
+        result = 0x100;
+    }
 
-        if (result == 0x4f)
-        {
-                // copy updates in mode_info_block back
-                memcpyb(ES, DI, ss, &info, sizeof(info));
-        }
-
-        write_word(ss, AX, result);
+    *AX = result;
 }
 
 /** Function 02h - Set VBE Mode
@@ -1054,144 +455,139 @@ Bit16u *AX;Bit16u CX; Bit16u ES;Bit16u DI;
  *              AX      = VBE Return Status
  *
  */
-void vbe_biosfn_set_mode(AX, BX, ES, DI)
-Bit16u *AX;Bit16u BX; Bit16u ES;Bit16u DI;
+void vbe_biosfn_set_mode(uint16_t STACK_BASED *AX, uint16_t BX, uint16_t ES, uint16_t DI)
 {
-        Bit16u            ss = get_SS();
-        Bit16u            result;
-        ModeInfoListItem  *cur_info;
-        Boolean           using_lfb;
-        Bit8u             no_clear;
-        Bit8u             lfb_flag;
+    uint16_t            result;
+    uint16_t            cur_info_ofs;
+    Boolean             using_lfb;
+    uint8_t             no_clear;
+    uint8_t             lfb_flag;
 
-        using_lfb=((BX & VBE_MODE_LINEAR_FRAME_BUFFER) == VBE_MODE_LINEAR_FRAME_BUFFER);
-        lfb_flag=using_lfb?VBE_DISPI_LFB_ENABLED:0;
-        no_clear=((BX & VBE_MODE_PRESERVE_DISPLAY_MEMORY) == VBE_MODE_PRESERVE_DISPLAY_MEMORY)?VBE_DISPI_NOCLEARMEM:0;
+    using_lfb = ((BX & VBE_MODE_LINEAR_FRAME_BUFFER) == VBE_MODE_LINEAR_FRAME_BUFFER);
+    lfb_flag  = using_lfb ? VBE_DISPI_LFB_ENABLED : 0;
+    no_clear  = ((BX & VBE_MODE_PRESERVE_DISPLAY_MEMORY) == VBE_MODE_PRESERVE_DISPLAY_MEMORY) ? VBE_DISPI_NOCLEARMEM : 0;
 
-        BX = (BX & 0x1ff);
+    BX = (BX & 0x1ff);
 
-        //result=read_word(ss,AX);
+    // check for non vesa mode
+    if (BX < VBE_MODE_VESA_DEFINED)
+    {
+        uint8_t mode;
 
-        // check for non vesa mode
-        if (BX<VBE_MODE_VESA_DEFINED)
+        dispi_set_enable(VBE_DISPI_DISABLED);
+        // call the vgabios in order to set the video mode
+        // this allows for going back to textmode with a VBE call (some applications expect that to work)
+        mode = (BX & 0xff);
+        biosfn_set_video_mode(mode);
+        result = 0x4f;
+        goto leave;
+    }
+
+    cur_info_ofs = mode_info_find_mode(BX, using_lfb);
+
+    if (cur_info_ofs != 0)
+    {
+        uint16_t    xres, yres;
+        uint8_t     bpp;
+
+        xres = in_word(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, info.XResolution) /*&cur_info->info.XResolution*/);
+        yres = in_word(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, info.YResolution) /*&cur_info->info.YResolution*/);
+        bpp  = in_byte(VBE_EXTRA_PORT, cur_info_ofs + offsetof(ModeInfoListItem, info.BitsPerPixel) /*&cur_info->info.BitsPerPixel*/);
+
+#ifdef VGA_DEBUG
+        printf("VBE found mode %x, setting:\n", BX);
+        printf("\txres%x yres%x bpp%x\n", xres, yres, bpp);
+#endif
+
+        // first disable current mode (when switching between vesa modi)
+        dispi_set_enable(VBE_DISPI_DISABLED);
+        // turn off linear addressing; we will enable it for >= 8bpp
+        outw(VGAREG_SEQU_ADDRESS, 0x0007);
+
+        if (bpp == 4)
         {
-                Bit8u   mode;
-
-                dispi_set_enable(VBE_DISPI_DISABLED);
-                // call the vgabios in order to set the video mode
-                // this allows for going back to textmode with a VBE call (some applications expect that to work)
-
-                mode=(BX & 0xff);
-                biosfn_set_video_mode(mode);
-                result = 0x4f;
-                goto leave;
+            biosfn_set_video_mode(0x6a);
         }
 
-        cur_info = mode_info_find_mode(BX, using_lfb, &cur_info);
+        dispi_set_bpp(bpp);
+        dispi_set_xres(xres);
+        dispi_set_yres(yres);
+        dispi_set_bank(0);
+        dispi_set_enable(VBE_DISPI_ENABLED | no_clear | lfb_flag);
+        vga_compat_setup();
 
-        if (cur_info != 0)
-        {
-#ifdef VBE_NEW_DYN_LIST
-                Bit16u data;
-                Bit8u data_b;
-#ifdef DEBUG
-                Bit16u x, y;
-                Bit8u bpp;
+        write_word(BIOSMEM_SEG,BIOSMEM_VBE_MODE,BX);
+        write_byte(BIOSMEM_SEG,BIOSMEM_VIDEO_CTL,(0x60 | no_clear));
 
-                x = in_word(VBE_EXTRA_PORT, &cur_info->info.XResolution); /* cur_info is really an offset here */
-                y = in_word(VBE_EXTRA_PORT, &cur_info->info.YResolution);
-                bpp = in_byte(VBE_EXTRA_PORT, &cur_info->info.BitsPerPixel);
-
-                printf("VBE found mode %x, setting:\n", BX);
-                printf("\txres%x yres%x bpp%x\n", x, y, bpp);
+        result = 0x4f;
+    }
+    else
+    {
+#ifdef VGA_DEBUG
+        printf("VBE *NOT* found mode %x\n" , BX);
 #endif
-#else
-#ifdef DEBUG
-                printf("VBE found mode %x, setting:\n", BX);
-                printf("\txres%x yres%x bpp%x\n",
-                        cur_info->info.XResolution,
-                        cur_info->info.YResolution,
-                        cur_info->info.BitsPerPixel);
-#endif
-#endif // VBE_NEW_DYN_LIST
-
-                // first disable current mode (when switching between vesa modi)
-                dispi_set_enable(VBE_DISPI_DISABLED);
-
-#ifdef VBE_NEW_DYN_LIST
-                data = in_word(VBE_EXTRA_PORT, &cur_info->mode);
-                if (data == VBE_VESA_MODE_800X600X4)
-#else
-                if (cur_info->mode == VBE_VESA_MODE_800X600X4)
-#endif
-                {
-                  biosfn_set_video_mode(0x6a);
-                }
-
-#ifdef VBE_NEW_DYN_LIST
-                data_b = in_byte(VBE_EXTRA_PORT, &cur_info->info.BitsPerPixel);
-                dispi_set_bpp(data_b);
-                data = in_word(VBE_EXTRA_PORT, &cur_info->info.XResolution);
-                dispi_set_xres(data);
-                data = in_word(VBE_EXTRA_PORT, &cur_info->info.YResolution);
-                dispi_set_yres(data);
-#else
-                dispi_set_bpp(cur_info->info.BitsPerPixel);
-                dispi_set_xres(cur_info->info.XResolution);
-                dispi_set_yres(cur_info->info.YResolution);
-#endif
-                dispi_set_bank(0);
-                dispi_set_enable(VBE_DISPI_ENABLED | no_clear | lfb_flag);
-
-                write_word(BIOSMEM_SEG,BIOSMEM_VBE_MODE,BX);
-                write_byte(BIOSMEM_SEG,BIOSMEM_VIDEO_CTL,(0x60 | no_clear));
-
-                result = 0x4f;
-        }
-        else
-        {
-#ifdef DEBUG
-                printf("VBE *NOT* found mode %x\n" , BX);
-#endif
-                result = 0x100;
-        }
+        result = 0x100;
+    }
 
 leave:
-        write_word(ss, AX, result);
+    *AX = result;
 }
 
-/** Function 03h - Return Current VBE Mode
- *
- * Input:
- *              AX      = 4F03h
- * Output:
- *              AX      = VBE Return Status
- *              BX      = Current VBE Mode
- *
- */
-ASM_START
-vbe_biosfn_return_current_mode:
-  push ds
-  mov  ax, # BIOSMEM_SEG
-  mov  ds, ax
-  call dispi_get_enable
-  and  ax, # VBE_DISPI_ENABLED
-  jz   no_vbe_mode
-  mov  bx, # BIOSMEM_VBE_MODE
-  mov  ax, [bx]
-  mov  bx, ax
-  jnz  vbe_03_ok
-no_vbe_mode:
-  mov  bx, # BIOSMEM_CURRENT_MODE
-  mov  al, [bx]
-  mov  bl, al
-  xor  bh, bh
-vbe_03_ok:
-  mov  ax, #0x004f
-  pop  ds
-  ret
-ASM_END
+uint16_t vbe_biosfn_read_video_state_size(void)
+{
+    return 9 * 2;
+}
 
+void vbe_biosfn_save_video_state(uint16_t ES, uint16_t BX)
+{
+    uint16_t    enable, i;
+
+    outw(VBE_DISPI_IOPORT_INDEX,VBE_DISPI_INDEX_ENABLE);
+    enable = inw(VBE_DISPI_IOPORT_DATA);
+    write_word(ES, BX, enable);
+    BX += 2;
+    if (!(enable & VBE_DISPI_ENABLED))
+        return;
+    for(i = VBE_DISPI_INDEX_XRES; i <= VBE_DISPI_INDEX_Y_OFFSET; i++) {
+        if (i != VBE_DISPI_INDEX_ENABLE) {
+            outw(VBE_DISPI_IOPORT_INDEX, i);
+            write_word(ES, BX, inw(VBE_DISPI_IOPORT_DATA));
+            BX += 2;
+        }
+    }
+}
+
+
+void vbe_biosfn_restore_video_state(uint16_t ES, uint16_t BX)
+{
+    uint16_t    enable, i;
+
+    enable = read_word(ES, BX);
+    BX += 2;
+
+    if (!(enable & VBE_DISPI_ENABLED)) {
+        outw(VBE_DISPI_IOPORT_INDEX,VBE_DISPI_INDEX_ENABLE);
+        outw(VBE_DISPI_IOPORT_DATA, enable);
+    } else {
+        outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_XRES);
+        outw(VBE_DISPI_IOPORT_DATA, read_word(ES, BX));
+        BX += 2;
+        outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_YRES);
+        outw(VBE_DISPI_IOPORT_DATA, read_word(ES, BX));
+        BX += 2;
+        outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_BPP);
+        outw(VBE_DISPI_IOPORT_DATA, read_word(ES, BX));
+        BX += 2;
+        outw(VBE_DISPI_IOPORT_INDEX,VBE_DISPI_INDEX_ENABLE);
+        outw(VBE_DISPI_IOPORT_DATA, enable);
+
+        for(i = VBE_DISPI_INDEX_BANK; i <= VBE_DISPI_INDEX_Y_OFFSET; i++) {
+            outw(VBE_DISPI_IOPORT_INDEX, i);
+            outw(VBE_DISPI_IOPORT_DATA, read_word(ES, BX));
+            BX += 2;
+        }
+    }
+}
 
 /** Function 04h - Save/Restore State
  *
@@ -1207,62 +603,51 @@ ASM_END
  *              BX      = Number of 64-byte blocks to hold the state buffer (if DL=00h)
  *
  */
-void vbe_biosfn_save_restore_state(AX, DL, CX, ES, BX)
+void vbe_biosfn_save_restore_state(uint16_t STACK_BASED *AX, uint16_t CX, uint16_t DX,
+                                   uint16_t ES, uint16_t STACK_BASED *BX)
 {
+    uint16_t    result, val;
+
+    result = 0x004F;
+    switch(GET_DL()) {
+    case 0x00:
+        val = biosfn_read_video_state_size2(CX);
+#ifdef VGA_DEBUG
+        printf("VGA state size=%x\n", val);
+#endif
+        if (CX & 8)
+            val += vbe_biosfn_read_video_state_size();
+        *BX = (val + 63) / 64;
+        break;
+    case 0x01:
+        val = *BX;
+        val = biosfn_save_video_state(CX, ES, val);
+#ifdef VGA_DEBUG
+        printf("VGA save_state offset=%x\n", val);
+#endif
+        if (CX & 8)
+            vbe_biosfn_save_video_state(ES, val);
+        break;
+    case 0x02:
+        val = *BX;
+        val = biosfn_restore_video_state(CX, ES, val);
+#ifdef VGA_DEBUG
+        printf("VGA restore_state offset=%x\n", val);
+#endif
+        if (CX & 8)
+            vbe_biosfn_restore_video_state(ES, val);
+        break;
+    default:
+        // function failed
+        result = 0x100;
+        break;
+    }
+    *AX = result;
 }
-
-
-/** Function 05h - Display Window Control
- *
- * Input:
- *              AX      = 4F05h
- *     (16-bit) BH      = 00h Set memory window
- *                      = 01h Get memory window
- *              BL      = Window number
- *                      = 00h Window A
- *                      = 01h Window B
- *              DX      = Window number in video memory in window
- *                        granularity units (Set Memory Window only)
- * Note:
- *              If this function is called while in a linear frame buffer mode,
- *              this function must fail with completion code AH=03h
- *
- * Output:
- *              AX      = VBE Return Status
- *              DX      = Window number in window granularity units
- *                        (Get Memory Window only)
- */
-ASM_START
-vbe_biosfn_display_window_control:
-  cmp  bl, #0x00
-  jne  vbe_05_failed
-  cmp  bh, #0x01
-  je   get_display_window
-  jb   set_display_window
-  mov  ax, #0x0100
-  ret
-set_display_window:
-  mov  ax, dx
-  call _dispi_set_bank
-  call dispi_get_bank
-  cmp  ax, dx
-  jne  vbe_05_failed
-  mov  ax, #0x004f
-  ret
-get_display_window:
-  call dispi_get_bank
-  mov  dx, ax
-  mov  ax, #0x004f
-  ret
-vbe_05_failed:
-  mov  ax, #0x014f
-  ret
-ASM_END
-
 
 /** Function 06h - Set/Get Logical Scan Line Length
  *
- * Input:
+ *  Input:
  *              AX      = 4F06h
  *              BL      = 00h Set Scan Line Length in Pixels
  *                      = 01h Get Scan Line Length
@@ -1272,178 +657,162 @@ ASM_END
  *                        If BL=02h Desired Width in Bytes
  *                        (Ignored for Get Functions)
  *
- * Output:
+ *  Output:
  *              AX      = VBE Return Status
  *              BX      = Bytes Per Scan Line
- *              CX      = Actual Pixels Per Scan Line
- *                        (truncated to nearest complete pixel)
+ *              CX      = Actual Pixels Per Scan Line (truncated to
+ *                        nearest complete pixel)
  *              DX      = Maximum Number of Scan Lines
  */
-ASM_START
-vbe_biosfn_set_get_logical_scan_line_length:
-  mov  ax, cx
-  cmp  bl, #0x01
-  je   get_logical_scan_line_length
-  cmp  bl, #0x02
-  je   set_logical_scan_line_bytes
-  jb   set_logical_scan_line_pixels
-  mov  ax, #0x0100
-  ret
-set_logical_scan_line_bytes:
-  push ax
-  call dispi_get_bpp
-  xor  bh, bh
-  mov  bl, ah
-  xor  dx, dx
-  pop  ax
-  div  bx
-set_logical_scan_line_pixels:
-  call dispi_set_virt_width
-get_logical_scan_line_length:
-  call dispi_get_bpp
-  xor  bh, bh
-  mov  bl, ah
-  call dispi_get_virt_width
-  mov  cx, ax
-  mul  bx
-  mov  bx, ax
-  call dispi_get_virt_height
-  mov  dx, ax
-  mov  ax, #0x004f
-  ret
-ASM_END
-
-
-/** Function 07h - Set/Get Display Start
- *
- * Input(16-bit):
- *              AX      = 4F07h
- *              BH      = 00h Reserved and must be 00h
- *              BL      = 00h Set Display Start
- *                      = 01h Get Display Start
- *                      = 02h Schedule Display Start (Alternate)
- *                      = 03h Schedule Stereoscopic Display Start
- *                      = 04h Get Scheduled Display Start Status
- *                      = 05h Enable Stereoscopic Mode
- *                      = 06h Disable Stereoscopic Mode
- *                      = 80h Set Display Start during Vertical Retrace
- *                      = 82h Set Display Start during Vertical Retrace (Alternate)
- *                      = 83h Set Stereoscopic Display Start during Vertical Retrace
- *              ECX     = If BL=02h/82h Display Start Address in bytes
- *                        If BL=03h/83h Left Image Start Address in bytes
- *              EDX     = If BL=03h/83h Right Image Start Address in bytes
- *              CX      = If BL=00h/80h First Displayed Pixel In Scan Line
- *              DX      = If BL=00h/80h First Displayed Scan Line
- *
- * Output:
- *              AX      = VBE Return Status
- *              BH      = If BL=01h Reserved and will be 0
- *              CX      = If BL=01h First Displayed Pixel In Scan Line
- *                        If BL=04h 0 if flip has not occurred, not 0 if it has
- *              DX      = If BL=01h First Displayed Scan Line
- *
- * Input(32-bit):
- *              BH      = 00h Reserved and must be 00h
- *              BL      = 00h Set Display Start
- *                      = 80h Set Display Start during Vertical Retrace
- *              CX      = Bits 0-15 of display start address
- *              DX      = Bits 16-31 of display start address
- *              ES      = Selector for memory mapped registers
- */
-ASM_START
-vbe_biosfn_set_get_display_start:
-  cmp  bl, #0x80
-  je   set_display_start
-  cmp  bl, #0x01
-  je   get_display_start
-  jb   set_display_start
-  mov  ax, #0x0100
-  ret
-set_display_start:
-  mov  ax, cx
-  call dispi_set_x_offset
-  mov  ax, dx
-  call dispi_set_y_offset
-  mov  ax, #0x004f
-  ret
-get_display_start:
-  call dispi_get_x_offset
-  mov  cx, ax
-  call dispi_get_y_offset
-  mov  dx, ax
-  xor  bh, bh
-  mov  ax, #0x004f
-  ret
-ASM_END
-
-
-/** Function 08h - Set/Get Dac Palette Format
- *
- * Input:
- *              AX      = 4F08h
- *              BL      = 00h set DAC palette width
- *                      = 01h get DAC palette width
- *              BH      = If BL=00h: desired number of bits per primary color
- * Output:
- *              AX      = VBE Return Status
- *              BH      = current number of bits per primary color (06h = standard VGA)
- */
-ASM_START
-vbe_biosfn_set_get_dac_palette_format:
-  cmp  bl, #0x01
-  je   get_dac_palette_format
-  jb   set_dac_palette_format
-  mov  ax, #0x0100
-  ret
-set_dac_palette_format:
-  call dispi_get_enable
-  cmp  bh, #0x06
-  je   set_normal_dac
-  cmp  bh, #0x08
-  jne  vbe_08_unsupported
-  or   ax, # VBE_DISPI_8BIT_DAC
-  jnz  set_dac_mode
-set_normal_dac:
-  and  ax, #~ VBE_DISPI_8BIT_DAC
-set_dac_mode:
-  call _dispi_set_enable
-get_dac_palette_format:
-  mov  bh, #0x06
-  call dispi_get_enable
-  and  ax, # VBE_DISPI_8BIT_DAC
-  jz   vbe_08_ok
-  mov  bh, #0x08
-vbe_08_ok:
-  mov  ax, #0x004f
-  ret
-vbe_08_unsupported:
-  mov  ax, #0x014f
-  ret
-ASM_END
-
-
-/** Function 09h - Set/Get Palette Data
- *
- * Input:
- *              AX      = 4F09h
- * Output:
- *              AX      = VBE Return Status
- *
- * FIXME: incomplete API description, Input & Output
- */
-void vbe_biosfn_set_get_palette_data(AX)
+void vbe_biosfn_get_set_scanline_length(uint16_t STACK_BASED *AX, uint16_t STACK_BASED *BX,
+                                        uint16_t STACK_BASED *CX, uint16_t STACK_BASED *DX)
 {
+    uint16_t    val;
+    uint16_t    result;
+    uint8_t     bpp;
+    uint8_t     subfn;
+    uint16_t    old_vw;
+
+    bpp    = dispi_get_bpp();
+    bpp    = bpp == 15 ? 16 : bpp;
+    old_vw = dispi_get_virt_width();
+    result = 0x004F;
+    val    = *CX;
+    subfn  = *BX & 0xFF;
+#ifdef VGA_DEBUG
+    printf("VBE get/set scanline len fn=%x, CX=%x\n", subfn, *CX);
+#endif
+    switch(subfn) {
+    case 0x02:
+        if (bpp == 4)
+            val = val * 8;
+        else
+            val = val / (bpp / 8);
+        /* fall through */
+    case 0x00:
+        dispi_set_virt_width(val);
+        /* fall through */
+    case 0x01:
+        val = dispi_get_virt_width();
+        *CX = val;                          /* Width in pixels. */
+        if (bpp == 4)
+            val = val / 8;
+        else
+            val = val * (bpp / 8);
+        val = (val + 3) & ~3;
+        *BX = val;                          /* Bytes per scanline. */
+        *DX = dispi_get_virt_height();      /* Height in lines. */
+        if (*DX < dispi_get_yres()) {
+            dispi_set_virt_width(old_vw);
+            result = 0x200;
+        }
+        break;
+    default:
+        // function failed
+        result = 0x100;
+        break;
+    }
+    *AX = result;
 }
 
-/** Function 0Ah - Return VBE Protected Mode Interface
- *
- * Input:
- *              AX      = 4F0Ah
- * Output:
- *              AX      = VBE Return Status
- *
- * FIXME: incomplete API description, Input & Output
+
+/* We would very much like to avoid dragging in the long multiply library
+ * routine, and we really just need to multiply two 16-bit numbers to
+ * obtain a 32-bit result, so...
  */
-void vbe_biosfn_return_protected_mode_interface(AX)
+uint32_t mul32_16x16(uint16_t a, uint16_t b);
+#pragma aux mul32_16x16 =   \
+    "mul    dx"             \
+    parm [ax] [dx] modify nomemory;
+
+
+/** Private INT 10h function 5642h - Manage custom video modes using X/Y
+ *  resolution and bit depth rather than mode number
+ *
+ *  Input:
+ *              AX      = 5642h ('VB')
+ *              BL      = 00h Set video mode
+ *              BH      = If BL=00h Desired bit depth in pixels
+ *              CX      = If BL=00h Desired width in pixels
+ *              DX      = If BL=00h Desired height in pixels
+ *
+ *  Output:
+ *              AX      = VBE style return status
+ */
+void private_biosfn_custom_mode(uint16_t STACK_BASED *AX, uint16_t STACK_BASED *BX,
+                                uint16_t STACK_BASED *CX, uint16_t STACK_BASED *DX)
 {
+    uint16_t    result;
+    uint8_t     subfn;
+    uint8_t     bpp;
+    uint8_t     lfb_flag;
+    uint16_t    xres;
+    uint16_t    yres;
+    uint16_t    line_size;
+    uint32_t    vram_size;
+    uint32_t    mode_size;
+
+    result = 0x004F;
+    subfn  = *BX & 0xFF;
+    switch (subfn) {
+    case 0x00:
+        xres = *CX;
+        yres = *DX;
+        bpp  = (*BX >> 8) & 0x7F;
+#ifdef VGA_DEBUG
+        printf("Set custom mode %04x by %04x %xbpp\n", xres, yres, bpp);
+#endif
+        /* Only allow 32/16/8bpp. */
+        if (bpp != 8 && bpp != 16 && bpp != 32) {
+            result = 0x100;
+            break;
+        }
+
+        /* Determine the LFB flag. */
+        lfb_flag = *BX & 0x8000 ? VBE_DISPI_LFB_ENABLED : 0;
+
+        /* Cap the resolution to something not insanely high or low. */
+        if (xres < 640)
+            xres = 640;
+        else if (xres > 2560)
+            xres = 2560;
+        if (yres < 480)
+            yres = 480;
+        else if (yres > 1920)
+            yres = 1920;
+#ifdef VGA_DEBUG
+        printf("Adjusted resolution %04x by %04x\n", xres, yres);
+#endif
+
+        /* Calculate the VRAM size in bytes. */
+        vram_size = (uint32_t)in_word(VBE_EXTRA_PORT, 0xffff) << 16;
+
+        /* Calculate the scanline size in bytes. */
+        line_size = xres * (bpp / 8);
+        line_size = (line_size + 3) & ~3;
+        /* And now the memory required for the mode. */
+        mode_size = mul32_16x16(line_size, yres);
+
+        if (mode_size > vram_size) {
+            /* No can do. Don't have that much VRAM. */
+            result = 0x200;
+            break;
+        }
+
+        /* Mode looks valid, let's get cracking. */
+        dispi_set_enable(VBE_DISPI_DISABLED);
+        dispi_set_bpp(bpp);
+        dispi_set_xres(xres);
+        dispi_set_yres(yres);
+        dispi_set_bank(0);
+        dispi_set_enable(VBE_DISPI_ENABLED | lfb_flag);
+        vga_compat_setup();
+        break;
+
+    default:
+        // unsupported sub-function
+        result = 0x100;
+        break;
+    }
+    *AX = result;
 }

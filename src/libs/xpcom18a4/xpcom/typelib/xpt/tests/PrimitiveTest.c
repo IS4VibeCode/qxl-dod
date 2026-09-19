@@ -61,24 +61,22 @@
 XPTString in_str = { 4, "bazz" };
 
 struct TestData {
-    uint32	bit32;
-    uint16      bit16;
-    uint8       bit8[2];
+    PRUint32	bit32;
+    PRUint16    bit16;
+    PRUint8     bit8[2];
     char	*cstr;
     XPTString   *str;
 } input = { 0xdeadbeef, 0xcafe, {0xba, 0xbe}, "foobar", &in_str},
   output = {0, 0, {0, 0}, NULL, NULL };
 
-void
-dump_struct(char *label, struct TestData *str)
+static void dump_struct(char *label, struct TestData *str)
 {
     fprintf(stderr, "%s: {%#08x, %#04x, {%#02x, %#02x}, %s, %d/%s}\n",
 	    label, str->bit32, str->bit16, str->bit8[0], str->bit8[1],
 	    str->cstr, str->str->length, str->str->bytes);
 }
 
-PRBool
-XDR(XPTArena *arena, XPTCursor *cursor, struct TestData *str)
+static PRBool XDR(XPTArena *arena, XPTCursor *cursor, struct TestData *str)
 {
     TRY("Do32", XPT_Do32(cursor, &str->bit32));
     TRY("Do16", XPT_Do16(cursor, &str->bit16));
@@ -96,7 +94,7 @@ main(int argc, char **argv)
     XPTState *state;
     XPTCursor curs, *cursor = &curs;
     char *header, *data, *whole;
-    uint32 hlen, dlen, i;
+    PRUint32 hlen, dlen, i;
 
     TRY("XPT_NewArena", (arena = XPT_NewArena(1024, sizeof(double), "main")));
     

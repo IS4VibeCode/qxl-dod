@@ -1,28 +1,34 @@
+/* $Id: bin2c.c 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * PC-BIOS - Binary 2 C Structure Converter.
- */
- 
-/*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
- *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
- *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
- *
+ * bin2c - Binary 2 C Structure Converter.
  */
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
+ *
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ */
+
+
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -52,83 +58,125 @@ static size_t fsize(FILE *pFile)
     return 0;
 }
 
+static int usage(const char *argv0)
+{
+    fprintf(stderr,
+            "Syntax: %s [options] <arrayname> <binaryfile> <outname>\n"
+            "  --min <n>    check if <binaryfile> is not smaller than <n>KB\n"
+            "  --max <n>    check if <binaryfile> is not bigger than <n>KB\n"
+            "  --mask <n>   check if size of binaryfile is <n>-aligned\n"
+            "  --width <n>  number of bytes per line (default: 16)\n"
+            "  --break <n>  break every <n> lines    (default: -1)\n"
+            , argv0);
+    fprintf(stderr,
+            "  --ascii      show ASCII representation of binary as comment\n"
+            "  --export     emit DECLEXPORT\n"
+            "  --append     append to the output file (default: truncate)\n"
+            "  --no-size    Skip the size.\n"
+            "  --static     Static data scope.\n");
+
+    return 1;
+}
 
 int main(int argc, char *argv[])
 {
     FILE          *pFileIn;
     FILE          *pFileOut;
-    int           i;
+    int           iArg;
     size_t        cbMin = 0;
     size_t        cbMax = ~0U;
     size_t        uMask = 0;
     int           fAscii = 0;
+    int           fAppend = 0;
     int           fExport = 0;
-    unsigned char abLine[16];
-    unsigned int  off;
+    int           fNoSize = 0;
+    int           fStatic = 0;
+    long          iBreakEvery = -1;
+    unsigned char abLine[32];
+    size_t        cbLine = 16;
+    size_t        off;
     size_t        cbRead;
     size_t        cbBin;
+    int           rc = 1;               /* assume the worst... */
 
     if (argc < 2)
-        goto syntax_error;
+        return usage(argv[0]);
 
-    for (i=1; i<argc; i++)
+    for (iArg = 1; iArg < argc; iArg++)
     {
-        if (!strcmp(argv[i], "-min"))
+        if (!strcmp(argv[iArg], "--min") || !strcmp(argv[iArg], "-min"))
         {
-            if (++i>=argc)
-                goto syntax_error;
-            cbMin = 1024 * strtoul(argv[i], NULL, 0);
-            continue;
+            if (++iArg >= argc)
+                return usage(argv[0]);
+            cbMin = 1024 * strtoul(argv[iArg], NULL, 0);
         }
-        else if (!strcmp(argv[i], "-max"))
+        else if (!strcmp(argv[iArg], "--max") || !strcmp(argv[iArg], "-max"))
         {
-            if (++i>=argc)
-                goto syntax_error;
-            cbMax = 1024 * strtoul(argv[i], NULL, 0);
-            continue;
+            if (++iArg >= argc)
+                return usage(argv[0]);
+            cbMax = 1024 * strtoul(argv[iArg], NULL, 0);
         }
-        else if (!strcmp(argv[i], "-mask"))
+        else if (!strcmp(argv[iArg], "--mask") || !strcmp(argv[iArg], "-mask"))
         {
-            if (++i>=argc)
-                goto syntax_error;
-            uMask = strtoul(argv[i], NULL, 0);
-            continue;
+            if (++iArg >= argc)
+                return usage(argv[0]);
+            uMask = strtoul(argv[iArg], NULL, 0);
         }
-        else if (!strcmp(argv[i], "-ascii"))
-        {
+        else if (!strcmp(argv[iArg], "--ascii") || !strcmp(argv[iArg], "-ascii"))
             fAscii = 1;
-            continue;
-        }
-        else if (!strcmp(argv[i], "-export"))
-        {
+        else if (!strcmp(argv[iArg], "--append"))
+            fAppend = 1;
+        else if (!strcmp(argv[iArg], "--export") || !strcmp(argv[iArg], "-export"))
             fExport = 1;
-            continue;
+        else if (!strcmp(argv[iArg], "--no-size"))
+            fNoSize = 1;
+        else if (!strcmp(argv[iArg], "--static"))
+            fStatic = 1;
+        else if (!strcmp(argv[iArg], "--width") || !strcmp(argv[iArg], "-width"))
+        {
+            if (++iArg >= argc)
+                return usage(argv[0]);
+            cbLine = strtoul(argv[iArg], NULL, 0);
+            if (cbLine == 0 || cbLine > sizeof(abLine))
+            {
+                fprintf(stderr, "%s: '%s' is too wide, max %u\n",
+                        argv[0], argv[iArg], (unsigned)sizeof(abLine));
+                return 1;
+            }
         }
-        else if (i==argc-3)
+        else if (!strcmp(argv[iArg], "--break") || !strcmp(argv[iArg], "-break"))
+        {
+            if (++iArg >= argc)
+                return usage(argv[0]);
+            iBreakEvery = strtol(argv[iArg], NULL, 0);
+            if (iBreakEvery <= 0 && iBreakEvery != -1)
+            {
+                fprintf(stderr, "%s: -break value '%s' is not >= 1 or -1.\n",
+                        argv[0], argv[iArg]);
+                return 1;
+            }
+        }
+        else if (iArg == argc - 3)
             break;
-
-syntax_error:
-        fprintf(stderr,
-                "Syntax: %s [options] <arrayname> <binaryfile> <outname>\n"
-                "  -min <n>     check if <binaryfile> is not smaller than <n>KB\n"
-                "  -max <n>     check if <binaryfile> is not bigger than <n>KB\n"
-                "  -mask <n>    check if size of binaryfile is <n>-aligned\n"
-                "  -ascii       show ASCII representation of binary as comment\n",
-                argv[0]);
-        return 1;
+        else
+        {
+            fprintf(stderr, "%s: syntax error: Unknown argument '%s'\n",
+                    argv[0], argv[iArg]);
+            return usage(argv[0]);
+        }
     }
 
-    pFileIn = fopen(argv[i+1], "rb");
+    pFileIn = fopen(argv[iArg+1], "rb");
     if (!pFileIn)
     {
-        fprintf(stderr, "Error: failed to open input file '%s'!\n", argv[i+1]);
+        fprintf(stderr, "Error: failed to open input file '%s'!\n", argv[iArg+1]);
         return 1;
     }
 
-    pFileOut = fopen(argv[i+2], "wb");
+    pFileOut = fopen(argv[iArg+2], fAppend ? "a" : "w"); /* no b! */
     if (!pFileOut)
     {
-        fprintf(stderr, "Error: failed to open output file '%s'!\n", argv[i+2]);
+        fprintf(stderr, "Error: failed to open output file '%s'!\n", argv[iArg+2]);
         fclose(pFileIn);
         return 1;
     }
@@ -138,7 +186,7 @@ syntax_error:
     fprintf(pFileOut,
            "/*\n"
            " * This file was automatically generated\n"
-           " * from %s by\n"
+           " * from %s\n"
            " * by %s.\n"
            " */\n"
            "\n"
@@ -146,79 +194,81 @@ syntax_error:
            "\n"
            "%sconst unsigned char%s g_ab%s[] =\n"
            "{\n",
-           argv[i+1], argv[0], fExport ? "DECLEXPORT(" : "", fExport ? ")" : "", argv[i]);
+           argv[iArg+1], argv[0], fStatic ? "static " : fExport ? "DECLEXPORT(" : "", !fStatic && fExport ? ")" : "", argv[iArg]);
 
     /* check size restrictions */
     if (uMask && (cbBin & uMask))
+        fprintf(stderr, "%s: size=%ld - Not aligned!\n", argv[0], (long)cbBin);
+    else if (cbBin < cbMin || cbBin > cbMax)
+        fprintf(stderr, "%s: size=%ld - Not %ld-%ldb in size!\n",
+                argv[0], (long)cbBin, (long)cbMin, (long)cbMax);
+    else
     {
-        fprintf(stderr, "%s: size=%d - Not aligned!\n", argv[0], cbBin);
-        return 1;
-    }
-    if (cbBin < cbMin || cbBin > cbMax)
-    {
-        fprintf(stderr, "%s: size=%d - Not %d-%db in size!\n",
-                argv[0], cbBin, cbMin, cbMax);
-        return 1;
-    }
-
-    /* the binary data */
-    off = 0;
-    while ((cbRead = fread(&abLine[0], 1, sizeof(abLine), pFileIn)) > 0)
-    {
-        size_t i;
-        fprintf(pFileOut, "   ");
-        for (i = 0; i < cbRead; i++)
-            fprintf(pFileOut, " 0x%02x,", abLine[i]);
-        for (; i < sizeof(abLine); i++)
-            fprintf(pFileOut, "      ");
-        if (fAscii)
+        /* the binary data */
+        off = 0;
+        while ((cbRead = fread(&abLine[0], 1, cbLine, pFileIn)) > 0)
         {
-            fprintf(pFileOut, " /* 0x%08x: ", off);
-            for (i = 0; i < cbRead; i++)
-                fprintf(pFileOut, "%c", isprint(abLine[i]) ? abLine[i] : '.');
-            for (; i < sizeof(abLine); i++)
-                fprintf(pFileOut, " ");
-            fprintf(pFileOut, " */");
+            size_t j;
+
+            if (    iBreakEvery > 0
+                &&  off
+                && (off / cbLine) % iBreakEvery == 0)
+                fprintf(pFileOut, "\n");
+
+            fprintf(pFileOut, "   ");
+            for (j = 0; j < cbRead; j++)
+                fprintf(pFileOut, " 0x%02x,", abLine[j]);
+            for (; j < cbLine; j++)
+                fprintf(pFileOut, "      ");
+            if (fAscii)
+            {
+                fprintf(pFileOut, " /* 0x%08lx: ", (long)off);
+                for (j = 0; j < cbRead; j++)
+                    /* be careful with '/' prefixed/followed by a '*'! */
+                    fprintf(pFileOut, "%c",
+                            isprint(abLine[j]) && abLine[j] != '/' ? abLine[j] : '.');
+                for (; j < cbLine; j++)
+                    fprintf(pFileOut, " ");
+                fprintf(pFileOut, " */");
+            }
+            fprintf(pFileOut, "\n");
+
+            off += cbRead;
         }
-        fprintf(pFileOut, "\n");
 
-        off += cbRead;
+        /* check for errors */
+        if (ferror(pFileIn) && !feof(pFileIn))
+            fprintf(stderr, "%s: read error\n", argv[0]);
+        else if (off != cbBin)
+            fprintf(stderr, "%s: read error off=%ld cbBin=%ld\n", argv[0], (long)off, (long)cbBin);
+        else
+        {
+            /* no errors, finish the structure. */
+            fprintf(pFileOut,
+                    "};\n");
+
+            if (!fNoSize)
+                fprintf(pFileOut,
+                        "\n"
+                        "%sconst unsigned%s g_cb%s = sizeof(g_ab%s);\n",
+                        fExport ? "DECLEXPORT(" : "", fExport ? ")" : "", argv[iArg], argv[iArg]);
+
+            fprintf(pFileOut, "/* end of file */\n");
+
+            /* flush output and check for error. */
+            fflush(pFileOut);
+            if (ferror(pFileOut))
+                fprintf(stderr, "%s: write error\n", argv[0]);
+            else
+                rc = 0; /* success! */
+        }
     }
 
-    /* check for errors */
-    if (ferror(pFileIn) && !feof(pFileIn))
-    {
-        fprintf(stderr, "%s: read error\n", argv[0]);
-        goto error;
-    }
-    if (off != cbBin)
-    {
-        fprintf(stderr, "%s: read error off=%d cbBin=%d\n", argv[0], off, cbBin);
-        goto error;
-    }
-
-    /* finish the structure. */
-    fprintf(pFileOut,
-            "};\n"
-            "\n"
-            "%sconst unsigned%s g_cb%s = sizeof(g_ab%s);\n"
-            "/* end of file */\n",
-            fExport ? "DECLEXPORT(" : "", fExport ? ")" : "", argv[i], argv[i]);
+    /* cleanup, delete the output file on failure. */
+    fclose(pFileOut);
     fclose(pFileIn);
+    if (rc)
+        remove(argv[iArg+2]);
 
-    /* flush output and check for error. */
-    fflush(pFileOut);
-    if (ferror(pFileOut))
-    {
-        fprintf(stderr, "%s: write error\n", argv[0]);
-        goto error;
-    }
-    fclose(pFileOut);
-
-    return 0;
-
-error:
-    fclose(pFileOut);
-    remove(argv[i+2]);
-    return 1;
+    return rc;
 }

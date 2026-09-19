@@ -46,7 +46,6 @@
 #include <string.h>
 #include "prbit.h"
 #include "pldhash.h"
-#include "prlog.h"     /* for PR_ASSERT */
 
 #ifdef PL_DHASHMETER
 # if defined MOZILLA_CLIENT && defined DEBUG_XXXbrendan
@@ -56,17 +55,19 @@
 #else
 # define METER(x)       /* nothing */
 #endif
+#include <iprt/assert.h>
+#include <iprt/mem.h>
 
 PR_IMPLEMENT(void *)
 PL_DHashAllocTable(PLDHashTable *table, PRUint32 nbytes)
 {
-    return malloc(nbytes);
+    return RTMemAlloc(nbytes);
 }
 
 PR_IMPLEMENT(void)
 PL_DHashFreeTable(PLDHashTable *table, void *ptr)
 {
-    free(ptr);
+    RTMemFree(ptr);
 }
 
 PR_IMPLEMENT(PLDHashNumber)
@@ -92,7 +93,7 @@ PL_DHashGetKeyStub(PLDHashTable *table, PLDHashEntryHdr *entry)
 PR_IMPLEMENT(PLDHashNumber)
 PL_DHashVoidPtrKeyStub(PLDHashTable *table, const void *key)
 {
-    return (PLDHashNumber)key >> 2;
+    return (PLDHashNumber)(uintptr_t)key >> 2;
 }
 
 PR_IMPLEMENT(PRBool)
@@ -136,7 +137,7 @@ PL_DHashFreeStringKey(PLDHashTable *table, PLDHashEntryHdr *entry)
 {
     const PLDHashEntryStub *stub = (const PLDHashEntryStub *)entry;
 
-    free((void *) stub->key);
+    RTMemFree((void *) stub->key);
     memset(entry, 0, table->entrySize);
 }
 
@@ -169,11 +170,11 @@ PL_NewDHashTable(const PLDHashTableOps *ops, void *data, PRUint32 entrySize,
 {
     PLDHashTable *table;
 
-    table = (PLDHashTable *) malloc(sizeof *table);
+    table = (PLDHashTable *) RTMemAlloc(sizeof *table);
     if (!table)
         return NULL;
     if (!PL_DHashTableInit(table, ops, data, entrySize, capacity)) {
-        free(table);
+        RTMemFree(table);
         return NULL;
     }
     return table;
@@ -183,7 +184,7 @@ PR_IMPLEMENT(void)
 PL_DHashTableDestroy(PLDHashTable *table)
 {
     PL_DHashTableFinish(table);
-    free(table);
+    RTMemFree(table);
 }
 
 PR_IMPLEMENT(PRBool)
@@ -245,7 +246,7 @@ PL_DHashTableSetAlphaBounds(PLDHashTable *table,
      * Reject obviously insane bounds, rather than trying to guess what the
      * buggy caller intended.
      */
-    PR_ASSERT(0.5 <= maxAlpha && maxAlpha < 1 && 0 <= minAlpha);
+    Assert(0.5 <= maxAlpha && maxAlpha < 1 && 0 <= minAlpha);
     if (maxAlpha < 0.5 || 1 <= maxAlpha || minAlpha < 0)
         return;
 
@@ -254,7 +255,7 @@ PL_DHashTableSetAlphaBounds(PLDHashTable *table,
      * minimum size leaves no entries free, reduce maxAlpha based on minimum
      * size and the precision limit of maxAlphaFrac's fixed point format.
      */
-    PR_ASSERT(PL_DHASH_MIN_SIZE - (maxAlpha * PL_DHASH_MIN_SIZE) >= 1);
+    Assert(PL_DHASH_MIN_SIZE - (maxAlpha * PL_DHASH_MIN_SIZE) >= 1);
     if (PL_DHASH_MIN_SIZE - (maxAlpha * PL_DHASH_MIN_SIZE) < 1) {
         maxAlpha = (float)
                    (PL_DHASH_MIN_SIZE - PR_MAX(PL_DHASH_MIN_SIZE / 256, 1))
@@ -266,7 +267,7 @@ PL_DHashTableSetAlphaBounds(PLDHashTable *table,
      * not to truncate an entry's worth of alpha when storing in minAlphaFrac
      * (8-bit fixed point format).
      */
-    PR_ASSERT(minAlpha < maxAlpha / 2);
+    Assert(minAlpha < maxAlpha / 2);
     if (minAlpha >= maxAlpha / 2) {
         size = PL_DHASH_TABLE_SIZE(table);
         minAlpha = (size * maxAlpha - PR_MAX(size / 256, 1)) / (2 * size);
@@ -360,7 +361,7 @@ SearchTable(PLDHashTable *table, const void *key, PLDHashNumber keyHash,
     PRUint32 sizeMask;
 
     METER(table->stats.searches++);
-    PR_ASSERT(!(keyHash & COLLISION_FLAG));
+    Assert(!(keyHash & COLLISION_FLAG));
 
     /* Compute the primary hash address. */
     hashShift = table->hashShift;
@@ -435,6 +436,12 @@ ChangeTable(PLDHashTable *table, int deltaLog2)
     PLDHashGetKey getKey;
     PLDHashMoveEntry moveEntry;
 
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+    Assert(table->generation != PR_UINT32_MAX);
+    if (table->generation == PR_UINT32_MAX)
+        return PR_FALSE;
+#endif
+
     /* Look, but don't touch, until we succeed in getting new entry store. */
     oldLog2 = PL_DHASH_BITS - table->hashShift;
     newLog2 = oldLog2 + deltaLog2;
@@ -453,6 +460,10 @@ ChangeTable(PLDHashTable *table, int deltaLog2)
     table->hashShift = PL_DHASH_BITS - newLog2;
     table->removedCount = 0;
     table->generation++;
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+    if (table->generation == PR_UINT32_MAX)
+        table->generation++;
+#endif
 
     /* Assign the new entry store to table. */
     memset(newEntryStore, 0, nbytes);
@@ -468,7 +479,7 @@ ChangeTable(PLDHashTable *table, int deltaLog2)
             oldEntry->keyHash &= ~COLLISION_FLAG;
             newEntry = SearchTable(table, getKey(table, oldEntry),
                                    oldEntry->keyHash, PL_DHASH_ADD);
-            PR_ASSERT(PL_DHASH_ENTRY_IS_FREE(newEntry));
+            Assert(PL_DHASH_ENTRY_IS_FREE(newEntry));
             moveEntry(table, oldEntry, newEntry);
             newEntry->keyHash = oldEntry->keyHash;
         }
@@ -563,6 +574,10 @@ PL_DHashTableOperate(PLDHashTable *table, const void *key, PLDHashOperator op)
             /* Shrink if alpha is <= .25 and table isn't too small already. */
             size = PL_DHASH_TABLE_SIZE(table);
             if (size > PL_DHASH_MIN_SIZE &&
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+            /** @todo This is where IPC screws up, avoid the assertion in ChangeTable until it's fixed. */
+                table->generation != PR_UINT32_MAX &&
+#endif
                 table->entryCount <= MIN_LOAD(table, size)) {
                 METER(table->stats.shrinks++);
                 (void) ChangeTable(table, -1);
@@ -573,7 +588,7 @@ PL_DHashTableOperate(PLDHashTable *table, const void *key, PLDHashOperator op)
         break;
 
       default:
-        PR_ASSERT(0);
+        AssertFailed();
         entry = NULL;
     }
 
@@ -585,7 +600,7 @@ PL_DHashTableRawRemove(PLDHashTable *table, PLDHashEntryHdr *entry)
 {
     PLDHashNumber keyHash;      /* load first in case clearEntry goofs it */
 
-    PR_ASSERT(PL_DHASH_ENTRY_IS_LIVE(entry));
+    Assert(PL_DHASH_ENTRY_IS_LIVE(entry));
     keyHash = entry->keyHash;
     table->ops->clearEntry(table, entry);
     if (keyHash & COLLISION_FLAG) {
@@ -606,7 +621,22 @@ PL_DHashTableEnumerate(PLDHashTable *table, PLDHashEnumerator etor, void *arg)
     PRBool didRemove;
     PLDHashEntryHdr *entry;
     PLDHashOperator op;
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+    PRUint32 generation;
 
+    /*
+     * The hack! Set generation to PR_UINT32_MAX during the enumeration so
+     * we can prevent ChangeTable from being called.
+     *
+     * This happens during ipcDConnectService::OnClientStateChange()
+     * / ipcDConnectService::DeleteInstance() now when running
+     * java clienttest list hostinfo and vboxwebsrv crashes. It's quite
+     * likely that the IPC code isn't following the rules here, but it
+     * looks more difficult to fix that just hacking this hash code.
+     */
+    generation = table->generation;
+    table->generation = PR_UINT32_MAX;
+#endif /* VBOX */
     entryAddr = table->entryStore;
     entrySize = table->entrySize;
     capacity = PL_DHASH_TABLE_SIZE(table);
@@ -617,6 +647,9 @@ PL_DHashTableEnumerate(PLDHashTable *table, PLDHashEnumerator etor, void *arg)
         entry = (PLDHashEntryHdr *)entryAddr;
         if (ENTRY_IS_LIVE(entry)) {
             op = etor(table, entry, i++, arg);
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+            Assert(table->generation == PR_UINT32_MAX);
+#endif
             if (op & PL_DHASH_REMOVE) {
                 METER(table->stats.removeEnums++);
                 PL_DHashTableRawRemove(table, entry);
@@ -627,6 +660,9 @@ PL_DHashTableEnumerate(PLDHashTable *table, PLDHashEnumerator etor, void *arg)
         }
         entryAddr += entrySize;
     }
+#ifdef VBOX /* HACK ALERT! generation == PR_UINT32_MAX during enumeration. */
+    table->generation = generation;
+#endif
 
     /*
      * Shrink or compress if a quarter or more of all entries are removed, or

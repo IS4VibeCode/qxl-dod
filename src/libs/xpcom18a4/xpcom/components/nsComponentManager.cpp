@@ -79,7 +79,6 @@
 #include "nsReadableUtils.h"
 #include "nsString.h"
 #include "nsXPIDLString.h"
-#include "prcmon.h"
 #include "xptinfo.h" // this after nsISupports, to pick up IID so that xpt stuff doesn't try to define it itself...
 
 #include "nsInt64.h"
@@ -87,21 +86,11 @@
 
 #include NEW_H     // for placement new
 
-
-#ifdef XP_BEOS
-#include <FindDirectory.h>
-#include <Path.h>
-#endif
-
-#include "prlog.h"
-
-PRLogModuleInfo* nsComponentManagerLog = nsnull;
-
-#if 0 || defined (DEBUG_timeless)
- #define SHOW_DENIED_ON_SHUTDOWN
- #define SHOW_CI_ON_EXISTING_SERVICE
- #define XPCOM_CHECK_PENDING_CIDS
-#endif
+#include <iprt/assert.h>
+#include <iprt/file.h>
+#include <iprt/stream.h>
+#include <iprt/string.h>
+#include <VBox/log.h>
 
 // Loader Types
 #define NS_LOADER_DATA_ALLOC_STEP 6
@@ -158,12 +147,12 @@ extern PRBool gXPCOMShuttingDown;
 
 static void GetIDString(const nsID& aCID, char buf[UID_STRING_LENGTH])
 {
-    PR_snprintf(buf, UID_STRING_LENGTH, gIDFormat,
-                aCID.m0, (PRUint32) aCID.m1, (PRUint32) aCID.m2,
-                (PRUint32) aCID.m3[0], (PRUint32) aCID.m3[1],
-                (PRUint32) aCID.m3[2], (PRUint32) aCID.m3[3],
-                (PRUint32) aCID.m3[4], (PRUint32) aCID.m3[5],
-                (PRUint32) aCID.m3[6], (PRUint32) aCID.m3[7]);
+    RTStrPrintf2(buf, UID_STRING_LENGTH, gIDFormat,
+                 aCID.m0, (PRUint32) aCID.m1, (PRUint32) aCID.m2,
+                 (PRUint32) aCID.m3[0], (PRUint32) aCID.m3[1],
+                 (PRUint32) aCID.m3[2], (PRUint32) aCID.m3[3],
+                 (PRUint32) aCID.m3[4], (PRUint32) aCID.m3[5],
+                 (PRUint32) aCID.m3[6], (PRUint32) aCID.m3[7]);
 }
 
 nsresult
@@ -705,8 +694,12 @@ nsComponentManagerImpl::nsComponentManagerImpl()
 #ifdef ENABLE_STATIC_COMPONENT_LOADER
     mStaticComponentLoader(0),
 #endif
+    mComponentsOffset(0),
+    mGREComponentsOffset(0),
     mShuttingDown(NS_SHUTDOWN_NEVERHAPPENED),
     mLoaderData(nsnull),
+    mNLoaderData(0),
+    mMaxNLoaderData(0),
     mRegistryDirty(PR_FALSE)
 {
     mFactories.ops = nsnull;
@@ -715,16 +708,11 @@ nsComponentManagerImpl::nsComponentManagerImpl()
 
 nsresult nsComponentManagerImpl::Init(void)
 {
-    PR_ASSERT(mShuttingDown != NS_SHUTDOWN_INPROGRESS);
+    Assert(mShuttingDown != NS_SHUTDOWN_INPROGRESS);
     if (mShuttingDown == NS_SHUTDOWN_INPROGRESS)
         return NS_ERROR_FAILURE;
 
     mShuttingDown = NS_SHUTDOWN_NEVERHAPPENED;
-
-    if (nsComponentManagerLog == nsnull)
-    {
-        nsComponentManagerLog = PR_NewLogModule("nsComponentManager");
-    }
 
     // Initialize our arena
     PL_INIT_ARENA_POOL(&mArena, "ComponentManagerArena", NS_CM_BLOCK_SIZE);
@@ -785,7 +773,7 @@ nsresult nsComponentManagerImpl::Init(void)
     mMaxNLoaderData = NS_LOADER_DATA_ALLOC_STEP;
 
     mNLoaderData = NS_COMPONENT_TYPE_NATIVE;
-    mLoaderData[mNLoaderData].type = PL_strdup(nativeComponentType);
+    mLoaderData[mNLoaderData].type = RTStrDup(nativeComponentType);
     mLoaderData[mNLoaderData].loader = mNativeComponentLoader;
     NS_ADDREF(mLoaderData[mNLoaderData].loader);
     mNLoaderData++;
@@ -798,7 +786,7 @@ nsresult nsComponentManagerImpl::Init(void)
             return NS_ERROR_OUT_OF_MEMORY;
     }
 
-    mLoaderData[mNLoaderData].type = PL_strdup(staticComponentType);
+    mLoaderData[mNLoaderData].type = RTStrDup(staticComponentType);
     mLoaderData[mNLoaderData].loader = mStaticComponentLoader;
     NS_ADDREF(mLoaderData[mNLoaderData].loader);
     mNLoaderData++;
@@ -837,9 +825,7 @@ nsresult nsComponentManagerImpl::Init(void)
         return NS_ERROR_FAILURE;
     }
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_DEBUG,
-           ("nsComponentManager: Initialized."));
-
+    Log(("nsComponentManager: Initialized.\n"));
     return NS_OK;
 }
 
@@ -851,14 +837,14 @@ PRIntn PR_CALLBACK AutoRegEntryDestroy(nsHashKey *aKey, void *aData, void* aClos
 
 nsresult nsComponentManagerImpl::Shutdown(void)
 {
-    PR_ASSERT(mShuttingDown == NS_SHUTDOWN_NEVERHAPPENED);
+    Assert(mShuttingDown == NS_SHUTDOWN_NEVERHAPPENED);
     if (mShuttingDown != NS_SHUTDOWN_NEVERHAPPENED)
         return NS_ERROR_FAILURE;
 
     mShuttingDown = NS_SHUTDOWN_INPROGRESS;
 
     // Shutdown the component manager
-    PR_LOG(nsComponentManagerLog, PR_LOG_DEBUG, ("nsComponentManager: Beginning Shutdown."));
+    Log(("nsComponentManager: Beginning Shutdown.\n"));
 
     PRInt32 i;
 
@@ -866,10 +852,7 @@ nsresult nsComponentManagerImpl::Shutdown(void)
     if (mRegistryDirty) {
         nsresult rv = WritePersistentRegistry();
         if (NS_FAILED(rv)) {
-            PR_LOG(nsComponentManagerLog, PR_LOG_ERROR, ("nsComponentManager: Could not write out perisistant registry."));
-#ifdef DEBUG
-            printf("Could not write out perisistant registry!\n");
-#endif
+            Log(("nsComponentManager: Could not write out perisistant registry.\n"));
         }
     }
 
@@ -897,7 +880,7 @@ nsresult nsComponentManagerImpl::Shutdown(void)
     // Release all the component data - loaders and type strings
     for (i=0; i < mNLoaderData; i++) {
         NS_IF_RELEASE(mLoaderData[i].loader);
-        PL_strfree((char *)mLoaderData[i].type);
+        RTStrFree((char *)mLoaderData[i].type);
     }
     PR_Free(mLoaderData);
     mLoaderData = nsnull;
@@ -910,22 +893,20 @@ nsresult nsComponentManagerImpl::Shutdown(void)
 
     mShuttingDown = NS_SHUTDOWN_COMPLETE;
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_DEBUG, ("nsComponentManager: Shutdown complete."));
-
+    Log(("nsComponentManager: Shutdown complete.\n"));
     return NS_OK;
 }
 
 nsComponentManagerImpl::~nsComponentManagerImpl()
 {
-    PR_LOG(nsComponentManagerLog, PR_LOG_DEBUG, ("nsComponentManager: Beginning destruction."));
-
+    Log(("nsComponentManager: Beginning destruction.\n"));
     if (mShuttingDown != NS_SHUTDOWN_COMPLETE)
         Shutdown();
 
     if (mMon) {
         nsAutoMonitor::DestroyMonitor(mMon);
     }
-    PR_LOG(nsComponentManagerLog, PR_LOG_DEBUG, ("nsComponentManager: Destroyed."));
+    Log(("nsComponentManager: Destroyed.\n"));
 }
 
 NS_IMPL_THREADSAFE_ISUPPORTS8(nsComponentManagerImpl,
@@ -974,13 +955,14 @@ AutoRegEntry::AutoRegEntry(const nsACString& name, PRInt64* modDate) :
 
 AutoRegEntry::~AutoRegEntry()
 {
-    if (mName) PL_strfree(mName);
-    if (mData) PL_strfree(mData);
+    if (mName) RTStrFree(mName);
+    if (mData) RTStrFree(mData);
 }
 
 PRBool
 AutoRegEntry::Modified(PRInt64 *date)
 {
+    Log(("AutoRegEntry::Modified: mModDate=%RI64 vs %RI64 - %d\n", mModDate, *date, !LL_EQ(*date, mModDate)));
     return !LL_EQ(*date, mModDate);
 }
 
@@ -988,14 +970,14 @@ void
 AutoRegEntry::SetOptionalData(const char* data)
 {
     if (mData)
-        PL_strfree(mData);
+        RTStrFree(mData);
 
     if (!data) {
         mData = nsnull;
         return;
     }
 
-    mData = PL_strdup(data);
+    mData = RTStrDup(data);
 }
 
 static
@@ -1016,7 +998,7 @@ PRBool ReadSectionHeader(nsManifestLineReader& reader, const char *token)
                 break;
 
             // ignore the leading '['
-            if (0 != PL_strcmp(values[0]+1, token))
+            if (0 != RTStrCmp(values[0]+1, token))
                 break;
 
             return PR_TRUE;
@@ -1046,8 +1028,6 @@ nsComponentManagerImpl::ReadPersistentRegistry()
     if (!mComponentsDir)
         return NS_ERROR_NOT_INITIALIZED;  // this should have been set by Init().
 
-    PRFileDesc* fd = nsnull;
-
     // Set From Init
     if (!mRegistryFile) {
         return NS_ERROR_FILE_NOT_FOUND;
@@ -1060,38 +1040,54 @@ nsComponentManagerImpl::ReadPersistentRegistry()
 
     nsCOMPtr<nsILocalFile> localFile(do_QueryInterface(file));
 
-    rv = localFile->OpenNSPRFileDesc(PR_RDONLY, 0444, &fd);
+    nsCAutoString pathName;
+    rv = localFile->GetNativePath(pathName);
     if (NS_FAILED(rv))
         return rv;
 
-    PRInt64 fileSize;
-    rv = localFile->GetFileSize(&fileSize);
-    if (NS_FAILED(rv))
+    size_t cbRead = 0;
+    RTFILE hFile = NIL_RTFILE;
+    int vrc = RTFileOpen(&hFile, pathName.get(),
+                         RTFILE_O_OPEN | RTFILE_O_READ | RTFILE_O_DENY_NONE);
+    if (RT_FAILURE(vrc))
+        return NS_ERROR_FAILURE;
+
+    uint64_t cbFile;
+    vrc = RTFileQuerySize(hFile, &cbFile);
+    if (RT_FAILURE(vrc))
     {
-        PR_Close(fd);
-        return rv;
+        RTFileClose(hFile);
+        return NS_ERROR_FAILURE;
     }
 
-    PRInt32 flen = nsInt64(fileSize);
-    if (flen == 0)
+    if (cbFile == 0)
     {
-        PR_Close(fd);
+        RTFileClose(hFile);
         NS_WARNING("Persistent Registry Empty!");
         return NS_OK; // ERROR CONDITION
     }
 
-    char* registry = new char[flen+1];
+    /* Some arbitrary upper limit we should never reach. */
+    if (cbFile > 128 * _1M)
+    {
+        RTFileClose(hFile);
+        NS_WARNING("Persistent Registry too large!");
+        return NS_ERROR_FAILURE;
+    }
+
+    char* registry = new char[cbFile+1];
     if (!registry)
         goto out;
 
-    if (flen > PR_Read(fd, registry, flen))
+    vrc = RTFileRead(hFile, registry, cbFile, &cbRead);
+    if (RT_FAILURE(vrc) || cbRead < cbFile)
     {
         rv = NS_ERROR_FAILURE;
         goto out;
     }
-    registry[flen] = '\0';
+    registry[cbFile] = '\0';
 
-    reader.Init(registry, flen);
+    reader.Init(registry, (PRUint32)cbFile);
 
     if (ReadSectionHeader(reader, "HEADER"))
         goto out;
@@ -1250,9 +1246,9 @@ nsComponentManagerImpl::ReadPersistentRegistry()
             "@mozilla.org/locale/win32-locale;1",
             "@mozilla.org/widget/lookandfeel/win;1",
         // */
-            0
+            { 0 }
         };
-        for (int i=0; abusedContracts[i] && *abusedContracts[i]; i++) {
+        for (int i=0; i < RT_ELEMENTS(abusedContracts) && *abusedContracts[i]; i++) {
             nsFactoryEntry *entry = nsnull;
             nsContractIDTableEntry* contractIDTableEntry =
                 NS_STATIC_CAST(nsContractIDTableEntry*,
@@ -1289,8 +1285,8 @@ nsComponentManagerImpl::ReadPersistentRegistry()
 
     mRegistryDirty = PR_FALSE;
 out:
-    if (fd)
-        PR_Close(fd);
+    if (hFile != NIL_RTFILE)
+        RTFileClose(hFile);
 
     if (registry)
         delete [] registry;
@@ -1300,7 +1296,7 @@ out:
 
 struct PersistentWriterArgs
 {
-    PRFileDesc *mFD;
+    PRTSTREAM    mFD;
     nsLoaderdata *mLoaderData;
 };
 
@@ -1320,11 +1316,11 @@ ContractIDWriter(PLDHashTable *table,
     if (factoryEntry->mTypeIndex < 0)
         return PL_DHASH_NEXT;
 
-    PRFileDesc* fd = ((PersistentWriterArgs*)arg)->mFD;
+    PRTSTREAM fd = ((PersistentWriterArgs*)arg)->mFD;
 
     char cidString[UID_STRING_LENGTH];
     GetIDString(factoryEntry->mCid, cidString);
-    PR_fprintf(fd, "%s,%s\n", contractID, cidString); // what if this fails?
+    RTStrmPrintf(fd, "%s,%s\n", contractID, cidString); // what if this fails?
     return PL_DHASH_NEXT;
 }
 
@@ -1335,7 +1331,7 @@ ClassIDWriter(PLDHashTable *table,
               void *arg)
 {
     nsFactoryEntry *factoryEntry = ((nsFactoryTableEntry*)hdr)->mFactoryEntry;
-    PRFileDesc* fd = ((PersistentWriterArgs*)arg)->mFD;
+    PRTSTREAM fd = ((PersistentWriterArgs*)arg)->mFD;
     nsLoaderdata *loaderData = ((PersistentWriterArgs*)arg)->mLoaderData;
 
     // for now, we only save out the top most parent.
@@ -1365,13 +1361,13 @@ ClassIDWriter(PLDHashTable *table,
     char* location = factoryEntry->mLocation;
 
     // cid,contract_id,type,class_name,inproc_server
-    PR_fprintf(fd,
-               "%s,%s,%s,%s,%s\n",
-               cidString,
-               (contractID ? contractID : ""),
-               (loaderName ? loaderName : ""),
-               (className  ? className  : ""),
-               (location   ? location   : ""));
+    RTStrmPrintf(fd,
+                 "%s,%s,%s,%s,%s\n",
+                 cidString,
+                 (contractID ? contractID : ""),
+                 (loaderName ? loaderName : ""),
+                 (className  ? className  : ""),
+                 (location   ? location   : ""));
 
     if (contractID)
         PR_Free(contractID);
@@ -1384,7 +1380,7 @@ ClassIDWriter(PLDHashTable *table,
 PRIntn PR_CALLBACK
 AutoRegEntryWriter(nsHashKey *aKey, void *aData, void* aClosure)
 {
-    PRFileDesc* fd = (PRFileDesc*) aClosure;
+    PRTSTREAM fd = (PRTSTREAM) aClosure;
     AutoRegEntry* entry = (AutoRegEntry*) aData;
 
     const char* extraData = entry->GetOptionalData();
@@ -1393,7 +1389,7 @@ AutoRegEntryWriter(nsHashKey *aKey, void *aData, void* aClosure)
         fmt = "%s,%lld,%s\n";
     else
         fmt = "%s,%lld\n";
-    PR_fprintf(fd, fmt, entry->GetName().get(), entry->GetDate(), extraData);
+    RTStrmPrintf(fd, fmt, entry->GetName().get(), entry->GetDate(), extraData);
 
     return PR_TRUE;
 }
@@ -1419,35 +1415,52 @@ nsComponentManagerImpl::WritePersistentRegistry()
 
     localFile->SetNativeLeafName(leafName);
 
-    PRFileDesc* fd = nsnull;
-    nsresult rv = localFile->OpenNSPRFileDesc(PR_WRONLY | PR_CREATE_FILE | PR_TRUNCATE, 0666, &fd);
+    nsCAutoString pathName;
+    nsresult rv = localFile->GetNativePath(pathName);
     if (NS_FAILED(rv))
         return rv;
 
-    if (PR_fprintf(fd, "Generated File. Do not edit.\n") == (PRUint32) -1) {
+    RTFILE hFile      = NIL_RTFILE;
+    PRTSTREAM pStream = NULL;
+    int vrc = RTFileOpen(&hFile, pathName.get(),
+                         RTFILE_O_CREATE | RTFILE_O_WRITE | RTFILE_O_TRUNCATE | RTFILE_O_DENY_NONE
+                         | (0600 << RTFILE_O_CREATE_MODE_SHIFT));
+    if (RT_SUCCESS(vrc))
+    {
+        vrc = RTStrmOpenFileHandle(hFile, "at", 0 /*fFlags*/, &pStream);
+        if (RT_FAILURE(vrc))
+        {
+            RTFileClose(hFile);
+            return NS_ERROR_UNEXPECTED;
+        }
+    }
+    else
+        return NS_ERROR_UNEXPECTED;
+
+    if (RTStrmPrintf(pStream, "Generated File. Do not edit.\n") == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
 
-    if (PR_fprintf(fd, "\n[HEADER]\nVersion,%d,%d\n",
+    if (RTStrmPrintf(pStream, "\n[HEADER]\nVersion,%d,%d\n",
                    PERSISTENT_REGISTRY_VERSION_MAJOR,
-                   PERSISTENT_REGISTRY_VERSION_MINOR) == (PRUint32) -1) {
+                   PERSISTENT_REGISTRY_VERSION_MINOR) == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
 
-    if (PR_fprintf(fd, "\n[COMPONENTS]\n") == (PRUint32) -1) {
+    if (RTStrmPrintf(pStream, "\n[COMPONENTS]\n") == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
 
-    mAutoRegEntries.Enumerate(AutoRegEntryWriter, (void*)fd);
+    mAutoRegEntries.Enumerate(AutoRegEntryWriter, (void*)pStream);
 
     PersistentWriterArgs args;
-    args.mFD = fd;
+    args.mFD = pStream;
     args.mLoaderData = mLoaderData;
 
-    if (PR_fprintf(fd, "\n[CLASSIDS]\n") == (PRUint32) -1) {
+    if (RTStrmPrintf(pStream, "\n[CLASSIDS]\n") == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
@@ -1455,7 +1468,7 @@ nsComponentManagerImpl::WritePersistentRegistry()
 
     PL_DHashTableEnumerate(&mFactories, ClassIDWriter, (void*)&args);
 
-    if (PR_fprintf(fd, "\n[CONTRACTIDS]\n") == (PRUint32) -1) {
+    if (RTStrmPrintf(pStream, "\n[CONTRACTIDS]\n") == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
@@ -1463,7 +1476,7 @@ nsComponentManagerImpl::WritePersistentRegistry()
 
     PL_DHashTableEnumerate(&mContractIDs, ContractIDWriter, (void*)&args);
 
-    if (PR_fprintf(fd, "\n[CATEGORIES]\n") == (PRUint32) -1) {
+    if (RTStrmPrintf(pStream, "\n[CATEGORIES]\n") == -1) {
         rv = NS_ERROR_UNEXPECTED;
         goto out;
     }
@@ -1473,12 +1486,12 @@ nsComponentManagerImpl::WritePersistentRegistry()
         NS_WARNING("Could not access category manager.  Will not be able to save categories!");
         rv = NS_ERROR_UNEXPECTED;
     } else {
-        rv = mCategoryManager->WriteCategoryManagerToRegistry(fd);
+        rv = mCategoryManager->WriteCategoryManagerToRegistry(pStream);
     }
 
 out:
-    if (fd)
-        PR_Close(fd);
+    if (pStream)
+        RTStrmClose(pStream);
 
     // don't create the file is there was a problem????
     NS_ENSURE_SUCCESS(rv, rv);
@@ -1556,9 +1569,8 @@ nsComponentManagerImpl::LoadFactory(nsFactoryEntry *aEntry,
     nsresult rv;
     rv = aEntry->GetFactory(aFactory, this);
     if (NS_FAILED(rv)) {
-        PR_LOG(nsComponentManagerLog, PR_LOG_ERROR,
-               ("nsComponentManager: FAILED to load factory from %s (%s)\n",
-                (const char *)aEntry->mLocation, mLoaderData[aEntry->mTypeIndex].type));
+        Log(("nsComponentManager: FAILED to load factory from %s (%s)\n",
+             (const char *)aEntry->mLocation, mLoaderData[aEntry->mTypeIndex].type));
         return rv;
     }
 
@@ -1622,7 +1634,7 @@ nsresult
 nsComponentManagerImpl::FindFactory(const nsCID &aClass,
                                     nsIFactory **aFactory)
 {
-    PR_ASSERT(aFactory != nsnull);
+    Assert(aFactory != nsnull);
 
     nsFactoryEntry *entry = GetFactoryEntry(aClass);
 
@@ -1638,7 +1650,7 @@ nsComponentManagerImpl::FindFactory(const char *contractID,
                                     PRUint32 aContractIDLen,
                                     nsIFactory **aFactory)
 {
-    PR_ASSERT(aFactory != nsnull);
+    Assert(aFactory != nsnull);
 
     nsFactoryEntry *entry = GetFactoryEntry(contractID, aContractIDLen);
 
@@ -1658,30 +1670,15 @@ nsresult
 nsComponentManagerImpl::GetClassObject(const nsCID &aClass, const nsIID &aIID,
                                        void **aResult)
 {
-    nsresult rv;
+    LogFlow(("nsComponentManager: GetClassObject(%RTuuid)\n", &aClass));
+    Assert(aResult != nsnull);
 
     nsCOMPtr<nsIFactory> factory;
+    nsresult rv = FindFactory(aClass, getter_AddRefs(factory));
+    if (NS_SUCCEEDED(rv))
+        rv = factory->QueryInterface(aIID, aResult);
 
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_DEBUG))
-    {
-        char *buf = aClass.ToString();
-        PR_LogPrint("nsComponentManager: GetClassObject(%s)", buf);
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
-
-    PR_ASSERT(aResult != nsnull);
-
-    rv = FindFactory(aClass, getter_AddRefs(factory));
-    if (NS_FAILED(rv)) return rv;
-
-    rv = factory->QueryInterface(aIID, aResult);
-
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("\t\tGetClassObject() %s", NS_SUCCEEDED(rv) ? "succeeded" : "FAILED"));
-
+    Log(("nsComponentManager: GetClassObject(%RTuuid) returns %Rrv and %p\n", &aClass, rv, *aResult));
     return rv;
 }
 
@@ -1691,27 +1688,15 @@ nsComponentManagerImpl::GetClassObjectByContractID(const char *contractID,
                                                    const nsIID &aIID,
                                                    void **aResult)
 {
-    nsresult rv;
+    LogFlow(("nsComponentManager: GetClassObjectByContractID(%s, %RTuuid)\n", contractID, &aIID));
+    Assert(aResult != nsnull);
 
     nsCOMPtr<nsIFactory> factory;
+    nsresult rv = FindFactory(contractID, strlen(contractID), getter_AddRefs(factory));
+    if (NS_SUCCEEDED(rv))
+        rv = factory->QueryInterface(aIID, aResult);
 
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_DEBUG))
-    {
-        PR_LogPrint("nsComponentManager: GetClassObject(%s)", contractID);
-    }
-#endif
-
-    PR_ASSERT(aResult != nsnull);
-
-    rv = FindFactory(contractID, strlen(contractID), getter_AddRefs(factory));
-    if (NS_FAILED(rv)) return rv;
-
-    rv = factory->QueryInterface(aIID, aResult);
-
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("\t\tGetClassObject() %s", NS_SUCCEEDED(rv) ? "succeeded" : "FAILED"));
-
+    Log(("nsComponentManager: GetClassObjectByContractID(%s, %RTuuid) returns %Rrv and %p\n", contractID, &aIID, rv, *aResult));
     return rv;
 }
 
@@ -1738,19 +1723,10 @@ nsComponentManagerImpl::ContractIDToClassID(const char *aContractID, nsCID *aCla
     if (fe) {
         *aClass = fe->mCid;
         rv = NS_OK;
+        Log(("nsComponentManager: ContractIDToClassID(%s)->%RTuuid\n", aContractID, aClass));
     }
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING)) {
-        char *buf = 0;
-        if (NS_SUCCEEDED(rv))
-            buf = aClass->ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: ContractIDToClassID(%s)->%s", aContractID,
-                NS_SUCCEEDED(rv) ? buf : "[FAILED]"));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
+    else
+        Log(("nsComponentManager: ContractIDToClassID(%s)->NS_ERROR_FACTORY_NOT_REGISTERED\n", aContractID));
     return rv;
 }
 
@@ -1768,20 +1744,9 @@ nsComponentManagerImpl::CLSIDToContractID(const nsCID &aClass,
                                           char* *aContractID)
 {
     NS_WARNING("Need to implement CLSIDToContractID");
-
-    nsresult rv = NS_ERROR_FACTORY_NOT_REGISTERED;
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: CLSIDToContractID(%s)->%s", buf,
-                NS_SUCCEEDED(rv) ? *aContractID : "[FAILED]"));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
-    return rv;
+    Log(("nsComponentManager: CLSIDToContractID(%RTuuid)->NS_ERROR_FACTORY_NOT_REGISTERED\n", aClass));
+    RT_NOREF(aClass, aClassName, aContractID);
+    return NS_ERROR_FACTORY_NOT_REGISTERED;
 }
 
 #ifdef XPCOM_CHECK_PENDING_CIDS
@@ -1817,7 +1782,9 @@ nsComponentManagerImpl::RemovePendingCID(const nsCID &aClass)
 {
     mPendingCIDs.RemoveElement((void*)&aClass);
 }
+
 #endif
+
 /**
  * CreateInstance()
  *
@@ -1847,13 +1814,11 @@ nsComponentManagerImpl::CreateInstance(const nsCID &aClass,
     }
 
     if (aResult == nsnull)
-    {
         return NS_ERROR_NULL_POINTER;
-    }
+
     *aResult = nsnull;
 
     nsFactoryEntry *entry = GetFactoryEntry(aClass);
-
     if (!entry)
         return NS_ERROR_FACTORY_NOT_REGISTERED;
 
@@ -1870,7 +1835,6 @@ nsComponentManagerImpl::CreateInstance(const nsCID &aClass,
 
     nsIFactory *factory = nsnull;
     nsresult rv = entry->GetFactory(&factory, this);
-
     if (NS_SUCCEEDED(rv))
     {
         rv = factory->CreateInstance(aDelegate, aIID, aResult);
@@ -1882,18 +1846,7 @@ nsComponentManagerImpl::CreateInstance(const nsCID &aClass,
         rv = NS_ERROR_FACTORY_NOT_REGISTERED;
     }
 
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: CreateInstance(%s) %s", buf,
-                NS_SUCCEEDED(rv) ? "succeeded" : "FAILED"));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
-
+    Log(("nsComponentManager: CreateInstance(%RTuuid,,%RTuuid) %Rhrc & %p\n", &aClass, &aIID, rv, aResult));
     return rv;
 }
 
@@ -1954,20 +1907,17 @@ nsComponentManagerImpl::CreateInstanceByContractID(const char *aContractID,
 
     if (NS_SUCCEEDED(rv))
     {
-
         rv = factory->CreateInstance(aDelegate, aIID, aResult);
         NS_RELEASE(factory);
     }
     else
     {
         // Translate error values
-        rv = NS_ERROR_FACTORY_NOT_REGISTERED;
+        if (rv != NS_ERROR_SOCKET_FAIL)
+            rv = NS_ERROR_FACTORY_NOT_REGISTERED;
     }
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("nsComponentManager: CreateInstanceByContractID(%s) %s", aContractID,
-            NS_SUCCEEDED(rv) ? "succeeded" : "FAILED"));
-
+    Log(("nsComponentManager: CreateInstanceByContractID(%s) %Rhrc and %p\n", aContractID, rv, *aResult));
     return rv;
 }
 
@@ -2375,7 +2325,7 @@ nsComponentManagerImpl::GetServiceByContractID(const char* aContractID,
 
     mon.Enter();
 
-#ifdef XPCOM_CHECK_PENDING_CIDS 
+#ifdef XPCOM_CHECK_PENDING_CIDS
     if (entry)
         RemovePendingCID(entry->mCid);
 #endif
@@ -2464,11 +2414,6 @@ MakeRegistryName(const char *aDllName, const char *prefix, char **regName)
     registryName[registryNameLen] = '\0';
     *regName = registryName;
 
-#ifdef DEBUG_shaver_off
-    fprintf(stderr, "MakeRegistryName(%s, %s, &[%s])\n",
-            aDllName, prefix, *regName);
-#endif
-
     return NS_OK;
 }
 
@@ -2482,7 +2427,7 @@ nsComponentManagerImpl::RegistryLocationForSpec(nsIFile *aSpec,
         return NS_ERROR_NOT_INITIALIZED;
 
     if (!aSpec) {
-        *aRegistryName = PL_strdup("");
+        *aRegistryName = RTStrDup("");
         return NS_OK;
     }
 
@@ -2603,36 +2548,23 @@ nsComponentManagerImpl::RegisterFactory(const nsCID &aClass,
                                         PRBool aReplace)
 {
     nsAutoMonitor mon(mMon);
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: RegisterFactory(%s, %s)", buf,
-                (aContractID ? aContractID : "(null)")));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
+    Log(("nsComponentManager: RegisterFactory(%RTuuid, %s)\n", &aClass, aContractID));
     nsFactoryEntry *entry = nsnull;
     nsFactoryTableEntry* factoryTableEntry = NS_STATIC_CAST(nsFactoryTableEntry*,
                                                             PL_DHashTableOperate(&mFactories,
                                                                                  &aClass,
                                                                                  PL_DHASH_ADD));
-
     if (!factoryTableEntry)
         return NS_ERROR_OUT_OF_MEMORY;
 
 
-    if (PL_DHASH_ENTRY_IS_BUSY(factoryTableEntry)) {
+    if (PL_DHASH_ENTRY_IS_BUSY(factoryTableEntry))
         entry = factoryTableEntry->mFactoryEntry;
-    }
 
     if (entry && !aReplace)
     {
         // Already registered
-        PR_LOG(nsComponentManagerLog, PR_LOG_ERROR,
-               ("\t\tFactory already registered."));
+        LogFunc(("Factory already registered.\n"));
         return NS_ERROR_FACTORY_EXISTS;
     }
 
@@ -2642,9 +2574,9 @@ nsComponentManagerImpl::RegisterFactory(const nsCID &aClass,
         return NS_ERROR_OUT_OF_MEMORY;
 
     entry = new (mem) nsFactoryEntry(aClass, aFactory, entry);
-
-    if (!entry)
-        return NS_ERROR_OUT_OF_MEMORY;
+    /* The following will never be true as we pass an already allocated memory buffer into new. */
+    //if (!entry)
+    //    return NS_ERROR_OUT_OF_MEMORY;
 
     factoryTableEntry->mFactoryEntry = entry;
 
@@ -2652,17 +2584,12 @@ nsComponentManagerImpl::RegisterFactory(const nsCID &aClass,
     if (aContractID) {
         nsresult rv = HashContractID(aContractID, strlen(aContractID), entry);
         if (NS_FAILED(rv)) {
-            PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-                   ("\t\tFactory register succeeded. "
-                    "Hashing contractid (%s) FAILED.", aContractID));
+            LogFunc(("Factory register succeeded. Hashing contractid (%s) FAILED.\n", aContractID));
             return rv;
         }
     }
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("\t\tFactory register succeeded contractid=%s.",
-            aContractID ? aContractID : "<none>"));
-
+    LogFunc(("Factory register succeeded contractid=%s.\n", aContractID));
     return NS_OK;
 }
 
@@ -2766,23 +2693,9 @@ nsComponentManagerImpl::RegisterComponentCommon(const nsCID &aClass,
 
     // Normalize proid and classname
     const char *contractID = (aContractID && *aContractID) ? aContractID : nsnull;
-    const char *className = (aClassName && *aClassName) ? aClassName : nsnull;
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: RegisterComponentCommon(%s, %s, %s, %s)",
-                buf,
-                contractID ? contractID : "(null)",
-                aRegistryName, aType));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
+    Log(("nsComponentManager: RegisterComponentCommon(%RTuuid, %s, %s, %s)\n", &aClass, contractID, aRegistryName, aType));
     if (entry && !aReplace) {
-        PR_LOG(nsComponentManagerLog, PR_LOG_ERROR,
-               ("\t\tFactory already registered."));
+        LogFunc(("Factory already registered.\n"));
         return NS_ERROR_FACTORY_EXISTS;
     }
 
@@ -2791,8 +2704,7 @@ nsComponentManagerImpl::RegisterComponentCommon(const nsCID &aClass,
     nsCOMPtr<nsIComponentLoader> loader;
     nsresult rv = GetLoaderForType(typeIndex, getter_AddRefs(loader));
     if (NS_FAILED(rv)) {
-        PR_LOG(nsComponentManagerLog, PR_LOG_ERROR,
-               ("\t\tgetting loader for %s FAILED\n", aType));
+        LogFunc(("getting loader for %s FAILED\n", aType));
         return rv;
     }
 
@@ -2811,8 +2723,9 @@ nsComponentManagerImpl::RegisterComponentCommon(const nsCID &aClass,
         entry = new (mem) nsFactoryEntry(aClass,
                                          aRegistryName, aRegistryNameLen,
                                          typeIndex);
-        if (!entry)
-            return NS_ERROR_OUT_OF_MEMORY;
+        /* The following will never be true as we pass an already allocated memory buffer into new. */
+        //if (!entry)
+        //    return NS_ERROR_OUT_OF_MEMORY;
 
         nsFactoryTableEntry* factoryTableEntry =
             NS_STATIC_CAST(nsFactoryTableEntry*,
@@ -2829,8 +2742,7 @@ nsComponentManagerImpl::RegisterComponentCommon(const nsCID &aClass,
     if (contractID) {
         rv = HashContractID(contractID, aContractIDLen, entry);
         if (NS_FAILED(rv)) {
-            PR_LOG(nsComponentManagerLog, PR_LOG_ERROR,
-                   ("\t\tHashContractID(%s) FAILED\n", contractID));
+            LogFunc(("HashContractID(%s) FAILED\n", contractID));
             return rv;
         }
     }
@@ -2915,7 +2827,7 @@ nsComponentManagerImpl::AddLoaderType(const char *typeStr, int *aTypeIndex)
     }
 
     typeIndex = mNLoaderData;
-    mLoaderData[typeIndex].type = PL_strdup(typeStr);
+    mLoaderData[typeIndex].type = RTStrDup(typeStr);
     if (!mLoaderData[typeIndex].type) {
         // mmh! no memory. return failure.
         return NS_ERROR_OUT_OF_MEMORY;
@@ -2949,7 +2861,7 @@ DeleteFoundCIDs(PLDHashTable *aTable,
 
     nsFactoryEntry* factoryEntry = entry->mFactoryEntry;
     if (data->cid->Equals(factoryEntry->mCid) &&
-        ((data->regName && !PL_strcasecmp(factoryEntry->mLocation, data->regName)) ||
+        ((data->regName && !RTStrICmp(factoryEntry->mLocation, data->regName)) ||
          (data->factory && data->factory == factoryEntry->mFactory.get())))
         return PL_DHASH_REMOVE;
 
@@ -2981,16 +2893,7 @@ nsresult
 nsComponentManagerImpl::UnregisterFactory(const nsCID &aClass,
                                           nsIFactory *aFactory)
 {
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: UnregisterFactory(%s)", buf));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
+    Log(("nsComponentManager: UnregisterFactory(%RTuuid)\n", &aClass));
     nsFactoryEntry *old;
 
     // first delete all contract id entries that are registered with this cid.
@@ -3007,9 +2910,7 @@ nsComponentManagerImpl::UnregisterFactory(const nsCID &aClass,
         rv = NS_OK;
     }
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("\t\tUnregisterFactory() %s",
-            NS_SUCCEEDED(rv) ? "succeeded" : "FAILED"));
+    LogFunc(("returns %Rhrc\n", rv));
     return rv;
 }
 
@@ -3017,17 +2918,7 @@ nsresult
 nsComponentManagerImpl::UnregisterComponent(const nsCID &aClass,
                                             const char *registryName)
 {
-#ifdef PR_LOGGING
-    if (PR_LOG_TEST(nsComponentManagerLog, PR_LOG_WARNING))
-    {
-        char *buf = aClass.ToString();
-        PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-               ("nsComponentManager: UnregisterComponent(%s)", buf));
-        if (buf)
-            PR_Free(buf);
-    }
-#endif
-
+    Log(("nsComponentManager: UnregisterComponent(%RTuuid)\n", &aClass));
     NS_ENSURE_ARG_POINTER(registryName);
     nsFactoryEntry *old;
 
@@ -3036,15 +2927,13 @@ nsComponentManagerImpl::UnregisterComponent(const nsCID &aClass,
 
     // next check to see if there is a CID registered
     old = GetFactoryEntry(aClass);
-    if (old && old->mLocation && !PL_strcasecmp(old->mLocation, registryName))
+    if (old && old->mLocation && !RTStrICmp(old->mLocation, registryName))
     {
         nsAutoMonitor mon(mMon);
         PL_DHashTableOperate(&mFactories, &aClass, PL_DHASH_REMOVE);
     }
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("nsComponentManager: Factory unregister(%s) succeeded.", registryName));
-
+    Log(("nsComponentManager: Factory unregister(%s) succeeded.\n", registryName));
     return NS_OK;
 }
 
@@ -3073,8 +2962,7 @@ nsComponentManagerImpl::UnloadLibraries(nsIServiceManager *serviceMgr, PRInt32 a
 
     nsAutoMonitor mon(mMon);
 
-    PR_LOG(nsComponentManagerLog, PR_LOG_WARNING,
-           ("nsComponentManager: Unloading Libraries."));
+    Log(("nsComponentManager: Unloading Libraries.\n"));
 
     // UnloadAll the loaders
     /* iterate over all known loaders and ask them to autoregister. */
@@ -3113,6 +3001,7 @@ nsComponentManagerImpl::UnloadLibraries(nsIServiceManager *serviceMgr, PRInt32 a
 nsresult
 nsComponentManagerImpl::AutoRegister(PRInt32 when, nsIFile *inDirSpec)
 {
+    LogFlowFunc(("when=%#x inDirSpec=%p\n", when, inDirSpec));
     return AutoRegisterImpl(when, inDirSpec);
 }
 
@@ -3370,6 +3259,7 @@ nsComponentManagerImpl::EnumerateContractIDs(nsIEnumerator** aEnumerator)
 NS_IMETHODIMP
 nsComponentManagerImpl::AutoRegister(nsIFile *aSpec)
 {
+    LogFlowFunc(("aSpec=%p\n", aSpec));
     if (aSpec == nsnull)
         return AutoRegisterImpl(0, aSpec);
 
@@ -3550,7 +3440,10 @@ nsComponentManagerImpl::HasFileChanged(nsIFile *file, const char *loaderString, 
     nsXPIDLCString registryName;
     nsresult rv = RegistryLocationForSpec(file, getter_Copies(registryName));
     if (NS_FAILED(rv))
+    {
+        Log(("nsComponentManagerImpl::HasFileChanged: failed rv=%#x\n", rv));
         return rv;
+    }
 
     nsCStringKey key(registryName);
     AutoRegEntry* entry = (AutoRegEntry*)mAutoRegEntries.Get(&key);
@@ -3684,7 +3577,7 @@ NS_GetGlobalComponentManager(nsIComponentManager* *result)
     if (nsComponentManagerImpl::gComponentManager == nsnull)
     {
         // XPCOM needs initialization.
-        rv = NS_InitXPCOM2(nsnull, nsnull, nsnull);
+        rv = NS_InitXPCOM2Ex(nsnull, nsnull, nsnull, 0);
     }
 
     if (NS_SUCCEEDED(rv))
@@ -3704,7 +3597,7 @@ NS_GetComponentManager(nsIComponentManager* *result)
     if (nsComponentManagerImpl::gComponentManager == nsnull)
     {
         // XPCOM needs initialization.
-        nsresult rv = NS_InitXPCOM2(nsnull, nsnull, nsnull);
+        nsresult rv = NS_InitXPCOM2Ex(nsnull, nsnull, nsnull, 0);
         if (NS_FAILED(rv))
             return rv;
     }
@@ -3722,8 +3615,21 @@ NS_GetServiceManager(nsIServiceManager* *result)
 
     if (nsComponentManagerImpl::gComponentManager == nsnull)
     {
+#ifdef VBOX
+        // While XPCOM might need initialization, we're not in a position
+        // to pass the right values to this call. This is actually triggered
+        // on object destruction, so there is no point in re-initializing,
+        // and actually the attempt would lead to nested calls to
+        // xptiInterfaceInfoManager::BuildFileSearchPath, which it detects
+        // as unsafe in debug builds. Just fail, no real problem.
+# ifdef DEBUG
+        printf("NS_GetServiceManager: no current instance, suppressed XPCOM initialization!\n");
+# endif
+        rv = NS_ERROR_SERVICE_NOT_AVAILABLE;
+#else /* !VBOX */
         // XPCOM needs initialization.
-        rv = NS_InitXPCOM2(nsnull, nsnull, nsnull);
+        rv = NS_InitXPCOM2Ex(nsnull, nsnull, nsnull, 0);
+#endif /* !VBOX */
     }
 
     if (NS_FAILED(rv))
@@ -3744,7 +3650,7 @@ NS_GetComponentRegistrar(nsIComponentRegistrar* *result)
     if (nsComponentManagerImpl::gComponentManager == nsnull)
     {
         // XPCOM needs initialization.
-        rv = NS_InitXPCOM2(nsnull, nsnull, nsnull);
+        rv = NS_InitXPCOM2Ex(nsnull, nsnull, nsnull, 0);
     }
 
     if (NS_FAILED(rv))
@@ -3767,7 +3673,7 @@ NS_GetComponentLoaderManager(nsIComponentLoaderManager* *result)
     if (nsComponentManagerImpl::gComponentManager == NULL)
     {
         // XPCOM needs initialization.
-        rv = NS_InitXPCOM2(nsnull, nsnull, nsnull);
+        rv = NS_InitXPCOM2Ex(nsnull, nsnull, nsnull, 0);
     }
 
     if (NS_FAILED(rv))

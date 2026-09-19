@@ -1,61 +1,86 @@
-/* $Id: dir-posix.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: dir-posix.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Directory manipulation, POSIX.
+ * IPRT - Directory manipulation, POSIX.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_DIR
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <stdio.h>
 
 #include <iprt/dir.h>
-#include <iprt/path.h>
-#include <iprt/alloc.h>
+#include "internal/iprt.h"
+
 #include <iprt/alloca.h>
-#include <iprt/string.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/err.h>
 #include <iprt/log.h>
+#include <iprt/mem.h>
+#include <iprt/param.h>
+#include <iprt/path.h>
+#include <iprt/string.h>
 #include "internal/dir.h"
 #include "internal/fs.h"
 #include "internal/path.h"
+
+#if !defined(RT_OS_SOLARIS) && !defined(RT_OS_HAIKU)
+# define HAVE_DIRENT_D_TYPE 1
+#endif
 
 
 RTDECL(bool) RTDirExists(const char *pszPath)
 {
     bool fRc = false;
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
     if (RT_SUCCESS(rc))
     {
         struct stat s;
         fRc = !stat(pszNativePath, &s)
             && S_ISDIR(s.st_mode);
 
-        rtPathFreeNative(pszNativePath);
+        rtPathFreeNative(pszNativePath, pszPath);
     }
 
     LogFlow(("RTDirExists(%p={%s}): returns %RTbool\n", pszPath, pszPath, fRc));
@@ -63,21 +88,55 @@ RTDECL(bool) RTDirExists(const char *pszPath)
 }
 
 
-RTDECL(int) RTDirCreate(const char *pszPath, RTFMODE fMode)
+RTDECL(int) RTDirCreate(const char *pszPath, RTFMODE fMode, uint32_t fCreate)
 {
+    RT_NOREF_PV(fCreate);
+
     int rc;
-    fMode = rtFsModeNormalize(fMode, pszPath, 0);
+    fMode = rtFsModeNormalize(fMode, pszPath, 0, RTFS_TYPE_DIRECTORY);
     if (rtFsModeIsValidPermissions(fMode))
     {
-        char *pszNativePath;
-        rc = rtPathToNative(&pszNativePath, pszPath);
+        char const *pszNativePath;
+        rc = rtPathToNative(&pszNativePath, pszPath, NULL);
         if (RT_SUCCESS(rc))
         {
-            if (mkdir(pszNativePath, fMode & RTFS_UNIX_MASK))
-                rc = RTErrConvertFromErrno(errno);
+            struct stat st;
+            if (mkdir(pszNativePath, fMode & RTFS_UNIX_MASK) == 0)
+            {
+                /* If requested, we try make use the permission bits are set
+                   correctly when asked.  For now, we'll just ignore errors here. */
+                if (fCreate & RTDIRCREATE_FLAGS_IGNORE_UMASK)
+                {
+                    if (   stat(pszNativePath, &st)
+                        || (st.st_mode & 07777u) != (fMode & 07777u) )
+                        chmod(pszNativePath, fMode & RTFS_UNIX_MASK);
+                }
+                rc = VINF_SUCCESS;
+            }
+            else
+            {
+                rc = errno;
+                /*
+                 * Solaris mkdir returns ENOSYS on autofs directories, and also
+                 * did this apparently for NFS mount points in some Nevada
+                 * development builds. It also returned EACCES when it should
+                 * have returned EEXIST, which actually is within the POSIX
+                 * spec (not that I like this interpretation, but it seems
+                 * valid). Check ourselves.
+                 */
+                if (    rc == ENOSYS
+                    ||  rc == EACCES)
+                {
+                    rc = RTErrConvertFromErrno(rc);
+                    if (!stat(pszNativePath, &st))
+                        rc = VERR_ALREADY_EXISTS;
+                }
+                else
+                    rc = RTErrConvertFromErrno(rc);
+            }
         }
 
-        rtPathFreeNative(pszNativePath);
+        rtPathFreeNative(pszNativePath, pszPath);
     }
     else
     {
@@ -91,14 +150,52 @@ RTDECL(int) RTDirCreate(const char *pszPath, RTFMODE fMode)
 
 RTDECL(int) RTDirRemove(const char *pszPath)
 {
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
     if (RT_SUCCESS(rc))
     {
         if (rmdir(pszNativePath))
-            rc = RTErrConvertFromErrno(errno);
+        {
+            rc = errno;
+            if (rc == EEXIST) /* Solaris returns this, the rest have ENOTEMPTY. */
+                rc = VERR_DIR_NOT_EMPTY;
+            else if (rc != ENOTDIR)
+                rc = RTErrConvertFromErrno(rc);
+            else
+            {
+                /*
+                 * This may be a valid path-not-found or it may be a non-directory in
+                 * the final component.  FsPerf want us to distinguish between the two,
+                 * and trailing slash shouldn't matter because it doesn't on windows...
+                 */
+                char       *pszFree = NULL;
+                const char *pszStat = pszNativePath;
+                size_t      cch     = strlen(pszNativePath);
+                if (cch > 2 && RTPATH_IS_SLASH(pszNativePath[cch - 1]))
+                {
+                    pszFree = (char *)RTMemTmpAlloc(cch);
+                    if (pszFree)
+                    {
+                        memcpy(pszFree, pszNativePath, cch);
+                        do
+                            pszFree[--cch] = '\0';
+                        while (cch > 2 && RTPATH_IS_SLASH(pszFree[cch - 1]));
+                        pszStat = pszFree;
+                    }
+                }
 
-        rtPathFreeNative(pszNativePath);
+                struct stat st;
+                if (!stat(pszStat, &st) && !S_ISDIR(st.st_mode))
+                    rc = VERR_NOT_A_DIRECTORY;
+                else
+                    rc = VERR_PATH_NOT_FOUND;
+
+                if (pszFree)
+                    RTMemTmpFree(pszFree);
+            }
+        }
+
+        rtPathFreeNative(pszNativePath, pszPath);
     }
 
     LogFlow(("RTDirRemove(%p={%s}): returns %Rrc\n", pszPath, pszPath, rc));
@@ -106,36 +203,188 @@ RTDECL(int) RTDirRemove(const char *pszPath)
 }
 
 
-int rtOpenDirNative(PRTDIR pDir, char *pszPathBuf)
+RTDECL(int) RTDirFlush(const char *pszPath)
 {
     /*
-     * Convert to a native path and try opendir.
+     * Linux: The fsync() man page hints at this being required for ensuring
+     * consistency between directory and file in case of a crash.
+     *
+     * Solaris: No mentioned is made of directories on the fsync man page.
+     * While rename+fsync will do what we want on ZFS, the code needs more
+     * careful studying wrt whether the directory entry of a new file is
+     * implicitly synced when the file is synced (it's very likely for ZFS).
+     *
+     * FreeBSD: The FFS fsync code seems to flush the directory entry as well
+     * in some cases.  Don't know exactly what's up with rename, but from the
+     * look of things fsync(dir) should work.
      */
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pDir->pszPath);
-    if (RT_SUCCESS(rc))
+    int rc;
+#ifdef O_DIRECTORY
+    int fd = open(pszPath, O_RDONLY | O_DIRECTORY, 0);
+#else
+    int fd = open(pszPath, O_RDONLY, 0);
+#endif
+    if (fd >= 0)
     {
-        pDir->pDir = opendir(pszNativePath);
-        if (pDir->pDir)
-        {
-            /*
-             * Init data.
-             */
-            pDir->fDataUnread = false;
-            memset(&pDir->Data, 0, sizeof(pDir->Data)); /* not strictly necessary */
-        }
+        if (fsync(fd) == 0)
+            rc = VINF_SUCCESS;
         else
-            rc = RTErrConvertFromErrno(errno);
-
-        rtPathFreeNative(pszNativePath);
+        {
+            /* Linux fsync(2) man page documents both errors as an indication
+             * that the file descriptor can't be flushed (seen EINVAL for usual
+             * directories on CIFS). BSD (OS X) fsync(2) documents only the
+             * latter, and Solaris fsync(3C) pretends there is no problem. */
+            if (errno == EROFS || errno == EINVAL)
+                rc = VERR_NOT_SUPPORTED;
+            else
+                rc = RTErrConvertFromErrno(errno);
+        }
+        close(fd);
     }
-
+    else
+        rc = RTErrConvertFromErrno(errno);
     return rc;
 }
 
 
-RTDECL(int) RTDirClose(PRTDIR pDir)
+size_t rtDirNativeGetStructSize(const char *pszPath)
 {
+    long cbNameMax = pathconf(pszPath, _PC_NAME_MAX);
+# ifdef NAME_MAX
+    if (cbNameMax < NAME_MAX)           /* This is plain paranoia, but it doesn't hurt. */
+        cbNameMax = NAME_MAX;
+# endif
+# ifdef _XOPEN_NAME_MAX
+    if (cbNameMax < _XOPEN_NAME_MAX)    /* Ditto. */
+        cbNameMax = _XOPEN_NAME_MAX;
+# endif
+    size_t cbDir = RT_UOFFSETOF_DYN(RTDIRINTERNAL, Data.d_name[cbNameMax + 1]);
+    if (cbDir < sizeof(RTDIRINTERNAL))  /* Ditto. */
+        cbDir = sizeof(RTDIRINTERNAL);
+    cbDir = RT_ALIGN_Z(cbDir, 8);
+
+    return cbDir;
+}
+
+
+int rtDirNativeOpen(PRTDIRINTERNAL pDir, uintptr_t hRelativeDir, void *pvNativeRelative)
+{
+    NOREF(hRelativeDir);
+    NOREF(pvNativeRelative);
+
+    /*
+     * Convert to a native path and try opendir.
+     */
+    char       *pszSlash = NULL;
+    char const *pszNativePath;
+    int         rc;
+    if (   !(pDir->fFlags & RTDIR_F_NO_FOLLOW)
+        || pDir->fDirSlash
+        || pDir->cchPath <= 1)
+        rc = rtPathToNative(&pszNativePath, pDir->pszPath, NULL);
+    else
+    {
+        pszSlash = (char *)&pDir->pszPath[pDir->cchPath - 1];
+        *pszSlash = '\0';
+        rc = rtPathToNative(&pszNativePath, pDir->pszPath, NULL);
+    }
+    if (RT_SUCCESS(rc))
+    {
+        if (   !(pDir->fFlags & RTDIR_F_NO_FOLLOW)
+            || pDir->fDirSlash)
+            pDir->pDir = opendir(pszNativePath);
+        else
+        {
+            /*
+             * If we can get fdopendir() and have both O_NOFOLLOW and O_DIRECTORY,
+             * we will use open() to safely open the directory without following
+             * symlinks in the final component, and then use fdopendir to get a DIR
+             * from the file descriptor.
+             *
+             * If we cannot get that, we will use lstat() + opendir() as a fallback.
+             *
+             * We ASSUME that support for the O_NOFOLLOW and O_DIRECTORY flags is
+             * older than fdopendir().
+             */
+#if defined(O_NOFOLLOW) && defined(O_DIRECTORY)
+            /* Need to resolve fdopendir dynamically. */
+            typedef DIR * (*PFNFDOPENDIR)(int);
+            static PFNFDOPENDIR  s_pfnFdOpenDir = NULL;
+            static bool volatile s_fInitalized = false;
+
+            PFNFDOPENDIR pfnFdOpenDir = s_pfnFdOpenDir;
+            ASMCompilerBarrier();
+            if (s_fInitalized)
+            { /* likely */ }
+            else
+            {
+                pfnFdOpenDir = (PFNFDOPENDIR)(uintptr_t)dlsym(RTLD_DEFAULT, "fdopendir");
+                s_pfnFdOpenDir = pfnFdOpenDir;
+                ASMAtomicWriteBool(&s_fInitalized, true);
+            }
+
+            if (pfnFdOpenDir)
+            {
+                int fd = open(pszNativePath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+                if (fd >= 0)
+                {
+                    pDir->pDir = pfnFdOpenDir(fd);
+                    if (RT_UNLIKELY(!pDir->pDir))
+                    {
+                        rc = RTErrConvertFromErrno(errno);
+                        close(fd);
+                    }
+                }
+                else
+                {
+                    /* WSL returns ELOOP here, but we take no chances that O_NOFOLLOW
+                       takes precedence over O_DIRECTORY everywhere. */
+                    int iErr = errno;
+                    if (iErr == ELOOP || iErr == ENOTDIR)
+                    {
+                        struct stat St;
+                        if (   lstat(pszNativePath, &St) == 0
+                            && S_ISLNK(St.st_mode))
+                            rc = VERR_IS_A_SYMLINK;
+                        else
+                            rc = RTErrConvertFromErrno(iErr);
+                    }
+                }
+            }
+            else
+#endif
+            {
+                /* Fallback.  This contains a race condition. */
+                struct stat St;
+                if (   lstat(pszNativePath, &St) != 0
+                    || !S_ISLNK(St.st_mode))
+                    pDir->pDir = opendir(pszNativePath);
+                else
+                    rc = VERR_IS_A_SYMLINK;
+            }
+        }
+        if (pDir->pDir)
+        {
+            /*
+             * Init data (allocated as all zeros).
+             */
+            pDir->fDataUnread = false; /* spelling it out */
+        }
+        else if (RT_SUCCESS_NP(rc))
+            rc = RTErrConvertFromErrno(errno);
+
+        rtPathFreeNative(pszNativePath, pDir->pszPath);
+    }
+    if (pszSlash)
+        *pszSlash = RTPATH_SLASH;
+    return rc;
+}
+
+
+RTDECL(int) RTDirClose(RTDIR hDir)
+{
+    PRTDIRINTERNAL pDir = hDir;
+
     /*
      * Validate input.
      */
@@ -170,7 +419,7 @@ RTDECL(int) RTDirClose(PRTDIR pDir)
  * @returns IPRT status code.
  * @param   pDir        the open directory. Fully validated.
  */
-static int rtDirReadMore(PRTDIR pDir)
+static int rtDirReadMore(PRTDIRINTERNAL pDir)
 {
     /** @todo try avoid the rematching on buffer overflow errors. */
     for (;;)
@@ -181,24 +430,38 @@ static int rtDirReadMore(PRTDIR pDir)
         if (!pDir->fDataUnread)
         {
             struct dirent *pResult = NULL;
+#if RT_CLANG_PREREQ(3, 4) /* Needs to come first because clang also triggers on RT_GNUC_PREREQ() but doesn't work there. */
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif RT_GNUC_PREREQ(4, 6)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
             int rc = readdir_r(pDir->pDir, &pDir->Data, &pResult);
+#if RT_CLANG_PREREQ(3, 4)
+# pragma clang diagnostic pop
+#elif RT_GNUC_PREREQ(4, 6)
+# pragma GCC diagnostic pop
+#endif
             if (rc)
             {
                 rc = RTErrConvertFromErrno(rc);
-                AssertRC(rc);
+                /** @todo Consider translating ENOENT (The current
+                 *        position of the directory stream is invalid)
+                 *        differently. */
+                AssertMsg(rc == VERR_FILE_NOT_FOUND, ("%Rrc\n", rc));
                 return rc;
             }
             if (!pResult)
                 return VERR_NO_MORE_FILES;
         }
 
-#ifndef RT_DONT_CONVERT_FILENAMES
         /*
          * Convert the filename to UTF-8.
          */
         if (!pDir->pszName)
         {
-            int rc = rtPathFromNativeEx(&pDir->pszName, pDir->Data.d_name, pDir->pszPath);
+            int rc = rtPathFromNative(&pDir->pszName, pDir->Data.d_name, pDir->pszPath);
             if (RT_FAILURE(rc))
             {
                 pDir->pszName = NULL;
@@ -209,13 +472,8 @@ static int rtDirReadMore(PRTDIR pDir)
         if (    !pDir->pfnFilter
             ||  pDir->pfnFilter(pDir, pDir->pszName))
             break;
-        RTStrFree(pDir->pszName);
-        pDir->pszName = NULL;
-#else
-        if (   !pDir->pfnFilter
-            || pDir->pfnFilter(pDir, pDir->Data.d_name))
-            break;
-#endif
+        rtPathFreeIprt(pDir->pszName, pDir->Data.d_name);
+        pDir->pszName     = NULL;
         pDir->fDataUnread = false;
     }
 
@@ -224,6 +482,7 @@ static int rtDirReadMore(PRTDIR pDir)
 }
 
 
+#ifdef HAVE_DIRENT_D_TYPE
 /**
  * Converts the d_type field to IPRT directory entry type.
  *
@@ -248,24 +507,27 @@ static RTDIRENTRYTYPE rtDirType(int iType)
             return RTDIRENTRYTYPE_UNKNOWN;
     }
 }
+#endif /*HAVE_DIRENT_D_TYPE */
 
 
-RTDECL(int) RTDirRead(PRTDIR pDir, PRTDIRENTRY pDirEntry, unsigned *pcbDirEntry)
+RTDECL(int) RTDirRead(RTDIR hDir, PRTDIRENTRY pDirEntry, size_t *pcbDirEntry)
 {
+    PRTDIRINTERNAL pDir = hDir;
+
     /*
      * Validate and digest input.
      */
     if (!rtDirValidHandle(pDir))
         return VERR_INVALID_PARAMETER;
-    AssertMsgReturn(VALID_PTR(pDirEntry), ("%p\n", pDirEntry), VERR_INVALID_POINTER);
+    AssertPtrReturn(pDirEntry, VERR_INVALID_POINTER);
 
-    unsigned cbDirEntry = sizeof(*pDirEntry);
+    size_t cbDirEntry = sizeof(*pDirEntry);
     if (pcbDirEntry)
     {
-        AssertMsgReturn(VALID_PTR(pcbDirEntry), ("%p\n", pcbDirEntry), VERR_INVALID_POINTER);
+        AssertPtrReturn(pcbDirEntry, VERR_INVALID_POINTER);
         cbDirEntry = *pcbDirEntry;
-        AssertMsgReturn(cbDirEntry >= (unsigned)RT_OFFSETOF(RTDIRENTRY, szName[2]),
-                        ("Invalid *pcbDirEntry=%d (min %d)\n", *pcbDirEntry, RT_OFFSETOF(RTDIRENTRYEX, szName[2])),
+        AssertMsgReturn(cbDirEntry >= RT_UOFFSETOF(RTDIRENTRY, szName[2]),
+                        ("Invalid *pcbDirEntry=%d (min %zu)\n", *pcbDirEntry, RT_UOFFSETOF(RTDIRENTRYEX, szName[2])),
                         VERR_INVALID_PARAMETER);
     }
 
@@ -278,14 +540,9 @@ RTDECL(int) RTDirRead(PRTDIR pDir, PRTDIRENTRY pDirEntry, unsigned *pcbDirEntry)
         /*
          * Check if we've got enough space to return the data.
          */
-#ifdef RT_DONT_CONVERT_FILENAMES
-        const char  *pszName    = pDir->Data.d_name;
-        const size_t cchName    = strlen(pszName);
-#else
         const char  *pszName    = pDir->pszName;
         const size_t cchName    = pDir->cchName;
-#endif
-        const size_t cbRequired = RT_OFFSETOF(RTDIRENTRY, szName[1]) + cchName;
+        const size_t cbRequired = RT_UOFFSETOF(RTDIRENTRY, szName[1]) + cchName;
         if (pcbDirEntry)
             *pcbDirEntry = cbRequired;
         if (cbRequired <= cbDirEntry)
@@ -294,17 +551,19 @@ RTDECL(int) RTDirRead(PRTDIR pDir, PRTDIRENTRY pDirEntry, unsigned *pcbDirEntry)
              * Setup the returned data.
              */
             pDirEntry->INodeId = pDir->Data.d_ino; /* may need #ifdefing later */
+#ifdef HAVE_DIRENT_D_TYPE
             pDirEntry->enmType = rtDirType(pDir->Data.d_type);
+#else
+            pDirEntry->enmType = RTDIRENTRYTYPE_UNKNOWN;
+#endif
             pDirEntry->cbName  = (uint16_t)cchName;
             Assert(pDirEntry->cbName == cchName);
             memcpy(pDirEntry->szName, pszName, cchName + 1);
 
             /* free cached data */
             pDir->fDataUnread  = false;
-#ifndef RT_DONT_CONVERT_FILENAMES
-            RTStrFree(pDir->pszName);
+            rtPathFreeIprt(pDir->pszName, pDir->Data.d_name);
             pDir->pszName = NULL;
-#endif
         }
         else
             rc = VERR_BUFFER_OVERFLOW;
@@ -337,38 +596,42 @@ static void rtDirSetDummyInfo(PRTFSOBJINFO pInfo, RTDIRENTRYTYPE enmType)
     switch (enmType)
     {
         default:
-        case RTDIRENTRYTYPE_UNKNOWN:    pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL;
-        case RTDIRENTRYTYPE_FIFO:       pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_FIFO;
-        case RTDIRENTRYTYPE_DEV_CHAR:   pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_DEV_CHAR;
-        case RTDIRENTRYTYPE_DIRECTORY:  pInfo->Attr.fMode = RTFS_DOS_DIRECTORY | RTFS_TYPE_DIRECTORY;
-        case RTDIRENTRYTYPE_DEV_BLOCK:  pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_DEV_BLOCK;
-        case RTDIRENTRYTYPE_FILE:       pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_FILE;
-        case RTDIRENTRYTYPE_SYMLINK:    pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_SYMLINK;
-        case RTDIRENTRYTYPE_SOCKET:     pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_SOCKET;
-        case RTDIRENTRYTYPE_WHITEOUT:   pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_WHITEOUT;
+        case RTDIRENTRYTYPE_UNKNOWN:    pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL;                       break;
+        case RTDIRENTRYTYPE_FIFO:       pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_FIFO;      break;
+        case RTDIRENTRYTYPE_DEV_CHAR:   pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_DEV_CHAR;  break;
+        case RTDIRENTRYTYPE_DIRECTORY:  pInfo->Attr.fMode = RTFS_DOS_DIRECTORY | RTFS_TYPE_DIRECTORY; break;
+        case RTDIRENTRYTYPE_DEV_BLOCK:  pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_DEV_BLOCK; break;
+        case RTDIRENTRYTYPE_FILE:       pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_FILE;      break;
+        case RTDIRENTRYTYPE_SYMLINK:    pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_SYMLINK;   break;
+        case RTDIRENTRYTYPE_SOCKET:     pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_SOCKET;    break;
+        case RTDIRENTRYTYPE_WHITEOUT:   pInfo->Attr.fMode = RTFS_DOS_NT_NORMAL | RTFS_TYPE_WHITEOUT;  break;
     }
 }
 
 
-RTDECL(int) RTDirReadEx(PRTDIR pDir, PRTDIRENTRYEX pDirEntry, unsigned *pcbDirEntry, RTFSOBJATTRADD enmAdditionalAttribs)
+RTDECL(int) RTDirReadEx(RTDIR hDir, PRTDIRENTRYEX pDirEntry, size_t *pcbDirEntry,
+                        RTFSOBJATTRADD enmAdditionalAttribs, uint32_t fFlags)
 {
+    PRTDIRINTERNAL pDir = hDir;
+
     /*
      * Validate and digest input.
      */
     if (!rtDirValidHandle(pDir))
         return VERR_INVALID_PARAMETER;
-    AssertMsgReturn(VALID_PTR(pDirEntry), ("%p\n", pDirEntry), VERR_INVALID_POINTER);
+    AssertPtrReturn(pDirEntry, VERR_INVALID_POINTER);
     AssertMsgReturn(    enmAdditionalAttribs >= RTFSOBJATTRADD_NOTHING
                     &&  enmAdditionalAttribs <= RTFSOBJATTRADD_LAST,
                     ("Invalid enmAdditionalAttribs=%p\n", enmAdditionalAttribs),
                     VERR_INVALID_PARAMETER);
-    unsigned cbDirEntry = sizeof(*pDirEntry);
+    AssertMsgReturn(RTPATH_F_IS_VALID(fFlags, 0), ("%#x\n", fFlags), VERR_INVALID_PARAMETER);
+    size_t cbDirEntry = sizeof(*pDirEntry);
     if (pcbDirEntry)
     {
-        AssertMsgReturn(VALID_PTR(pcbDirEntry), ("%p\n", pcbDirEntry), VERR_INVALID_POINTER);
+        AssertPtrReturn(pcbDirEntry, VERR_INVALID_POINTER);
         cbDirEntry = *pcbDirEntry;
-        AssertMsgReturn(cbDirEntry >= (unsigned)RT_OFFSETOF(RTDIRENTRYEX, szName[2]),
-                        ("Invalid *pcbDirEntry=%d (min %d)\n", *pcbDirEntry, RT_OFFSETOF(RTDIRENTRYEX, szName[2])),
+        AssertMsgReturn(cbDirEntry >= RT_UOFFSETOF(RTDIRENTRYEX, szName[2]),
+                        ("Invalid *pcbDirEntry=%zu (min %zu)\n", *pcbDirEntry, RT_UOFFSETOF(RTDIRENTRYEX, szName[2])),
                         VERR_INVALID_PARAMETER);
     }
 
@@ -381,14 +644,9 @@ RTDECL(int) RTDirReadEx(PRTDIR pDir, PRTDIRENTRYEX pDirEntry, unsigned *pcbDirEn
         /*
          * Check if we've got enough space to return the data.
          */
-#ifdef RT_DONT_CONVERT_FILENAMES
-        const char  *pszName    = pDir->Data.d_name;
-        const size_t cchName    = strlen(pszName);
-#else
         const char  *pszName    = pDir->pszName;
         const size_t cchName    = pDir->cchName;
-#endif
-        const size_t cbRequired = RT_OFFSETOF(RTDIRENTRYEX, szName[1]) + cchName;
+        const size_t cbRequired = RT_UOFFSETOF(RTDIRENTRYEX, szName[1]) + cchName;
         if (pcbDirEntry)
             *pcbDirEntry = cbRequired;
         if (cbRequired <= cbDirEntry)
@@ -396,8 +654,8 @@ RTDECL(int) RTDirReadEx(PRTDIR pDir, PRTDIRENTRYEX pDirEntry, unsigned *pcbDirEn
             /*
              * Setup the returned data.
              */
-            pDirEntry->cucShortName = 0;
-            pDirEntry->uszShortName[0] = 0;
+            pDirEntry->cwcShortName = 0;
+            pDirEntry->wszShortName[0] = 0;
             pDirEntry->cbName  = (uint16_t)cchName;
             Assert(pDirEntry->cbName == cchName);
             memcpy(pDirEntry->szName, pszName, cchName + 1);
@@ -409,22 +667,24 @@ RTDECL(int) RTDirReadEx(PRTDIR pDir, PRTDIRENTRYEX pDirEntry, unsigned *pcbDirEn
             {
                 memcpy(pszNamePath, pDir->pszPath, pDir->cchPath);
                 memcpy(pszNamePath + pDir->cchPath, pszName, cchName + 1);
-                rc = RTPathQueryInfo(pszNamePath, &pDirEntry->Info, enmAdditionalAttribs);
+                rc = RTPathQueryInfoEx(pszNamePath, &pDirEntry->Info, enmAdditionalAttribs, fFlags);
             }
             else
                 rc = VERR_NO_MEMORY;
             if (RT_FAILURE(rc))
             {
+#ifdef HAVE_DIRENT_D_TYPE
                 rtDirSetDummyInfo(&pDirEntry->Info, rtDirType(pDir->Data.d_type));
+#else
+                rtDirSetDummyInfo(&pDirEntry->Info, RTDIRENTRYTYPE_UNKNOWN);
+#endif
                 rc = VWRN_NO_DIRENT_INFO;
             }
 
             /* free cached data */
             pDir->fDataUnread  = false;
-#ifndef RT_DONT_CONVERT_FILENAMES
-            RTStrFree(pDir->pszName);
+            rtPathFreeIprt(pDir->pszName, pDir->Data.d_name);
             pDir->pszName = NULL;
-#endif
         }
         else
             rc = VERR_BUFFER_OVERFLOW;
@@ -434,13 +694,34 @@ RTDECL(int) RTDirReadEx(PRTDIR pDir, PRTDIRENTRYEX pDirEntry, unsigned *pcbDirEn
 }
 
 
+RTDECL(int) RTDirRewind(RTDIR hDir)
+{
+    PRTDIRINTERNAL pDir = hDir;
+
+    /*
+     * Validate and digest input.
+     */
+    if (!rtDirValidHandle(pDir))
+        return VERR_INVALID_PARAMETER;
+
+    /*
+     * Do the rewinding.
+     */
+    /** @todo OS/2 does not rescan the directory as it should. */
+    rewinddir(pDir->pDir);
+    pDir->fDataUnread = false;
+
+    return VINF_SUCCESS;
+}
+
+
 RTDECL(int) RTDirRename(const char *pszSrc, const char *pszDst, unsigned fRename)
 {
     /*
      * Validate input.
      */
-    AssertMsgReturn(VALID_PTR(pszSrc), ("%p\n", pszSrc), VERR_INVALID_POINTER);
-    AssertMsgReturn(VALID_PTR(pszDst), ("%p\n", pszDst), VERR_INVALID_POINTER);
+    AssertPtrReturn(pszSrc, VERR_INVALID_POINTER);
+    AssertPtrReturn(pszDst, VERR_INVALID_POINTER);
     AssertMsgReturn(*pszSrc, ("%p\n", pszSrc), VERR_INVALID_PARAMETER);
     AssertMsgReturn(*pszDst, ("%p\n", pszDst), VERR_INVALID_PARAMETER);
     AssertMsgReturn(!(fRename & ~RTPATHRENAME_FLAGS_REPLACE), ("%#x\n", fRename), VERR_INVALID_PARAMETER);

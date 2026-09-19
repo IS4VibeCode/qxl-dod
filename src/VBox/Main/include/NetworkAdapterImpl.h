@@ -1,165 +1,141 @@
+/* $Id: NetworkAdapterImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_NETWORKADAPTER
-#define ____H_NETWORKADAPTER
+#ifndef MAIN_INCLUDED_NetworkAdapterImpl_h
+#define MAIN_INCLUDED_NetworkAdapterImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
-#include "Collection.h"
+#include "NetworkAdapterWrap.h"
 
-class Machine;
+class GuestOSType;
+class BandwidthControl;
+class BandwidthGroup;
+class NATEngine;
+
+namespace settings
+{
+    struct NetworkAdapter;
+}
 
 class ATL_NO_VTABLE NetworkAdapter :
-    public VirtualBoxBase,
-    public VirtualBoxSupportErrorInfoImpl <NetworkAdapter, INetworkAdapter>,
-    public VirtualBoxSupportTranslation <NetworkAdapter>,
-    public INetworkAdapter
+    public NetworkAdapterWrap
 {
 public:
 
-    struct Data
-    {
-        Data()
-            : mSlot (0), mEnabled (FALSE)
-            , mAttachmentType (NetworkAttachmentType_NoNetworkAttachment)
-            ,  mCableConnected (TRUE), mTraceEnabled (FALSE)
-#ifdef __WIN__
-            , mHostInterface ("") // cannot be null
-#endif
-#ifdef __LINUX__
-            , mTAPFD (NIL_RTFILE)
-#endif
-            , mInternalNetwork ("") // cannot be null
-        {}
-
-        bool operator== (const Data &that) const
-        {
-            return this == &that ||
-                   (mSlot == that.mSlot &&
-                    mEnabled == that.mEnabled &&
-                    mMACAddress == that.mMACAddress &&
-                    mAttachmentType == that.mAttachmentType &&
-                    mCableConnected == that.mCableConnected &&
-                    mTraceEnabled == that.mTraceEnabled &&
-                    mHostInterface == that.mHostInterface &&
-#ifdef __LINUX__
-                    mTAPSetupApplication == that.mTAPSetupApplication &&
-                    mTAPTerminateApplication == that.mTAPTerminateApplication &&
-                    mTAPFD == that.mTAPFD &&
-#endif
-                    mInternalNetwork == that.mInternalNetwork);
-        }
-
-        NetworkAdapterType_T mAdapterType;
-        ULONG mSlot;
-        BOOL mEnabled;
-        Bstr mMACAddress;
-        NetworkAttachmentType_T mAttachmentType;
-        BOOL mCableConnected;
-        BOOL mTraceEnabled;
-        Bstr mTraceFile;
-        Bstr mHostInterface;
-#ifdef __LINUX__
-        Bstr mTAPSetupApplication;
-        Bstr mTAPTerminateApplication;
-        RTFILE mTAPFD;
-#endif
-        Bstr mInternalNetwork;
-    };
-
-    DECLARE_NOT_AGGREGATABLE(NetworkAdapter)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(NetworkAdapter)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(INetworkAdapter)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS(NetworkAdapter)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT init (Machine *parent, ULONG slot);
-    HRESULT init (Machine *parent, NetworkAdapter *that);
-    HRESULT initCopy (Machine *parent, NetworkAdapter *that);
+    HRESULT init(Machine *aParent, ULONG aSlot);
+    HRESULT init(Machine *aParent, NetworkAdapter *aThat, bool aReshare = false);
+    HRESULT initCopy(Machine *aParent, NetworkAdapter *aThat);
     void uninit();
 
-    // INetworkAdapter properties
-    STDMETHOD(COMGETTER(AdapterType))(NetworkAdapterType_T *adapterType);
-    STDMETHOD(COMSETTER(AdapterType))(NetworkAdapterType_T adapterType);
-    STDMETHOD(COMGETTER(Slot)) (ULONG *slot);
-    STDMETHOD(COMGETTER(Enabled)) (BOOL *enabled);
-    STDMETHOD(COMSETTER(Enabled)) (BOOL enabled);
-    STDMETHOD(COMGETTER(MACAddress))(BSTR *macAddress);
-    STDMETHOD(COMSETTER(MACAddress))(INPTR BSTR macAddress);
-    STDMETHOD(COMGETTER(AttachmentType))(NetworkAttachmentType_T *attachmentType);
-    STDMETHOD(COMGETTER(HostInterface))(BSTR *hostInterface);
-    STDMETHOD(COMSETTER(HostInterface))(INPTR BSTR hostInterface);
-#ifdef __LINUX__
-    STDMETHOD(COMGETTER(TAPFileDescriptor))(LONG *tapFileDescriptor);
-    STDMETHOD(COMSETTER(TAPFileDescriptor))(LONG tapFileDescriptor);
-    STDMETHOD(COMGETTER(TAPSetupApplication))(BSTR *tapSetupApplication);
-    STDMETHOD(COMSETTER(TAPSetupApplication))(INPTR BSTR tapSetupApplication);
-    STDMETHOD(COMGETTER(TAPTerminateApplication))(BSTR *tapTerminateApplication);
-    STDMETHOD(COMSETTER(TAPTerminateApplication))(INPTR BSTR tapTerminateApplication);
-#endif
-    STDMETHOD(COMGETTER(InternalNetwork))(BSTR *internalNetwork);
-    STDMETHOD(COMSETTER(InternalNetwork))(INPTR BSTR internalNetwork);
-    STDMETHOD(COMGETTER(CableConnected))(BOOL *connected);
-    STDMETHOD(COMSETTER(CableConnected))(BOOL connected);
-    STDMETHOD(COMGETTER(TraceEnabled))(BOOL *enabled);
-    STDMETHOD(COMSETTER(TraceEnabled))(BOOL enabled);
-    STDMETHOD(COMGETTER(TraceFile))(BSTR *traceFile);
-    STDMETHOD(COMSETTER(TraceFile))(INPTR BSTR traceFile);
-
-    // INetworkAdapter methods
-    STDMETHOD(AttachToNAT)();
-    STDMETHOD(AttachToHostInterface)();
-    STDMETHOD(AttachToInternalNetwork)();
-    STDMETHOD(Detach)();
-
     // public methods only for internal purposes
+    HRESULT i_loadSettings(BandwidthControl *bwctl, const settings::NetworkAdapter &data);
+    HRESULT i_saveSettings(settings::NetworkAdapter &data);
 
-    const Backupable <Data> &data() const { return mData; }
+    bool i_isModified();
+    void i_rollback();
+    void i_commit();
+    void i_copyFrom(NetworkAdapter *aThat);
+    void i_applyDefaults(GuestOSType *aOsType);
+    bool i_hasDefaults();
 
-    bool isModified() { AutoLock alock (this); return mData.isBackedUp(); }
-    bool isReallyModified() { AutoLock alock (this); return mData.hasActualChanges(); }
-    bool rollback();
-    void commit();
-    void copyFrom (NetworkAdapter *aThat);
-
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"NetworkAdapter"; }
+    ComObjPtr<NetworkAdapter> i_getPeer();
 
 private:
 
-    void detach();
-    void generateMACAddress();
+    // wrapped INetworkAdapter properties
+    HRESULT getAdapterType(NetworkAdapterType_T *aAdapterType);
+    HRESULT setAdapterType(NetworkAdapterType_T aAdapterType);
+    HRESULT getSlot(ULONG *aSlot);
+    HRESULT getEnabled(BOOL *aEnabled);
+    HRESULT setEnabled(BOOL aEnabled);
+    HRESULT getMACAddress(com::Utf8Str &aMACAddress);
+    HRESULT setMACAddress(const com::Utf8Str &aMACAddress);
+    HRESULT getAttachmentType(NetworkAttachmentType_T *aAttachmentType);
+    HRESULT setAttachmentType(NetworkAttachmentType_T aAttachmentType);
+    HRESULT getBridgedInterface(com::Utf8Str &aBridgedInterface);
+    HRESULT setBridgedInterface(const com::Utf8Str &aBridgedInterface);
+    HRESULT getHostOnlyInterface(com::Utf8Str &aHostOnlyInterface);
+    HRESULT setHostOnlyInterface(const com::Utf8Str &aHostOnlyInterface);
+    HRESULT getHostOnlyNetwork(com::Utf8Str &aHostOnlyNetwork);
+    HRESULT setHostOnlyNetwork(const com::Utf8Str &aHostOnlyNetwork);
+    HRESULT getInternalNetwork(com::Utf8Str &aInternalNetwork);
+    HRESULT setInternalNetwork(const com::Utf8Str &aInternalNetwork);
+    HRESULT getNATNetwork(com::Utf8Str &aNATNetwork);
+    HRESULT setNATNetwork(const com::Utf8Str &aNATNetwork);
+    HRESULT getGenericDriver(com::Utf8Str &aGenericDriver);
+    HRESULT setGenericDriver(const com::Utf8Str &aGenericDriver);
+    HRESULT getCloudNetwork(com::Utf8Str &aCloudNetwork);
+    HRESULT setCloudNetwork(const com::Utf8Str &aCloudNetwork);
+    HRESULT getCableConnected(BOOL *aCableConnected);
+    HRESULT setCableConnected(BOOL aCableConnected);
+    HRESULT getLineSpeed(ULONG *aLineSpeed);
+    HRESULT setLineSpeed(ULONG aLineSpeed);
+    HRESULT getPromiscModePolicy(NetworkAdapterPromiscModePolicy_T *aPromiscModePolicy);
+    HRESULT setPromiscModePolicy(NetworkAdapterPromiscModePolicy_T aPromiscModePolicy);
+    HRESULT getTraceEnabled(BOOL *aTraceEnabled);
+    HRESULT setTraceEnabled(BOOL aTraceEnabled);
+    HRESULT getTraceFile(com::Utf8Str &aTraceFile);
+    HRESULT setTraceFile(const com::Utf8Str &aTraceFile);
+    HRESULT getNATEngine(ComPtr<INATEngine> &aNATEngine);
+    HRESULT getBootPriority(ULONG *aBootPriority);
+    HRESULT setBootPriority(ULONG aBootPriority);
+    HRESULT getBandwidthGroup(ComPtr<IBandwidthGroup> &aBandwidthGroup);
+    HRESULT setBandwidthGroup(const ComPtr<IBandwidthGroup> &aBandwidthGroup);
 
-    ComObjPtr <Machine, ComWeakRef> mParent;
-    ComObjPtr <NetworkAdapter> mPeer;
-    Backupable <Data> mData;
+    // wrapped INetworkAdapter methods
+    HRESULT getProperty(const com::Utf8Str &aKey,
+                        com::Utf8Str &aValue);
+    HRESULT setProperty(const com::Utf8Str &aKey,
+                        const com::Utf8Str &aValue);
+    HRESULT getProperties(const com::Utf8Str &aNames,
+                          std::vector<com::Utf8Str> &aReturnNames,
+                          std::vector<com::Utf8Str> &aReturnValues);
+    // Misc.
+    void i_generateMACAddress();
+    HRESULT i_updateMacAddress(Utf8Str aMacAddress);
+    void i_updateBandwidthGroup(BandwidthGroup *aBwGroup);
+    HRESULT i_switchFromNatNetworking(const com::Utf8Str &aNatnetworkName);
+    HRESULT i_switchToNatNetworking(const com::Utf8Str &aNatNetworkName);
+
+
+    Machine * const     mParent;
+    const ComObjPtr<NetworkAdapter> mPeer;
+    const ComObjPtr<NATEngine> mNATEngine;
+
+    Backupable<settings::NetworkAdapter> mData;
 };
 
-#endif // ____H_NETWORKADAPTER
+#endif /* !MAIN_INCLUDED_NetworkAdapterImpl_h */
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

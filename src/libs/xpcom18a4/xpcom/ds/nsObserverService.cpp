@@ -36,8 +36,6 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
-#include "prlog.h"
-#include "prlock.h"
 #include "nsIFactory.h"
 #include "nsIServiceManager.h"
 #include "nsIComponentManager.h"
@@ -47,22 +45,11 @@
 #include "nsHashtable.h"
 #include "nsIWeakReference.h"
 
+#include <VBox/log.h>
+
 #define NS_WEAK_OBSERVERS
 
 
-
-#if defined(PR_LOGGING)
-// Log module for nsObserverService logging...
-//
-// To enable logging (see prlog.h for full details):
-//
-//    set NSPR_LOG_MODULES=ObserverService:5
-//    set NSPR_LOG_FILE=nspr.log
-//
-// this enables PR_LOG_DEBUG level information and places all output in
-// the file nspr.log
-PRLogModuleInfo* observerServiceLog = nsnull;
-#endif /* PR_LOGGING */
 
 ////////////////////////////////////////////////////////////////////////////////
 // nsObserverService Implementation
@@ -84,11 +71,6 @@ nsObserverService::~nsObserverService(void)
 NS_METHOD
 nsObserverService::Create(nsISupports* outer, const nsIID& aIID, void* *aInstancePtr)
 {
-#if defined(PR_LOGGING)
-    if (!observerServiceLog)
-        observerServiceLog = PR_NewLogModule("ObserverService");
-#endif
-
     nsresult rv;
     nsObserverService* os = new nsObserverService();
     if (os == nsnull)
@@ -112,7 +94,7 @@ nsresult nsObserverService::GetObserverList(const char* aTopic, nsObserverList**
     if (anObserverList == nsnull)
         return NS_ERROR_NULL_POINTER;
 	
-	if(mObserverTopicTable == nsnull) 
+    if(mObserverTopicTable == nsnull) 
     {
         mObserverTopicTable = new nsObjectHashtable(nsnull, 
                                                     nsnull,   // should never be cloned
@@ -154,8 +136,8 @@ NS_IMETHODIMP nsObserverService::AddObserver(nsIObserver* anObserver, const char
     if (anObserver == nsnull || aTopic == nsnull)
         return NS_ERROR_NULL_POINTER;
 
-	rv = GetObserverList(aTopic, &anObserverList);
-	if (NS_FAILED(rv)) return rv;
+    rv = GetObserverList(aTopic, &anObserverList);
+    if (NS_FAILED(rv)) return rv;
 
     return anObserverList->AddObserver(anObserver, ownsWeak);
 }
@@ -168,8 +150,8 @@ NS_IMETHODIMP nsObserverService::RemoveObserver(nsIObserver* anObserver, const c
     if (anObserver == nsnull || aTopic == nsnull)
         return NS_ERROR_NULL_POINTER;
 
-	rv = GetObserverList(aTopic, &anObserverList);
-	if (NS_FAILED(rv)) return rv;
+    rv = GetObserverList(aTopic, &anObserverList);
+    if (NS_FAILED(rv)) return rv;
 
     return anObserverList->RemoveObserver(anObserver);
 }
@@ -182,8 +164,8 @@ NS_IMETHODIMP nsObserverService::EnumerateObservers(const char* aTopic, nsISimpl
     if (anEnumerator == nsnull || aTopic == nsnull)
         return NS_ERROR_NULL_POINTER;
 
-	rv = GetObserverList(aTopic, &anObserverList);
-	if (NS_FAILED(rv)) return rv;
+    rv = GetObserverList(aTopic, &anObserverList);
+    if (NS_FAILED(rv)) return rv;
 
     return anObserverList->GetObserverList(anEnumerator);
 }
@@ -216,8 +198,7 @@ NS_IMETHODIMP nsObserverService::NotifyObservers( nsISupports *aSubject,
              if ( observer ) 
                 observer->Observe( aSubject, aTopic, someData );
 
-             PR_LOG(observerServiceLog, PR_LOG_DEBUG, ("Notification - %s\n", aTopic ? aTopic : "undefined"));
-
+             Log(("Notification - %s\n", aTopic ? aTopic : "undefined"));
         }
 #endif
     }

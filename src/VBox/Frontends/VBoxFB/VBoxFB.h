@@ -1,30 +1,35 @@
+/* $Id: VBoxFB.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox frontends: Framebuffer (FB, DirectFB):
- * Main header file
+ * VBox frontends - Framebuffer (FB, DirectFB), Main header file.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __H_VBOXFB
-#define __H_VBOXFB
-
-// release logging
-#define LOG_ENABLED
+#ifndef VBOX_INCLUDED_SRC_VBoxFB_VBoxFB_h
+#define VBOX_INCLUDED_SRC_VBoxFB_VBoxFB_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -35,13 +40,14 @@
 #include <nsIComponentRegistrar.h>
 #include <nsXPCOMGlue.h>
 #include <nsMemory.h>
-#include <nsStringAPI.h>
 #include <nsIProgrammingLanguage.h>
-#include <nsEmbedString.h>
 #include <nsIFile.h>
 #include <nsILocalFile.h>
+#include <nsString.h>
+#include <nsReadableUtils.h>
 #include <VirtualBox_XPCOM.h>
 #include <ipcIService.h>
+#include <nsEventQueueUtils.h>
 #include <ipcCID.h>
 #include <ipcIDConnectService.h>
 #define IPC_DCONNECTSERVICE_CONTRACTID \
@@ -50,6 +56,10 @@
 #include <VBox/types.h>
 #include <VBox/err.h>
 #include <VBox/log.h>
+#ifndef VBOX_WITH_XPCOM
+# define VBOX_WITH_XPCOM
+#endif
+#include <VBox/com/com.h>
 #include <iprt/assert.h>
 #include <iprt/uuid.h>
 
@@ -77,8 +87,8 @@
 /**
  * Globals
  */
-extern uint32_t useFixedVideoMode;
-extern videoMode fixedVideoMode;
-extern int scaleGuest;
+extern uint32_t g_useFixedVideoMode;
+extern videoMode g_fixedVideoMode;
+extern int g_scaleGuest;
 
-#endif // __H_VBOXFB
+#endif /* !VBOX_INCLUDED_SRC_VBoxFB_VBoxFB_h */

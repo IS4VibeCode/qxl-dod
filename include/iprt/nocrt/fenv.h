@@ -1,33 +1,51 @@
 /** @file
- * InnoTek Portable Runtime / No-CRT - fenv.h wrapper.
+ * IPRT / No-CRT - fenv.h wrapper.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __iprt_nocrt_fenv_h__
-#define __iprt_nocrt_fenv_h__
+#ifndef IPRT_INCLUDED_nocrt_fenv_h
+#define IPRT_INCLUDED_nocrt_fenv_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include <iprt/cdefs.h>
-#ifdef __AMD64__
-# include <iprt/nocrt/amd64/fenv.h>
-#elif defined(__X86__)
-# include <iprt/nocrt/x86/fenv.h>
+#if defined(RT_ARCH_X86) || defined(RT_ARCH_AMD64)
+# include <iprt/nocrt/x86/fenv-x86-amd64.h>
+#elif defined(RT_ARCH_ARM64)
+# include <iprt/nocrt/arm64/fenv.h>
 #else
 # error "IPRT: no fenv.h available for this platform, or the platform define is missing!"
 #endif
 
-#endif
+#endif /* !IPRT_INCLUDED_nocrt_fenv_h */

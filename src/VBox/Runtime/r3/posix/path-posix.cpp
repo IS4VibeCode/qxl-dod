@@ -1,28 +1,43 @@
-/* $Id: path-posix.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: path-posix.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Path Manipulation, POSIX.
+ * IPRT - Path Manipulation, POSIX, Part 1.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_PATH
 #include <stdlib.h>
 #include <limits.h>
@@ -31,32 +46,29 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <stdio.h>
-#ifdef __DARWIN__
-# include <mach-o/dyld.h>
-#endif
+#include <sys/types.h>
+#include <pwd.h>
 
 #include <iprt/path.h>
+#include <iprt/env.h>
 #include <iprt/assert.h>
+#include <iprt/mem.h>
 #include <iprt/string.h>
 #include <iprt/err.h>
 #include <iprt/log.h>
 #include "internal/path.h"
+#include "internal/process.h"
 #include "internal/fs.h"
 
-#ifdef __L4__
-# include <l4/vboxserver/vboxserver.h>
-#endif
 
 
-
-
-RTDECL(int) RTPathReal(const char *pszPath, char *pszRealPath, unsigned cchRealPath)
+RTDECL(int) RTPathReal(const char *pszPath, char *pszRealPath, size_t cchRealPath)
 {
     /*
      * Convert input.
      */
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
     if (RT_SUCCESS(rc))
     {
         /*
@@ -66,503 +78,41 @@ RTDECL(int) RTPathReal(const char *pszPath, char *pszRealPath, unsigned cchRealP
         char szTmpPath[PATH_MAX + 1];
         const char *psz = realpath(pszNativePath, szTmpPath);
         if (psz)
-        {
-            /*
-             * Convert result and copy it to the return buffer.
-             */
-            char *pszUtf8RealPath;
-            rc = rtPathFromNative(&pszUtf8RealPath, szTmpPath);
-            if (RT_SUCCESS(rc))
-            {
-                size_t cch = strlen(pszUtf8RealPath) + 1;
-                if (cch <= cchRealPath)
-                    memcpy(pszRealPath, pszUtf8RealPath, cch);
-                else
-                    rc = VERR_BUFFER_OVERFLOW;
-                RTStrFree(pszUtf8RealPath);
-            }
-        }
+            rc = rtPathFromNativeCopy(pszRealPath, cchRealPath, szTmpPath, NULL);
         else
             rc = RTErrConvertFromErrno(errno);
-        RTStrFree(pszNativePath);
+        rtPathFreeNative(pszNativePath, pszPath);
     }
 
     LogFlow(("RTPathReal(%p:{%s}, %p:{%s}, %u): returns %Rrc\n", pszPath, pszPath,
-             pszRealPath, RT_SUCCESS(rc) ? pszRealPath : "<failed>",  cchRealPath));
+             pszRealPath, RT_SUCCESS(rc) ? pszRealPath : "<failed>",  cchRealPath, rc));
     return rc;
 }
 
 
-/**
- * Cleans up a path specifier a little bit.
- * This includes removing duplicate slashes, uncessary single dots, and
- * trailing slashes.
- *
- * @returns Number of bytes in the clean path.
- * @param   pszPath     The path to cleanup.
- * @remark  Borrowed from InnoTek libc.
- */
-static int fsCleanPath(char *pszPath)
+RTR3DECL(int) RTPathSetMode(const char *pszPath, RTFMODE fMode)
 {
-    /*
-     * Change to '/' and remove duplicates.
-     */
-    char   *pszSrc = pszPath;
-    char   *pszTrg = pszPath;
-#ifdef HAVE_UNC
-    int     fUnc = 0;
-    if (    RTPATH_IS_SLASH(pszPath[0])
-        &&  RTPATH_IS_SLASH(pszPath[1]))
-    {   /* Skip first slash in a unc path. */
-        pszSrc++;
-        *pszTrg++ = '/';
-        fUnc = 1;
-    }
-#endif
+    AssertPtrReturn(pszPath, VERR_INVALID_POINTER);
+    AssertReturn(*pszPath, VERR_INVALID_PARAMETER);
 
-    for (;;)
-    {
-        char ch = *pszSrc++;
-        if (RTPATH_IS_SEP(ch))
-        {
-            *pszTrg++ = RTPATH_SLASH;
-            for (;;)
-            {
-                do  ch = *pszSrc++;
-                while (RTPATH_IS_SEP(ch));
-
-                /* Remove '/./' and '/.'. */
-                if (ch != '.' || (*pszSrc && !RTPATH_IS_SEP(*pszSrc)))
-                    break;
-            }
-        }
-        *pszTrg = ch;
-        if (!ch)
-            break;
-        pszTrg++;
-    }
-
-    /*
-     * Remove trailing slash if the path may be pointing to a directory.
-     */
-    int cch = pszTrg - pszPath;
-    if (    cch > 1
-        &&  pszTrg[-1] == RTPATH_SLASH
-#ifdef HAVE_DRIVE
-        &&  pszTrg[-2] != ':'
-#endif
-        &&  pszTrg[-2] != RTPATH_SLASH)
-        pszPath[--cch] = '\0';
-
-    return cch;
-}
-
-
-RTDECL(int) RTPathAbs(const char *pszPath, char *pszAbsPath, unsigned cchAbsPath)
-{
-    /*
-     * Convert input.
-     */
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
-    if (RT_FAILURE(rc))
-    {
-        LogFlow(("RTPathAbs(%p:{%s}, %p, %d): returns %Rrc\n", pszPath, pszPath, pszAbsPath, cchAbsPath));
-        return rc;
-    }
-
-    /*
-     * On POSIX platforms the API doesn't take a length parameter, which makes it
-     * a little bit more work.
-     */
-    char szTmpPath[PATH_MAX + 1];
-    char *psz = realpath(pszNativePath, szTmpPath);
-    if (!psz)
-    {
-        if (errno == ENOENT || errno == ENOTDIR)
-        {
-            if (strlen(pszNativePath) <= PATH_MAX)
-            {
-                /*
-                 * Iterate the path bit by bit an apply realpath to it.
-                 */
-
-                char szTmpSrc[PATH_MAX + 1];
-                strcpy(szTmpSrc, pszNativePath);
-                fsCleanPath(szTmpSrc);
-
-                size_t cch = 0; // current resolved path length
-                char *pszCur = szTmpSrc;
-
-                if (*pszCur == RTPATH_SLASH)
-                {
-                    psz = szTmpPath;
-                    pszCur++;
-                }
-                else
-                {
-                    /* get the cwd */
-                    psz = getcwd(szTmpPath,  sizeof(szTmpPath));
-                    AssertMsg(psz, ("Couldn't get cwd!\n"));
-                    if (psz)
-                        cch = strlen(psz);
-                    else
-                        rc = RTErrConvertFromErrno(errno);
-                }
-
-                if (psz)
-                {
-                    bool fResolveSymlinks = true;
-                    char szTmpPath2[PATH_MAX + 1];
-
-                    while (*pszCur)
-                    {
-                        char *pszSlash = strchr(pszCur, RTPATH_SLASH);
-                        size_t cchElement = pszSlash ? pszSlash - pszCur : strlen(pszCur);
-                        if (cch + cchElement + 1 > PATH_MAX)
-                        {
-                            rc = VERR_FILENAME_TOO_LONG;
-                            break;
-                        }
-
-                        if (!strncmp(pszCur, "..", cchElement))
-                        {
-                            char *pszLastSlash = strrchr(psz, RTPATH_SLASH);
-                            if (pszLastSlash)
-                            {
-                                cch = pszLastSlash - psz;
-                                psz[cch] = '\0';
-                            }
-                            /* else: We've reached the root and the parent of the root is the root. */
-                        }
-                        else
-                        {
-                            psz[cch++] = RTPATH_SLASH;
-                            memcpy(psz + cch, pszCur, cchElement);
-                            cch += cchElement;
-                            psz[cch] = '\0';
-
-                            if (fResolveSymlinks)
-                            {
-                                /* resolve possible symlinks */
-                                char *psz2 = realpath(psz, psz == szTmpPath
-                                                           ? szTmpPath2
-                                                           : szTmpPath);
-                                if (psz2)
-                                {
-                                    psz = psz2;
-                                    cch = strlen(psz);
-                                }
-                                else
-                                {
-                                    if (errno != ENOENT && errno != ENOTDIR)
-                                    {
-                                        rc = RTErrConvertFromErrno(errno);
-                                        break;
-                                    }
-
-                                    /* no more need to resolve symlinks */
-                                    fResolveSymlinks = false;
-                                }
-                            }
-                        }
-
-                        pszCur += cchElement;
-                        /* skip the slash */
-                        if (*pszCur)
-                            ++pszCur;
-                    }
-
-                    /* if the length is zero here, then we're at the root (Not true for half-posixs stuff such as libc!) */
-                    if (!cch)
-                    {
-                        psz[cch++] = RTPATH_SLASH;
-                        psz[cch] = '\0';
-                    }
-                }
-            }
-            else
-                rc = VERR_FILENAME_TOO_LONG;
-        }
-        else
-            rc = RTErrConvertFromErrno(errno);
-    }
-
-    RTStrFree(pszNativePath);
-
-    if (psz && RT_SUCCESS(rc))
-    {
-        /*
-         * Convert result and copy it to the return buffer.
-         */
-        char *pszUtf8AbsPath;
-        rc = rtPathFromNative(&pszUtf8AbsPath, psz);
-        if (RT_FAILURE(rc))
-        {
-            LogFlow(("RTPathAbs(%p:{%s}, %p, %d): returns %Rrc\n", pszPath, pszPath, pszAbsPath, cchAbsPath));
-            return rc;
-        }
-
-        unsigned cch = strlen(pszUtf8AbsPath) + 1;
-        if (cch <= cchAbsPath)
-            memcpy(pszAbsPath, pszUtf8AbsPath, cch);
-        else
-            rc = VERR_BUFFER_OVERFLOW;
-        RTStrFree(pszUtf8AbsPath);
-    }
-
-    LogFlow(("RTPathAbs(%p:{%s}, %p:{%s}, %d): returns %Rrc\n", pszPath, pszPath,
-             pszAbsPath, RT_SUCCESS(rc) ? pszAbsPath : "<failed>", cchAbsPath));
-    return rc;
-}
-
-
-RTDECL(int) RTPathProgram(char *pszPath, unsigned cchPath)
-{
-    /*
-     * First time only.
-     */
-    if (!g_szrtProgramPath[0])
-    {
-        /*
-         * Linux have no API for obtaining the executable path, but provides a symbolic link
-         * in the proc file system. Note that readlink is one of the weirdest Unix apis around.
-         *
-         * OS/2 have an api for getting the program file name.
-         */
-/** @todo use RTProcGetExecutableName() */
-#ifdef __LINUX__
-        int cchLink = readlink("/proc/self/exe", &g_szrtProgramPath[0], sizeof(g_szrtProgramPath) - 1);
-        if (cchLink < 0 || cchLink == sizeof(g_szrtProgramPath) - 1)
-        {
-            int rc = RTErrConvertFromErrno(errno);
-            AssertMsgFailed(("couldn't read /proc/self/exe. errno=%d cchLink=%d\n", errno, cchLink));
-            LogFlow(("RTPathProgram(%p, %u): returns %Rrc\n", pszPath, cchPath, rc));
-            return rc;
-        }
-        g_szrtProgramPath[cchLink] = '\0';
-
-#elif defined(__OS2__) || defined(__L4__)
-        _execname(g_szrtProgramPath, sizeof(g_szrtProgramPath));
-
-#elif defined(__DARWIN__)
-        const char *pszImageName = _dyld_get_image_name(0);
-        AssertReturn(pszImageName, VERR_INTERNAL_ERROR);
-        size_t cchImageName = strlen(pszImageName);
-        if (cchImageName >= sizeof(g_szrtProgramPath))
-            AssertReturn(pszImageName, VERR_INTERNAL_ERROR);
-        memcpy(g_szrtProgramPath, pszImageName, cchImageName + 1);
-
-#else
-# error needs porting.
-#endif
-
-        /*
-         * Convert to UTF-8 and strip of the filename.
-         */
-        char *pszTmp = NULL;
-        int rc = rtPathFromNative(&pszTmp, &g_szrtProgramPath[0]);
-        if (RT_FAILURE(rc))
-        {
-            LogFlow(("RTPathProgram(%p, %u): returns %Rrc\n", pszPath, cchPath, rc));
-            return rc;
-        }
-        size_t cch = strlen(pszTmp);
-        if (cch >= sizeof(g_szrtProgramPath))
-        {
-            RTStrFree(pszTmp);
-            LogFlow(("RTPathProgram(%p, %u): returns %Rrc\n", pszPath, cchPath, VERR_BUFFER_OVERFLOW));
-            return VERR_BUFFER_OVERFLOW;
-        }
-        memcpy(g_szrtProgramPath, pszTmp, cch + 1);
-        RTPathStripFilename(g_szrtProgramPath);
-        RTStrFree(pszTmp);
-    }
-
-    /*
-     * Calc the length and check if there is space before copying.
-     */
-    unsigned cch = strlen(g_szrtProgramPath) + 1;
-    if (cch <= cchPath)
-    {
-        memcpy(pszPath, g_szrtProgramPath, cch + 1);
-        LogFlow(("RTPathProgram(%p:{%s}, %u): returns %Rrc\n", pszPath, pszPath, cchPath, VINF_SUCCESS));
-        return VINF_SUCCESS;
-    }
-
-    AssertMsgFailed(("Buffer too small (%d < %d)\n", cchPath, cch));
-    LogFlow(("RTPathProgram(%p, %u): returns %Rrc\n", pszPath, cchPath, VERR_BUFFER_OVERFLOW));
-    return VERR_BUFFER_OVERFLOW;
-}
-
-
-RTDECL(int) RTPathUserHome(char *pszPath, unsigned cchPath)
-{
-    /*
-     * Get HOME env. var it and validate it's existance.
-     */
     int rc;
-    struct stat s;
-    const char *pszHome = getenv("HOME");
-    if (pszHome)
+    fMode = rtFsModeNormalize(fMode, pszPath, 0, 0);
+    if (rtFsModeIsValidPermissions(fMode))
     {
-        if (    !stat(pszHome, &s)
-            &&  S_ISDIR(s.st_mode))
+        char const *pszNativePath;
+        rc = rtPathToNative(&pszNativePath, pszPath, NULL);
+        if (RT_SUCCESS(rc))
         {
-            /*
-             * Convert it to UTF-8 and copy it to the return buffer.
-             */
-            char *pszUtf8Path;
-            rc = rtPathFromNative(&pszUtf8Path, pszHome);
-            if (RT_SUCCESS(rc))
-            {
-                size_t cchHome = strlen(pszUtf8Path);
-                if (cchHome < cchPath)
-                    memcpy(pszPath, pszUtf8Path, cchHome + 1);
-                else
-                    rc = VERR_BUFFER_OVERFLOW;
-                RTStrFree(pszUtf8Path);
-            }
+            if (chmod(pszNativePath, fMode & RTFS_UNIX_MASK) != 0)
+                rc = RTErrConvertFromErrno(errno);
+            rtPathFreeNative(pszNativePath, pszPath);
         }
-        else
-            rc = VERR_PATH_NOT_FOUND;
-
     }
     else
-        rc = VERR_PATH_NOT_FOUND;
-
-    LogFlow(("RTPathUserHome(%p:{%s}, %u): returns %Rrc\n", pszPath,
-             RT_SUCCESS(rc) ? pszPath : "<failed>",  cchPath, rc));
-    return rc;
-}
-
-
-RTR3DECL(int) RTPathQueryInfo(const char *pszPath, PRTFSOBJINFO pObjInfo, RTFSOBJATTRADD enmAdditionalAttribs)
-{
-    /*
-     * Validate input.
-     */
-    AssertMsgReturn(VALID_PTR(pszPath), ("%p\n", pszPath), VERR_INVALID_POINTER);
-    AssertReturn(*pszPath, VERR_INVALID_PARAMETER);
-    AssertMsgReturn(VALID_PTR(pObjInfo), ("%p\n", pszPath), VERR_INVALID_POINTER);
-    AssertMsgReturn(    enmAdditionalAttribs >= RTFSOBJATTRADD_NOTHING
-                    &&  enmAdditionalAttribs <= RTFSOBJATTRADD_LAST,
-                    ("Invalid enmAdditionalAttribs=%p\n", enmAdditionalAttribs),
-                    VERR_INVALID_PARAMETER);
-
-    /*
-     * Convert the filename.
-     */
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
-    if (RT_SUCCESS(rc))
     {
-        struct stat Stat;
-        if (!stat(pszNativePath, &Stat))
-        {
-            rtFsConvertStatToObjInfo(pObjInfo, &Stat);
-            switch (enmAdditionalAttribs)
-            {
-                case RTFSOBJATTRADD_EASIZE:
-                    /** @todo Use SGI extended attribute interface to query EA info. */
-                    pObjInfo->Attr.enmAdditional          = RTFSOBJATTRADD_EASIZE;
-                    pObjInfo->Attr.u.EASize.cb            = 0;
-                    break;
-
-                case RTFSOBJATTRADD_NOTHING:
-                case RTFSOBJATTRADD_UNIX:
-                    Assert(pObjInfo->Attr.enmAdditional == RTFSOBJATTRADD_UNIX);
-                    break;
-
-                default:
-                    AssertMsgFailed(("Impossible!\n"));
-                    return VERR_INTERNAL_ERROR;
-            }
-        }
-        else
-            rc = RTErrConvertFromErrno(errno);
+        AssertMsgFailed(("Invalid file mode! %RTfmode\n", fMode));
+        rc = VERR_INVALID_FMODE;
     }
-
-    LogFlow(("RTPathQueryInfo(%p:{%s}, pObjInfo=%p, %d): returns %Rrc\n",
-             pszPath, pszPath, pObjInfo, enmAdditionalAttribs, rc));
-    return rc;
-}
-
-
-RTR3DECL(int) RTPathSetTimes(const char *pszPath, PCRTTIMESPEC pAccessTime, PCRTTIMESPEC pModificationTime,
-                             PCRTTIMESPEC pChangeTime, PCRTTIMESPEC pBirthTime)
-{
-    /*
-     * Validate input.
-     */
-    AssertMsgReturn(VALID_PTR(pszPath), ("%p\n", pszPath), VERR_INVALID_POINTER);
-    AssertMsgReturn(*pszPath, ("%p\n", pszPath), VERR_INVALID_PARAMETER);
-    AssertMsgReturn(!pAccessTime || VALID_PTR(pAccessTime), ("%p\n", pAccessTime), VERR_INVALID_POINTER);
-    AssertMsgReturn(!pModificationTime || VALID_PTR(pModificationTime), ("%p\n", pModificationTime), VERR_INVALID_POINTER);
-    AssertMsgReturn(!pChangeTime || VALID_PTR(pChangeTime), ("%p\n", pChangeTime), VERR_INVALID_POINTER);
-    AssertMsgReturn(!pBirthTime || VALID_PTR(pBirthTime), ("%p\n", pBirthTime), VERR_INVALID_POINTER);
-
-    /*
-     * Convert the paths.
-     */
-    char *pszNativePath;
-    int rc = rtPathToNative(&pszNativePath, pszPath);
-    if (RT_SUCCESS(rc))
-    {
-        /*
-         * If it's a no-op, we'll only verify the existance of the file.
-         */
-        if (!pAccessTime && !pModificationTime)
-        {
-            struct stat Stat;
-            if (!stat(pszNativePath, &Stat))
-                rc = VINF_SUCCESS;
-            else
-            {
-                rc = RTErrConvertFromErrno(errno);
-                Log(("RTPathSetTimes('%s',,,,): failed with %Rrc and errno=%d\n", pszPath, rc, errno));
-            }
-        }
-        else
-        {
-            /*
-             * Convert the input to timeval, getting the missing one if necessary,
-             * and call the API which does the change.
-             */
-            struct timeval aTimevals[2];
-            if (pAccessTime && pModificationTime)
-            {
-                RTTimeSpecGetTimeval(pAccessTime,       &aTimevals[0]);
-                RTTimeSpecGetTimeval(pModificationTime, &aTimevals[1]);
-            }
-            else
-            {
-                RTFSOBJINFO ObjInfo;
-                int rc = RTPathQueryInfo(pszPath, &ObjInfo, RTFSOBJATTRADD_UNIX);
-                if (RT_SUCCESS(rc))
-                {
-                    RTTimeSpecGetTimeval(pAccessTime        ? pAccessTime       : &ObjInfo.AccessTime,       &aTimevals[0]);
-                    RTTimeSpecGetTimeval(pModificationTime  ? pModificationTime : &ObjInfo.ModificationTime, &aTimevals[1]);
-                }
-                else
-                    Log(("RTPathSetTimes('%s',%p,%p,,): RTPathQueryInfo failed with %Rrc\n",
-                         pszPath, pAccessTime, pModificationTime, rc));
-            }
-            if (RT_SUCCESS(rc))
-            {
-                if (utimes(pszNativePath, aTimevals))
-                {
-                    rc = RTErrConvertFromErrno(errno);
-                    Log(("RTPathSetTimes('%s',%p,%p,,): failed with %Rrc and errno=%d\n",
-                         pszPath, pAccessTime, pModificationTime, rc, errno));
-                }
-            }
-        }
-    }
-
-    LogFlow(("RTPathSetTimes(%p:{%s}, %p:{%RDtimespec}, %p:{%RDtimespec}, %p:{%RDtimespec}, %p:{%RDtimespec}): return %Rrc\n",
-             pszPath, pszPath, pAccessTime, pAccessTime, pModificationTime, pModificationTime,
-             pChangeTime, pChangeTime, pBirthTime, pBirthTime));
     return rc;
 }
 
@@ -573,10 +123,10 @@ RTR3DECL(int) RTPathSetTimes(const char *pszPath, PCRTTIMESPEC pAccessTime, PCRT
 static bool rtPathSame(const char *pszNativeSrc, const char *pszNativeDst)
 {
     struct stat SrcStat;
-    if (stat(pszNativeSrc, &SrcStat))
+    if (lstat(pszNativeSrc, &SrcStat))
         return false;
     struct stat DstStat;
-    if (stat(pszNativeDst, &DstStat))
+    if (lstat(pszNativeDst, &DstStat))
         return false;
     Assert(SrcStat.st_dev && DstStat.st_dev);
     Assert(SrcStat.st_ino && DstStat.st_ino);
@@ -593,24 +143,24 @@ static bool rtPathSame(const char *pszNativeSrc, const char *pszNativeDst)
  *
  * @returns IPRT status code.
  * @param   pszSrc      The source path.
- * @param   pszDst      The destintation path.
+ * @param   pszDst      The destination path.
  * @param   fRename     The rename flags.
  * @param   fFileType   The filetype. We use the RTFMODE filetypes here. If it's 0,
  *                      anything goes. If it's RTFS_TYPE_DIRECTORY we'll check that the
  *                      source is a directory. If Its RTFS_TYPE_FILE we'll check that it's
  *                      not a directory (we are NOT checking whether it's a file).
  */
-int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, RTFMODE fFileType)
+DECLHIDDEN(int) rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, RTFMODE fFileType)
 {
     /*
      * Convert the paths.
      */
-    char *pszNativeSrc;
-    int rc = rtPathToNative(&pszNativeSrc, pszSrc);
+    char const *pszNativeSrc;
+    int rc = rtPathToNative(&pszNativeSrc, pszSrc, NULL);
     if (RT_SUCCESS(rc))
     {
-        char *pszNativeDst;
-        rc = rtPathToNative(&pszNativeDst, pszDst);
+        char const *pszNativeDst;
+        rc = rtPathToNative(&pszNativeDst, pszDst, NULL);
         if (RT_SUCCESS(rc))
         {
             /*
@@ -618,11 +168,11 @@ int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, 
              * We have to check this first to avoid getting errnous VERR_ALREADY_EXISTS
              * errors from the next step.
              *
-             * There are race conditions here (perhaps unlikly ones but still), but I'm
+             * There are race conditions here (perhaps unlikely ones, but still), but I'm
              * afraid there is little with can do to fix that.
              */
             struct stat SrcStat;
-            if (stat(pszNativeSrc, &SrcStat))
+            if (lstat(pszNativeSrc, &SrcStat))
                 rc = RTErrConvertFromErrno(errno);
             else if (!fFileType)
                 rc = VINF_SUCCESS;
@@ -640,7 +190,7 @@ int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, 
                  * Another race condition btw.
                  */
                 struct stat DstStat;
-                if (stat(pszNativeDst, &DstStat))
+                if (lstat(pszNativeDst, &DstStat))
                     rc = errno == ENOENT ? VINF_SUCCESS : RTErrConvertFromErrno(errno);
                 else
                 {
@@ -648,7 +198,7 @@ int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, 
                     Assert(SrcStat.st_ino && DstStat.st_ino);
                     if (    SrcStat.st_dev == DstStat.st_dev
                         &&  SrcStat.st_ino == DstStat.st_ino
-                        &&  (SrcStat.st_mode & S_IFMT) == (SrcStat.st_mode & S_IFMT))
+                        &&  (SrcStat.st_mode & S_IFMT) == (DstStat.st_mode & S_IFMT))
                     {
                         /*
                          * It's likely that we're talking about the same file here.
@@ -683,7 +233,7 @@ int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, 
                         }
                         else
                         {
-                            if (stat(pszNativeDst, &DstStat))
+                            if (lstat(pszNativeDst, &DstStat))
                                 rc = errno != ENOENT ? RTErrConvertFromErrno(errno) : VINF_SUCCESS;
                             else if (S_ISDIR(DstStat.st_mode))
                                 rc = VERR_ALREADY_EXISTS;
@@ -731,9 +281,9 @@ int rtPathPosixRename(const char *pszSrc, const char *pszDst, unsigned fRename, 
                 Log(("rtPathRename('%s', '%s', %#x ,%RTfmode): source type check failed rc=%Rrc errno=%d\n",
                      pszSrc, pszDst, fRename, fFileType, rc, errno));
 
-            rtPathFreeNative(pszNativeDst);
+            rtPathFreeNative(pszNativeDst, pszDst);
         }
-        rtPathFreeNative(pszNativeSrc);
+        rtPathFreeNative(pszNativeSrc, pszSrc);
     }
     return rc;
 }
@@ -744,8 +294,8 @@ RTR3DECL(int) RTPathRename(const char *pszSrc, const char *pszDst, unsigned fRen
     /*
      * Validate input.
      */
-    AssertMsgReturn(VALID_PTR(pszSrc), ("%p\n", pszSrc), VERR_INVALID_POINTER);
-    AssertMsgReturn(VALID_PTR(pszDst), ("%p\n", pszDst), VERR_INVALID_POINTER);
+    AssertPtrReturn(pszSrc, VERR_INVALID_POINTER);
+    AssertPtrReturn(pszDst, VERR_INVALID_POINTER);
     AssertMsgReturn(*pszSrc, ("%p\n", pszSrc), VERR_INVALID_PARAMETER);
     AssertMsgReturn(*pszDst, ("%p\n", pszDst), VERR_INVALID_PARAMETER);
     AssertMsgReturn(!(fRename & ~RTPATHRENAME_FLAGS_REPLACE), ("%#x\n", fRename), VERR_INVALID_PARAMETER);
@@ -756,6 +306,193 @@ RTR3DECL(int) RTPathRename(const char *pszSrc, const char *pszDst, unsigned fRen
     int rc = rtPathPosixRename(pszSrc, pszDst, fRename, 0);
 
     Log(("RTPathRename(%p:{%s}, %p:{%s}, %#x): returns %Rrc\n", pszSrc, pszSrc, pszDst, pszDst, fRename, rc));
+    return rc;
+}
+
+
+RTR3DECL(int) RTPathUnlink(const char *pszPath, uint32_t fUnlink)
+{
+    /*
+     * Validate input.
+     */
+    AssertPtrReturn(pszPath, VERR_INVALID_POINTER);
+    AssertReturn(*pszPath, VERR_INVALID_NAME);
+    AssertReturn(!(fUnlink & ~RTPATHUNLINK_FLAGS_NO_SYMLINKS), VERR_INVALID_FLAGS);
+
+    /*
+     * Convert the path.
+     */
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
+    if (RT_SUCCESS(rc))
+    {
+        /*
+         * Check if it's a directory using lstat, since unlink() may have adverse
+         * side effects when running as root on some file systems (at least on
+         * Solaris).
+         *
+         * There are of course race conditions here, but w/o a NT style removal
+         * API it is not possible to do this w/o a race.
+         *
+         * Note! We cannot just use rmdir here, in case the final entity is a
+         *       symlink pointing at a directory, as we're supposed to remove
+         *       the symlink when that's the case.
+         */
+        struct stat Stat;
+        rc = lstat(pszNativePath, &Stat);
+        if (rc || !S_ISDIR(Stat.st_mode))
+        {
+            rc = unlink(pszNativePath);
+            if (rc == 0)
+                rc = VINF_SUCCESS;
+            else
+            {
+                rc = errno;
+                if (rc != ENOENT)
+                    rc = RTErrConvertFromErrno(rc);
+                else
+                {
+                    /*
+                     * Make the path-not-found match windows.
+                     */
+                    rc = VERR_FILE_NOT_FOUND;
+                    size_t cch = strlen(pszNativePath);
+                    while (cch > 0 && RTPATH_IS_SLASH(pszNativePath[cch - 1]))
+                        cch--;
+                    while (cch > 0 && !RTPATH_IS_SLASH(pszNativePath[cch - 1]))
+                        cch--;
+                    while (cch > 0 && RTPATH_IS_SLASH(pszNativePath[cch - 1]))
+                        cch--;
+                    if (cch >= 1)
+                    {
+                        char *pszParent = (char *)RTMemTmpAlloc(cch + 1);
+                        if (pszParent)
+                        {
+                            memcpy(pszParent, pszNativePath, cch);
+                            pszParent[cch] = '\0';
+                            if (stat(pszParent, &Stat) && errno == ENOENT)
+                                rc = VERR_PATH_NOT_FOUND;
+                            RTMemTmpFree(pszParent);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            rc = rmdir(pszNativePath);
+            if (rc)
+            {
+                rc = errno;
+                if (rc == EEXIST) /* Solaris returns this, the rest have ENOTEMPTY. */
+                    rc = VERR_DIR_NOT_EMPTY;
+                else
+                    rc = RTErrConvertFromErrno(rc);
+            }
+        }
+
+        rtPathFreeNative(pszNativePath, pszPath);
+    }
+    return rc;
+}
+
+
+RTDECL(bool) RTPathExists(const char *pszPath)
+{
+    return RTPathExistsEx(pszPath, RTPATH_F_FOLLOW_LINK);
+}
+
+
+RTDECL(bool) RTPathExistsEx(const char *pszPath, uint32_t fFlags)
+{
+    /*
+     * Validate input.
+     */
+    AssertPtrReturn(pszPath, false);
+    AssertReturn(*pszPath, false);
+    Assert(RTPATH_F_IS_VALID(fFlags, 0));
+
+    /*
+     * Convert the path and check if it exists using stat().
+     */
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
+    if (RT_SUCCESS(rc))
+    {
+        struct stat Stat;
+        if (fFlags & RTPATH_F_FOLLOW_LINK)
+            rc = stat(pszNativePath, &Stat);
+        else
+            rc = lstat(pszNativePath, &Stat);
+        if (!rc)
+            rc = VINF_SUCCESS;
+        else
+            rc = VERR_GENERAL_FAILURE;
+        rtPathFreeNative(pszNativePath, pszPath);
+    }
+    return RT_SUCCESS(rc);
+}
+
+
+RTDECL(int)  RTPathGetCurrent(char *pszPath, size_t cchPath)
+{
+    /*
+     * Try with a reasonably sized buffer first.
+     */
+    char szNativeCurDir[RTPATH_MAX];
+    if (getcwd(szNativeCurDir, sizeof(szNativeCurDir)) != NULL)
+        return rtPathFromNativeCopy(pszPath, cchPath, szNativeCurDir, NULL);
+
+    /*
+     * Retry a few times with really big buffers if we failed because CWD is unreasonably long.
+     */
+    int iErr = errno;
+    if (iErr != ERANGE)
+        return RTErrConvertFromErrno(iErr);
+
+    size_t cbNativeTmp = RTPATH_BIG_MAX;
+    for (;;)
+    {
+        char *pszNativeTmp = (char *)RTMemTmpAlloc(cbNativeTmp);
+        if (!pszNativeTmp)
+            return VERR_NO_TMP_MEMORY;
+        if (getcwd(pszNativeTmp, cbNativeTmp) != NULL)
+        {
+            int rc = rtPathFromNativeCopy(pszPath, cchPath, pszNativeTmp, NULL);
+            RTMemTmpFree(pszNativeTmp);
+            return rc;
+        }
+        iErr = errno;
+        RTMemTmpFree(pszNativeTmp);
+        if (iErr != ERANGE)
+            return RTErrConvertFromErrno(iErr);
+
+        cbNativeTmp += RTPATH_BIG_MAX;
+        if (cbNativeTmp > RTPATH_BIG_MAX * 4)
+            return VERR_FILENAME_TOO_LONG;
+    }
+}
+
+
+RTDECL(int) RTPathSetCurrent(const char *pszPath)
+{
+    /*
+     * Validate input.
+     */
+    AssertPtrReturn(pszPath, VERR_INVALID_POINTER);
+    AssertReturn(*pszPath, VERR_INVALID_PARAMETER);
+
+    /*
+     * Change the directory.
+     */
+    char const *pszNativePath;
+    int rc = rtPathToNative(&pszNativePath, pszPath, NULL);
+    if (RT_SUCCESS(rc))
+    {
+        if (chdir(pszNativePath))
+            rc = RTErrConvertFromErrno(errno);
+        rtPathFreeNative(pszNativePath, pszPath);
+    }
     return rc;
 }
 

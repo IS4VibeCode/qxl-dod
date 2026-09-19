@@ -1,28 +1,43 @@
-/* $Id: time-darwin.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: time-darwin.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Time, Darwin.
+ * IPRT - Time, Darwin.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP RTLOGGROUP_TIME
 #define RTTIME_INCL_TIMEVAL
 #include <mach/mach_time.h>
@@ -31,84 +46,80 @@
 #include <time.h>
 
 #include <iprt/time.h>
+#include <iprt/assert.h>
+#include <iprt/asm-math.h>
 #include "internal/time.h"
 
 
-DECLINLINE(uint64_t) rtTimeGetSystemNanoTS(void)
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
+static struct mach_timebase_info    g_Info = { 0, 0 };
+static bool                         g_fFailedToGetTimeBaseInfo = false;
+
+
+/**
+ * Perform lazy init (pray we're not racing anyone in a bad way).
+ */
+static void rtTimeDarwinLazyInit(void)
 {
-    static struct mach_timebase_info    s_Info = { 0, 0 };
-    static double                       s_rdFactor = 0.0;
-
-    /* get the factors the first time (pray we're not racing anyone) */
-    if (s_Info.denom == 0)
+    struct mach_timebase_info Info;
+    if (mach_timebase_info(&Info) == KERN_SUCCESS)
+        g_Info = Info;
+    else
     {
-        static bool s_fFailedToGetTimeBaseInfo = false;
-        if (!s_fFailedToGetTimeBaseInfo)
-        {
-            struct mach_timebase_info Info;
-            if (mach_timebase_info(&Info) != KERN_SUCCESS)
-            {
-                s_rdFactor = (double)Info.numer / (double)Info.denom;
-                s_Info = Info;
-            }
-            else
-            {
-                s_Info.denom = s_Info.numer = 0;
-                s_fFailedToGetTimeBaseInfo = true;
-            }
-        }
+        g_fFailedToGetTimeBaseInfo = true;
+        Assert(g_Info.denom == 0 && g_Info.numer == 0);
     }
-
-    /* special case: absolute time is in nanoseconds */
-    if (s_Info.denom == 1 && s_Info.numer == 1)
-        return mach_absolute_time();
-
-    /* general case: multiply by factor to get nanoseconds. */
-    if (s_rdFactor != 0.0)
-        return mach_absolute_time() * s_rdFactor;
-
-    /* worst case: fallback to gettimeofday(). */
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec  * (uint64_t)(1000 * 1000 * 1000)
-         + (uint64_t)(tv.tv_usec * 1000);
 }
 
 
 /**
- * Gets the current nanosecond timestamp.
- *
- * This differs from RTTimeNanoTS in that it will use system APIs and not do any
- * resolution or performance optimizations.
- *
- * @returns nanosecond timestamp.
+ * Internal worker.
+ * @returns Nanosecond timestamp.
  */
+DECLINLINE(uint64_t) rtTimeGetSystemNanoTS(void)
+{
+    /* Lazy init. */
+    if (RT_UNLIKELY(g_Info.denom == 0 && !g_fFailedToGetTimeBaseInfo))
+        rtTimeDarwinLazyInit();
+
+    /* special case: absolute time is in nanoseconds. */
+    if (g_Info.denom == 1 && g_Info.numer == 1)
+        return mach_absolute_time();
+
+    /* general case: multiply by factor to get nanoseconds. */
+    if (g_Info.denom > 0 && g_Info.numer > 0)
+    {
+        /*
+         * We could use clock_gettime_nsec_np(CLOCK_UPTIME_RAW) but internally
+         * it might be calling mach_timebase_info() for each call. This is most
+         * likely faster since we avoid calling mach_timebase_info() here.
+         */
+        uint64_t const cTicks = mach_absolute_time();
+        return ASMMultU64ByU32DivByU32(cTicks, g_Info.numer, g_Info.denom);
+    }
+
+    /* worst case: fallback to gettimeofday(). */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec  * RT_NS_1SEC_64
+         + (uint64_t)(tv.tv_usec * RT_NS_1US);
+}
+
+
 RTDECL(uint64_t) RTTimeSystemNanoTS(void)
 {
     return rtTimeGetSystemNanoTS();
 }
 
 
-/**
- * Gets the current millisecond timestamp.
- *
- * This differs from RTTimeNanoTS in that it will use system APIs and not do any
- * resolution or performance optimizations.
- *
- * @returns millisecond timestamp.
- */
 RTDECL(uint64_t) RTTimeSystemMilliTS(void)
 {
-    return rtTimeGetSystemNanoTS();
+    return rtTimeGetSystemNanoTS() / RT_NS_1MS;
 }
 
 
-/**
- * Gets the current system time.
- *
- * @returns pTime.
- * @param   pTime   Where to store the time.
- */
 RTDECL(PRTTIMESPEC) RTTimeNow(PRTTIMESPEC pTime)
 {
     /** @todo find nanosecond API for getting time of day. */

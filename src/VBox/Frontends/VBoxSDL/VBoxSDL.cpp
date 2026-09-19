@@ -1,46 +1,75 @@
+/* $Id: VBoxSDL.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  * VBox frontends: VBoxSDL (simple frontend based on SDL):
  * Main code
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP LOG_GROUP_GUI
+
+#include <iprt/stream.h>
 
 #include <VBox/com/com.h>
 #include <VBox/com/string.h>
 #include <VBox/com/Guid.h>
+#include <VBox/com/array.h>
 #include <VBox/com/ErrorInfo.h>
-#include <VBox/com/EventQueue.h>
+#include <VBox/com/errorprint.h>
+
+#include <VBox/com/NativeEventQueue.h>
 #include <VBox/com/VirtualBox.h>
 
 using namespace com;
 
-#if defined (__LINUX__)
-#include <X11/Xlib.h>
-#include <X11/cursorfont.h>      /* for XC_left_ptr */
-#include <X11/Xcursor/Xcursor.h>
-#include <SDL_syswm.h>           /* for SDL_GetWMInfo() */
+#if defined(VBOXSDL_WITH_X11)
+# include <VBox/VBoxKeyboard.h>
+
+# include <X11/Xlib.h>
+# include <X11/cursorfont.h>      /* for XC_left_ptr */
+# if !defined(VBOX_WITHOUT_XCURSOR)
+#  include <X11/Xcursor/Xcursor.h>
+# endif
+# include <unistd.h>
 #endif
 
 #include "VBoxSDL.h"
+
+#ifdef _MSC_VER
+# pragma warning(push)
+# pragma warning(disable: 4121) /* warning C4121: 'SDL_SysWMmsg' : alignment of a member was sensitive to packing*/
+#endif
+#ifndef RT_OS_DARWIN
+# include <SDL_syswm.h>          /* for SDL_GetWMInfo() */
+#endif
+#ifdef _MSC_VER
+# pragma warning(pop)
+#endif
+
 #include "Framebuffer.h"
 #include "Helper.h"
 
@@ -49,62 +78,67 @@ using namespace com;
 #include <VBox/param.h>
 #include <VBox/log.h>
 #include <VBox/version.h>
-#include <iprt/path.h>
-#include <iprt/string.h>
-#include <iprt/runtime.h>
+#include <VBoxVideo.h>
+#include <VBox/com/listeners.h>
+
+#include <iprt/alloca.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
+#include <iprt/ctype.h>
+#include <iprt/env.h>
+#include <iprt/file.h>
+#include <iprt/ldr.h>
+#include <iprt/initterm.h>
+#include <iprt/message.h>
+#include <iprt/path.h>
+#include <iprt/process.h>
 #include <iprt/semaphore.h>
+#include <iprt/string.h>
 #include <iprt/stream.h>
 #include <iprt/uuid.h>
-#include <iprt/ldr.h>
 
-#include <stdlib.h> /* for alloca */
-#include <malloc.h> /* for alloca */
 #include <signal.h>
 
 #include <vector>
+#include <list>
+
+#include "PasswordInput.h"
 
 /* Xlib would re-define our enums */
 #undef True
 #undef False
 
-/*******************************************************************************
-*   Defined Constants And Macros                                               *
-*******************************************************************************/
-#ifdef VBOX_SECURELABEL
-/** extra data key for the secure label */
-#define VBOXSDL_SECURELABEL_EXTRADATA "VBoxSDL/SecureLabel"
-/** label area height in pixels */
-#define SECURE_LABEL_HEIGHT 20
-#endif
 
+/*********************************************************************************************************************************
+*   Defined Constants And Macros                                                                                                 *
+*********************************************************************************************************************************/
 /** Enables the rawr[0|3], patm, and casm options. */
 #define VBOXSDL_ADVANCED_OPTIONS
 
-/*******************************************************************************
-*   Structures and Typedefs                                                    *
-*******************************************************************************/
-/** Pointer shape change event data strucure */
+
+/*********************************************************************************************************************************
+*   Structures and Typedefs                                                                                                      *
+*********************************************************************************************************************************/
+/** Pointer shape change event data structure */
 struct PointerShapeChangeData
 {
-    PointerShapeChangeData (BOOL aVisible, BOOL aAlpha, ULONG aXHot, ULONG aYHot,
-                            ULONG aWidth, ULONG aHeight, const uint8_t *aShape)
-        : visible (aVisible), alpha (aAlpha), xHot (aXHot), yHot (aYHot),
-          width (aWidth), height (aHeight), shape (NULL)
+    PointerShapeChangeData(BOOL aVisible, BOOL aAlpha, ULONG aXHot, ULONG aYHot,
+                           ULONG aWidth, ULONG aHeight, ComSafeArrayIn(BYTE,pShape))
+        : visible(aVisible), alpha(aAlpha), xHot(aXHot), yHot(aYHot),
+          width(aWidth), height(aHeight)
     {
         // make a copy of the shape
-        if (aShape)
+        com::SafeArray<BYTE> aShape(ComSafeArrayInArg(pShape));
+        size_t cbShapeSize = aShape.size();
+        if (cbShapeSize > 0)
         {
-            uint32_t shapeSize = ((((aWidth + 7) / 8) * aHeight + 3) & ~3) + aWidth * 4 * aHeight;
-            shape = new uint8_t [shapeSize];
-            if (shape)
-                memcpy ((void *) shape, (void *) aShape, shapeSize);
+            shape.resize(cbShapeSize);
+            ::memcpy(shape.raw(), aShape.raw(), cbShapeSize);
         }
     }
 
     ~PointerShapeChangeData()
     {
-        if (shape) delete[] shape;
     }
 
     const BOOL visible;
@@ -113,7 +147,7 @@ struct PointerShapeChangeData
     const ULONG yHot;
     const ULONG width;
     const ULONG height;
-    const uint8_t *shape;
+    com::SafeArray<BYTE> shape;
 };
 
 enum TitlebarMode
@@ -124,351 +158,385 @@ enum TitlebarMode
     TITLEBAR_SNAPSHOT = 4
 };
 
-/*******************************************************************************
-*   Internal Functions                                                         *
-*******************************************************************************/
+
+/*********************************************************************************************************************************
+*   Internal Functions                                                                                                           *
+*********************************************************************************************************************************/
 static bool    UseAbsoluteMouse(void);
 static void    ResetKeys(void);
-static uint8_t Keyevent2Keycode(const SDL_KeyboardEvent *ev);
 static void    ProcessKey(SDL_KeyboardEvent *ev);
 static void    InputGrabStart(void);
 static void    InputGrabEnd(void);
-static void    SendMouseEvent(int dz, int button, int down);
+static void    SendMouseEvent(VBoxSDLFB *fb, int dz, int button, int down);
 static void    UpdateTitlebar(TitlebarMode mode, uint32_t u32User = 0);
 static void    SetPointerShape(const PointerShapeChangeData *data);
 static void    HandleGuestCapsChanged(void);
 static int     HandleHostKey(const SDL_KeyboardEvent *pEv);
-static Uint32  StartupTimer(Uint32 interval, void *param);
+static Uint32  StartupTimer(Uint32 interval, void *param) RT_NOTHROW_PROTO;
+static Uint32  ResizeTimer(Uint32 interval, void *param) RT_NOTHROW_PROTO;
+static Uint32  QuitTimer(Uint32 interval, void *param) RT_NOTHROW_PROTO;
+static int     WaitSDLEvent(SDL_Event *event);
+static void    SetFullscreen(bool enable);
+static VBoxSDLFB *getFbFromWinId(Uint32 id);
 
 
-/*******************************************************************************
-*   Global Variables                                                           *
-*******************************************************************************/
-#if defined (DEBUG_dmik)
-// my mini kbd doesn't have RCTRL...
-static int gHostKeyMod  = KMOD_RSHIFT;
-static int gHostKeySym1 = SDLK_RSHIFT;
-static int gHostKeySym2 = SDLK_UNKNOWN;
-#else
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
 static int gHostKeyMod  = KMOD_RCTRL;
 static int gHostKeySym1 = SDLK_RCTRL;
 static int gHostKeySym2 = SDLK_UNKNOWN;
-#endif
+static const char *gHostKeyDisabledCombinations = "";
+static const char *gpszPidFile;
 static BOOL gfGrabbed = FALSE;
 static BOOL gfGrabOnMouseClick = TRUE;
+static BOOL gfFullscreenResize = FALSE;
+static BOOL gfIgnoreNextResize = FALSE;
 static BOOL gfAllowFullscreenToggle = TRUE;
 static BOOL gfAbsoluteMouseHost = FALSE;
 static BOOL gfAbsoluteMouseGuest = FALSE;
+static BOOL gfRelativeMouseGuest = TRUE;
 static BOOL gfGuestNeedsHostCursor = FALSE;
 static BOOL gfOffCursorActive = FALSE;
 static BOOL gfGuestNumLockPressed = FALSE;
 static BOOL gfGuestCapsLockPressed = FALSE;
 static BOOL gfGuestScrollLockPressed = FALSE;
-static int  guGuestNumLockAdaptionCnt = 2;
+static BOOL gfACPITerm = FALSE;
+#if defined(VBOXSDL_WITH_X11) && !defined(VBOX_WITHOUT_XCURSOR)
+ static BOOL gfXCursorEnabled = FALSE;
+#endif
+static int  gcGuestNumLockAdaptions = 2;
+static int  gcGuestCapsLockAdaptions = 2;
+static uint32_t gmGuestNormalXRes;
+static uint32_t gmGuestNormalYRes;
 
 /** modifier keypress status (scancode as index) */
 static uint8_t gaModifiersState[256];
 
-static ComPtr<IMachine> gMachine;
-static ComPtr<IConsole> gConsole;
-static ComPtr<IMachineDebugger> gMachineDebugger;
-static ComPtr<IKeyboard> gKeyboard;
-static ComPtr<IMouse> gMouse;
-static ComPtr<IDisplay> gDisplay;
-static ComPtr<IVRDPServer> gVrdpServer;
-static ComPtr<IProgress> gProgress;
+static ComPtr<IMachine> gpMachine;
+static ComPtr<IConsole> gpConsole;
+static ComPtr<IMachineDebugger> gpMachineDebugger;
+static ComPtr<IKeyboard> gpKeyboard;
+static ComPtr<IMouse> gpMouse;
+ComPtr<IDisplay> gpDisplay;
+static ComPtr<IVRDEServer> gpVRDEServer;
+static ComPtr<IProgress> gpProgress;
 
-static VBoxSDLFB  *gpFrameBuffer = NULL;
+static ULONG       gcMonitors = 1;
+static ComObjPtr<VBoxSDLFB> gpFramebuffer[64];
+static Bstr gaFramebufferId[64];
 static SDL_Cursor *gpDefaultCursor = NULL;
-#ifdef __LINUX__
-static Cursor      gpDefaultOrigX11Cursor;
-#endif
-static SDL_Cursor *gpCustomCursor = NULL;
-static WMcursor   *gpCustomOrigWMcursor = NULL;
 static SDL_Cursor *gpOffCursor = NULL;
+static SDL_TimerID gSdlResizeTimer = 0;
+static SDL_TimerID gSdlQuitTimer = 0;
 
-#ifdef __LINUX__
-static SDL_SysWMinfo gSdlInfo;
-#endif
-
-#ifdef VBOX_SECURELABEL
-#ifdef __WIN__
-#define LIBSDL_TTF_NAME "SDL_ttf"
-#else
-#define LIBSDL_TTF_NAME "libSDL_ttf"
-#endif
-RTLDRMOD gLibrarySDL_ttf = NIL_RTLDRMOD;
-#endif
+static RTSEMEVENT g_EventSemSDLEvents;
+static volatile int32_t g_cNotifyUpdateEventsPending;
 
 /**
- * Callback handler for VirtualBox events
+ * Event handler for VirtualBoxClient events
  */
-class VBoxSDLCallback :
-    public IVirtualBoxCallback
+class VBoxSDLClientEventListener
 {
 public:
-    VBoxSDLCallback()
-    {
-#if defined (__WIN__)
-        refcnt = 0;
-#endif
-    }
-
-    virtual ~VBoxSDLCallback()
+    VBoxSDLClientEventListener()
     {
     }
 
-#ifdef __WIN__
-    STDMETHOD_(ULONG, AddRef)()
+    virtual ~VBoxSDLClientEventListener()
     {
-        return ::InterlockedIncrement(&refcnt);
     }
-    STDMETHOD_(ULONG, Release)()
-    {
-        long cnt = ::InterlockedDecrement(&refcnt);
-        if (cnt == 0)
-            delete this;
-        return cnt;
-    }
-    STDMETHOD(QueryInterface)(REFIID riid , void **ppObj)
-    {
-        if (riid == IID_IUnknown)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        if (riid == IID_IVirtualBoxCallback)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppObj = NULL;
-        return E_NOINTERFACE;
-    }
-#endif
 
-    NS_DECL_ISUPPORTS
-
-    STDMETHOD(OnMachineStateChange)(INPTR GUIDPARAM machineId, MachineState_T state)
+    HRESULT init()
     {
         return S_OK;
     }
 
-    STDMETHOD(OnMachineDataChange)(INPTR GUIDPARAM machineId)
+    void uninit()
     {
-        return S_OK;
     }
 
-    STDMETHOD(OnExtraDataCanChange)(INPTR GUIDPARAM machineId, INPTR BSTR key, INPTR BSTR value,
-                                    BOOL *changeAllowed)
+    STDMETHOD(HandleEvent)(VBoxEventType_T aType, IEvent * aEvent)
     {
-        /* we never disagree */
-        if (!changeAllowed)
-            return E_INVALIDARG;
-        *changeAllowed = true;
-        return S_OK;
-    }
-
-    STDMETHOD(OnExtraDataChange)(INPTR GUIDPARAM machineId, INPTR BSTR key, INPTR BSTR value)
-    {
-#ifdef VBOX_SECURELABEL
-        Assert(key);
-        /*
-         * check if we're interested in the message
-         */
-        Guid ourGuid;
-        Guid messageGuid = machineId;
-        gMachine->COMGETTER(Id)(ourGuid.asOutParam());
-        if (ourGuid == messageGuid)
+        switch (aType)
         {
-            Bstr keyString = key;
-            if (keyString && keyString == VBOXSDL_SECURELABEL_EXTRADATA)
+            case VBoxEventType_OnVBoxSVCAvailabilityChanged:
             {
-                /*
-                 * Notify SDL thread of the string update
-                 */
-                SDL_Event event  = {0};
-                event.type       = SDL_USEREVENT;
-                event.user.type  = SDL_USER_EVENT_SECURELABEL_UPDATE;
-                int rc = SDL_PushEvent(&event);
-                NOREF(rc);
-                AssertMsg(!rc, ("SDL_PushEvent returned with SDL error '%s'\n", SDL_GetError()));
+                ComPtr<IVBoxSVCAvailabilityChangedEvent> pVSACEv = aEvent;
+                Assert(pVSACEv);
+                BOOL fAvailable = FALSE;
+                pVSACEv->COMGETTER(Available)(&fAvailable);
+                if (!fAvailable)
+                {
+                    LogRel(("VBoxSDL: VBoxSVC became unavailable, exiting.\n"));
+                    RTPrintf("VBoxSVC became unavailable, exiting.\n");
+                    /* Send QUIT event to terminate the VM as cleanly as possible
+                     * given that VBoxSVC is no longer present. */
+                    SDL_Event event = {0};
+                    event.type = SDL_QUIT;
+                    PushSDLEventForSure(&event);
+                }
+                break;
             }
+
+            default:
+                AssertFailed();
         }
-#endif /* VBOX_SECURELABEL */
+
         return S_OK;
     }
-
-    STDMETHOD(OnMachineRegistered)(INPTR GUIDPARAM machineId, BOOL registered)
-    {
-        return S_OK;
-    }
-
-    STDMETHOD(OnSessionStateChange)(INPTR GUIDPARAM machineId, SessionState_T state)
-    {
-        return S_OK;
-    }
-
-    STDMETHOD(OnSnapshotTaken) (INPTR GUIDPARAM aMachineId, INPTR GUIDPARAM aSnapshotId)
-    {
-        return S_OK;
-    }
-
-    STDMETHOD(OnSnapshotDiscarded) (INPTR GUIDPARAM aMachineId, INPTR GUIDPARAM aSnapshotId)
-    {
-        return S_OK;
-    }
-
-    STDMETHOD(OnSnapshotChange) (INPTR GUIDPARAM aMachineId, INPTR GUIDPARAM aSnapshotId)
-    {
-        return S_OK;
-    }
-
-private:
-#ifdef __WIN__
-    long refcnt;
-#endif
-
 };
 
 /**
- * Callback handler for machine events
+ * Event handler for VirtualBox (server) events
  */
-class VBoxSDLConsoleCallback :
-    public IConsoleCallback
+class VBoxSDLEventListener
 {
 public:
-    VBoxSDLConsoleCallback() : m_fIgnorePowerOffEvents(false)
+    VBoxSDLEventListener()
     {
-#if defined (__WIN__)
-        refcnt = 0;
+    }
+
+    virtual ~VBoxSDLEventListener()
+    {
+    }
+
+    HRESULT init()
+    {
+        return S_OK;
+    }
+
+    void uninit()
+    {
+    }
+
+    STDMETHOD(HandleEvent)(VBoxEventType_T aType, IEvent * aEvent)
+    {
+        RT_NOREF(aEvent);
+        switch (aType)
+        {
+            case VBoxEventType_OnExtraDataChanged:
+                break;
+            default:
+                AssertFailed();
+        }
+
+        return S_OK;
+    }
+};
+
+/**
+ * Event handler for Console events
+ */
+class VBoxSDLConsoleEventListener
+{
+public:
+    VBoxSDLConsoleEventListener() : m_fIgnorePowerOffEvents(false)
+    {
+    }
+
+    virtual ~VBoxSDLConsoleEventListener()
+    {
+    }
+
+    HRESULT init()
+    {
+        return S_OK;
+    }
+
+    void uninit()
+    {
+    }
+
+    STDMETHOD(HandleEvent)(VBoxEventType_T aType, IEvent * aEvent)
+    {
+        // likely all this double copy is now excessive, and we can just use existing event object
+        /// @todo eliminate it
+        switch (aType)
+        {
+            case VBoxEventType_OnMousePointerShapeChanged:
+            {
+                ComPtr<IMousePointerShapeChangedEvent> pMPSCEv = aEvent;
+                Assert(pMPSCEv);
+                PointerShapeChangeData *data;
+                BOOL    visible,  alpha;
+                ULONG   xHot, yHot, width, height;
+                com::SafeArray<BYTE> shape;
+
+                pMPSCEv->COMGETTER(Visible)(&visible);
+                pMPSCEv->COMGETTER(Alpha)(&alpha);
+                pMPSCEv->COMGETTER(Xhot)(&xHot);
+                pMPSCEv->COMGETTER(Yhot)(&yHot);
+                pMPSCEv->COMGETTER(Width)(&width);
+                pMPSCEv->COMGETTER(Height)(&height);
+                pMPSCEv->COMGETTER(Shape)(ComSafeArrayAsOutParam(shape));
+                data = new PointerShapeChangeData(visible, alpha, xHot, yHot, width, height,
+                                                  ComSafeArrayAsInParam(shape));
+                Assert(data);
+                if (!data)
+                    break;
+
+                SDL_Event event  = {0};
+                event.type       = SDL_USEREVENT;
+                event.user.type  = SDL_USER_EVENT_POINTER_CHANGE;
+                event.user.data1 = data;
+
+                int rc = PushSDLEventForSure(&event);
+                if (rc)
+                    delete data;
+
+                break;
+            }
+            case VBoxEventType_OnMouseCapabilityChanged:
+            {
+                ComPtr<IMouseCapabilityChangedEvent> pMCCEv = aEvent;
+                Assert(pMCCEv);
+                pMCCEv->COMGETTER(SupportsAbsolute)(&gfAbsoluteMouseGuest);
+                pMCCEv->COMGETTER(SupportsRelative)(&gfRelativeMouseGuest);
+                pMCCEv->COMGETTER(NeedsHostCursor)(&gfGuestNeedsHostCursor);
+                SDL_Event event = {0};
+                event.type      = SDL_USEREVENT;
+                event.user.type = SDL_USER_EVENT_GUEST_CAP_CHANGED;
+
+                PushSDLEventForSure(&event);
+                break;
+            }
+            case VBoxEventType_OnKeyboardLedsChanged:
+            {
+                ComPtr<IKeyboardLedsChangedEvent> pCLCEv = aEvent;
+                Assert(pCLCEv);
+                BOOL fNumLock, fCapsLock, fScrollLock;
+                pCLCEv->COMGETTER(NumLock)(&fNumLock);
+                pCLCEv->COMGETTER(CapsLock)(&fCapsLock);
+                pCLCEv->COMGETTER(ScrollLock)(&fScrollLock);
+                /* Don't bother the guest with NumLock scancodes if he doesn't set the NumLock LED */
+                if (gfGuestNumLockPressed != fNumLock)
+                    gcGuestNumLockAdaptions = 2;
+                if (gfGuestCapsLockPressed != fCapsLock)
+                    gcGuestCapsLockAdaptions = 2;
+                gfGuestNumLockPressed    = fNumLock;
+                gfGuestCapsLockPressed   = fCapsLock;
+                gfGuestScrollLockPressed = fScrollLock;
+                break;
+            }
+
+            case VBoxEventType_OnStateChanged:
+            {
+                ComPtr<IStateChangedEvent> pSCEv = aEvent;
+                Assert(pSCEv);
+                MachineState_T machineState;
+                pSCEv->COMGETTER(State)(&machineState);
+                LogFlow(("OnStateChange: machineState = %d (%s)\n", machineState, GetStateName(machineState)));
+                SDL_Event event = {0};
+
+                if (     machineState == MachineState_Aborted
+                         ||   machineState == MachineState_Teleported
+                         ||  (machineState == MachineState_Saved        && !m_fIgnorePowerOffEvents)
+                         ||  (machineState == MachineState_AbortedSaved && !m_fIgnorePowerOffEvents)
+                         ||  (machineState == MachineState_PoweredOff   && !m_fIgnorePowerOffEvents)
+                         )
+                {
+                    /*
+                     * We have to inform the SDL thread that the application has be terminated
+                     */
+                    event.type      = SDL_USEREVENT;
+                    event.user.type = SDL_USER_EVENT_TERMINATE;
+                    event.user.code = machineState == MachineState_Aborted
+                            ? VBOXSDL_TERM_ABEND
+                            : VBOXSDL_TERM_NORMAL;
+                }
+                else
+                {
+                    /*
+                     * Inform the SDL thread to refresh the titlebar
+                     */
+                    event.type      = SDL_USEREVENT;
+                    event.user.type = SDL_USER_EVENT_UPDATE_TITLEBAR;
+                }
+
+                PushSDLEventForSure(&event);
+                break;
+            }
+
+            case VBoxEventType_OnRuntimeError:
+            {
+                ComPtr<IRuntimeErrorEvent> pRTEEv = aEvent;
+                Assert(pRTEEv);
+                BOOL fFatal;
+
+                pRTEEv->COMGETTER(Fatal)(&fFatal);
+                MachineState_T machineState;
+                gpMachine->COMGETTER(State)(&machineState);
+                const char *pszType;
+                bool fPaused = machineState == MachineState_Paused;
+                if (fFatal)
+                    pszType = "FATAL ERROR";
+                else if (machineState == MachineState_Paused)
+                    pszType = "Non-fatal ERROR";
+                else
+                    pszType = "WARNING";
+                Bstr bstrId, bstrMessage;
+                pRTEEv->COMGETTER(Id)(bstrId.asOutParam());
+                pRTEEv->COMGETTER(Message)(bstrMessage.asOutParam());
+                RTPrintf("\n%s: ** %ls **\n%ls\n%s\n", pszType, bstrId.raw(), bstrMessage.raw(),
+                         fPaused ? "The VM was paused. Continue with HostKey + P after you solved the problem.\n" : "");
+                break;
+            }
+
+            case VBoxEventType_OnCanShowWindow:
+            {
+                ComPtr<ICanShowWindowEvent> pCSWEv = aEvent;
+                Assert(pCSWEv);
+#ifdef RT_OS_DARWIN
+                /* SDL feature not available on Quartz */
+#else
+                bool fCanShow = false;
+                Uint32 winId = 0;
+                VBoxSDLFB *fb = getFbFromWinId(winId);
+                if (fb) /* Framebuffer might not be around (yet). */
+                {
+                    SDL_SysWMinfo info;
+                    SDL_VERSION(&info.version);
+                    if (SDL_GetWindowWMInfo(fb->getWindow(), &info))
+                        fCanShow = true;
+                    if (fCanShow)
+                        pCSWEv->AddApproval(NULL);
+                    else
+                        pCSWEv->AddVeto(NULL);
+                }
 #endif
-    }
+                break;
+            }
 
-    virtual ~VBoxSDLConsoleCallback()
-    {
-    }
+            case VBoxEventType_OnShowWindow:
+            {
+                ComPtr<IShowWindowEvent> pSWEv = aEvent;
+                Assert(pSWEv);
+                LONG64 winId = 0;
+                pSWEv->COMGETTER(WinId)(&winId);
+                if (winId != 0)
+                    break; /* WinId already set by some other listener. */
+#ifndef RT_OS_DARWIN
+                SDL_SysWMinfo info;
+                SDL_VERSION(&info.version);
+                VBoxSDLFB *fb = getFbFromWinId(winId);
+                if (SDL_GetWindowWMInfo(fb->getWindow(), &info))
+                {
+# if defined(VBOXSDL_WITH_X11)
+                    pSWEv->COMSETTER(WinId)((LONG64)info.info.x11.window);
+# elif defined(RT_OS_WINDOWS)
+                    pSWEv->COMSETTER(WinId)((intptr_t)info.info.win.window);
+# else /* !RT_OS_WINDOWS */
+                    AssertFailed();
+# endif
+                }
+#endif /* !RT_OS_DARWIN */
+                break;
+            }
 
-#ifdef __WIN__
-    STDMETHOD_(ULONG, AddRef)()
-    {
-        return ::InterlockedIncrement(&refcnt);
-    }
-    STDMETHOD_(ULONG, Release)()
-    {
-        long cnt = ::InterlockedDecrement(&refcnt);
-        if (cnt == 0)
-            delete this;
-        return cnt;
-    }
-    STDMETHOD(QueryInterface)(REFIID riid , void **ppObj)
-    {
-        if (riid == IID_IUnknown)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
+            default:
+                AssertFailed();
         }
-        if (riid == IID_IConsoleCallback)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppObj = NULL;
-        return E_NOINTERFACE;
-    }
-#endif
-
-    NS_DECL_ISUPPORTS
-
-    STDMETHOD(OnMousePointerShapeChange) (BOOL visible, BOOL alpha, ULONG xHot, ULONG yHot,
-                                          ULONG width, ULONG height, ULONG shape)
-    {
-        PointerShapeChangeData *data;
-        data = new PointerShapeChangeData (visible, alpha, xHot, yHot, width, height,
-                                           (const uint8_t *) shape);
-        Assert (data);
-        if (!data)
-            return E_FAIL;
-
-        SDL_Event event  = {0};
-        event.type       = SDL_USEREVENT;
-        event.user.type  = SDL_USER_EVENT_POINTER_CHANGE;
-        event.user.data1 = data;
-
-        int rc = SDL_PushEvent (&event);
-        AssertMsg(!rc, ("SDL_PushEvent returned with SDL error '%s'\n", SDL_GetError()));
-        if (rc)
-            delete data;
-
-        return S_OK;
-    }
-
-    STDMETHOD(OnMouseCapabilityChange)(BOOL supportsAbsolute, BOOL needsHostCursor)
-    {
-        LogFlow(("OnMouseCapabilityChange: supportsAbsolute = %d\n", supportsAbsolute));
-        gfAbsoluteMouseGuest   = supportsAbsolute;
-        gfGuestNeedsHostCursor = needsHostCursor;
-
-        SDL_Event event = {0};
-        event.type      = SDL_USEREVENT;
-        event.user.type = SDL_USER_EVENT_GUEST_CAP_CHANGED;
-
-        int rc = SDL_PushEvent (&event);
-        NOREF(rc);
-        AssertMsg(!rc, ("SDL_PushEvent returned with SDL error '%s'\n", SDL_GetError()));
-        return S_OK;
-    }
-
-    STDMETHOD(OnStateChange)(MachineState_T machineState)
-    {
-        LogFlow(("OnStateChange: machineState = %d (%s)\n", machineState, GetStateName(machineState)));
-        SDL_Event event = {0};
-
-        if (     machineState == MachineState_Aborted
-            ||  (machineState == MachineState_Saved      && !m_fIgnorePowerOffEvents)
-            ||  (machineState == MachineState_PoweredOff && !m_fIgnorePowerOffEvents))
-        {
-            /*
-             * We have to inform the SDL thread that the application has be terminated
-             */
-            event.type      = SDL_USEREVENT;
-            event.user.type = SDL_USER_EVENT_TERMINATE;
-            event.user.code = machineState == MachineState_Aborted 
-                                           ? VBOXSDL_TERM_ABEND
-                                           : VBOXSDL_TERM_NORMAL;
-        }
-        else
-        {
-            /*
-             * Inform the SDL thread to refresh the titlebar
-             */
-            event.type      = SDL_USEREVENT;
-            event.user.type = SDL_USER_EVENT_UPDATE_TITLEBAR;
-        }
-
-        int rc = SDL_PushEvent(&event);
-        NOREF(rc);
-        AssertMsg(!rc, ("SDL_PushEvent returned with SDL error '%s'\n", SDL_GetError()));
-        return S_OK;
-    }
-
-    STDMETHOD(OnAdditionsStateChange)()
-    {
-        return S_OK;
-    }
-
-    STDMETHOD(OnKeyboardLedsChange)(BOOL fNumLock, BOOL fScrollLock, BOOL fCapsLock)
-    {
-        /* Don't bother the guest with NumLock scancodes if he doesn't set the NumLock LED */
-        if (gfGuestNumLockPressed != fNumLock)
-            guGuestNumLockAdaptionCnt = 2;
-        gfGuestNumLockPressed    = fNumLock;
-        gfGuestScrollLockPressed = fScrollLock;
-        gfGuestCapsLockPressed   = fCapsLock;
         return S_OK;
     }
 
@@ -476,15 +544,27 @@ public:
     {
         switch (machineState)
         {
-            case MachineState_InvalidMachineState: return "InvalidMachineState";
-            case MachineState_Running:             return "Running";
-            case MachineState_Restoring:           return "Restoring";
-            case MachineState_Starting:            return "Starting";
-            case MachineState_PoweredOff:          return "PoweredOff";
-            case MachineState_Saved:               return "Saved";
-            case MachineState_Aborted:             return "Aborted";
-            case MachineState_Stopping:            return "Stopping";
-            default:                               return "no idea";
+            case MachineState_Null:                 return "<null>";
+            case MachineState_PoweredOff:           return "PoweredOff";
+            case MachineState_Saved:                return "Saved";
+            case MachineState_Teleported:           return "Teleported";
+            case MachineState_Aborted:              return "Aborted";
+            case MachineState_AbortedSaved:         return "Aborted-Saved";
+            case MachineState_Running:              return "Running";
+            case MachineState_Teleporting:          return "Teleporting";
+            case MachineState_LiveSnapshotting:     return "LiveSnapshotting";
+            case MachineState_Paused:               return "Paused";
+            case MachineState_Stuck:                return "GuruMeditation";
+            case MachineState_Starting:             return "Starting";
+            case MachineState_Stopping:             return "Stopping";
+            case MachineState_Saving:               return "Saving";
+            case MachineState_Restoring:            return "Restoring";
+            case MachineState_TeleportingPausedVM:  return "TeleportingPausedVM";
+            case MachineState_TeleportingIn:        return "TeleportingIn";
+            case MachineState_RestoringSnapshot:    return "RestoringSnapshot";
+            case MachineState_DeletingSnapshot:     return "DeletingSnapshot";
+            case MachineState_SettingUp:            return "SettingUp";
+            default:                                return "no idea";
         }
     }
 
@@ -494,70 +574,72 @@ public:
     }
 
 private:
-#ifdef __WIN__
-    long refcnt;
-#endif
     bool m_fIgnorePowerOffEvents;
 };
 
-#ifdef __LINUX__
-NS_DECL_CLASSINFO(VBoxSDLCallback)
-NS_IMPL_ISUPPORTS1_CI(VBoxSDLCallback, IVirtualBoxCallback)
-NS_DECL_CLASSINFO(VBoxSDLConsoleCallback)
-NS_IMPL_ISUPPORTS1_CI(VBoxSDLConsoleCallback, IConsoleCallback)
-#endif /* __LINUX__ */
+typedef ListenerImpl<VBoxSDLClientEventListener>  VBoxSDLClientEventListenerImpl;
+typedef ListenerImpl<VBoxSDLEventListener>        VBoxSDLEventListenerImpl;
+typedef ListenerImpl<VBoxSDLConsoleEventListener> VBoxSDLConsoleEventListenerImpl;
 
 static void show_usage()
 {
     RTPrintf("Usage:\n"
-             "  -list                    List all registered virtual machines and exit\n"
-             "  -vm <id|name>            Virtual machine to start, either UUID or name\n"
-             "  -hda <file>              Set temporary first hard disk to file\n"
-             "  -fda <file>              Set temporary first floppy disk to file\n"
-             "  -cdrom <file>            Set temporary CDROM/DVD to file/device ('none' to unmount)\n"
-             "  -boot <a|c|d>            Set temporary boot device (a = floppy, c = first hard disk, d = DVD)\n"
-             "  -m <size>                Set temporary memory size in megabytes\n"
-             "  -vram <size>             Set temporary size of video memory in megabytes\n"
-             "  -fullscreen              Start VM in fullscreen mode\n"
-             "  -fixedmode <w> <h> <bpp> Use a fixed SDL video mode with given width, height and bits per pixel\n"
-             "  -nofstoggle              Forbid switching to/from fullscreen mode\n"
-             "  -noresize                Make the SDL frame non resizable\n"
-             "  -nohostkey               Disable hostkey\n"
-             "  -nograbonclick           Disable mouse/keyboard grabbing on mouse click w/o additions\n"
-             "  -detecthostkey           Get the hostkey identifier and modifier state\n"
-             "  -hostkey <key> {<key2>} <mod> Set the host key to the values obtained using -detecthostkey\n"
-#ifdef __LINUX__
-             "  -tapdev<1-N> <dev>       Use existing persistent TAP device with the given name\n"
-             "  -tapfd<1-N> <fd>         Use existing TAP device, don't allocate\n"
-#endif
-#ifdef VBOX_VRDP
-             "  -vrdp <port>             Listen for VRDP connections on port (default if not specified)\n"
-#endif
-             "  -discardstate            Discard saved state (if present) and revert to last snapshot (if present)\n"
-#ifdef VBOX_SECURELABEL
-             "  -securelabel             Display a secure VM label at the top of the screen\n"
-             "  -seclabelfnt             TrueType (.ttf) font file for secure session label\n"
-             "  -seclabelsiz             Font point size for secure session label (default 12)\n"
-             "  -seclabelfgcol <rgb>     Secure label text color RGB value in 6 digit hexadecimal (eg: FFFF00)\n"
-             "  -seclabelbgcol <rgb>     Secure label background color RGB value in 6 digit hexadecimal (eg: FF0000)\n"
-#endif
+             "  --startvm <uuid|name>    Virtual machine to start, either UUID or name\n"
+             "  --separate               Run a separate VM process or attach to a running VM\n"
+             "  --hda <file>             Set temporary first hard disk to file\n"
+             "  --fda <file>             Set temporary first floppy disk to file\n"
+             "  --cdrom <file>           Set temporary CDROM/DVD to file/device ('none' to unmount)\n"
+             "  --boot <a|c|d|n>         Set temporary boot device (a = floppy, c = 1st HD, d = DVD, n = network)\n"
+             "  --memory <size>          Set temporary memory size in megabytes\n"
+             "  --vram <size>            Set temporary size of video memory in megabytes\n"
+             "  --fullscreen             Start VM in fullscreen mode\n"
+             "  --fullscreenresize       Resize the guest on fullscreen\n"
+             "  --fixedmode <w> <h> <bpp> Use a fixed SDL video mode with given width, height and bits per pixel\n"
+             "  --nofstoggle             Forbid switching to/from fullscreen mode\n"
+             "  --noresize               Make the SDL frame non resizable\n"
+             "  --nohostkey              Disable all hostkey combinations\n"
+             "  --nohostkeys ...         Disable specific hostkey combinations, see below for valid keys\n"
+             "  --nograbonclick          Disable mouse/keyboard grabbing on mouse click w/o additions\n"
+             "  --detecthostkey          Get the hostkey identifier and modifier state\n"
+             "  --hostkey <key> {<key2>} <mod> Set the host key to the values obtained using --detecthostkey\n"
+             "  --termacpi               Send an ACPI power button event when closing the window\n"
+             "  --vrdp <ports>           Listen for VRDP connections on one of specified ports (default if not specified)\n"
+             "  --discardstate           Discard saved state (if present) and revert to last snapshot (if present)\n"
+             "  --settingspw <pw>        Specify the settings password\n"
+             "  --settingspwfile <file>  Specify a file containing the settings password\n"
 #ifdef VBOXSDL_ADVANCED_OPTIONS
-             "  -[no]rawr0               Enable or disable raw ring 3\n"
-             "  -[no]rawr3               Enable or disable raw ring 0\n"
-             "  -[no]patm                Enable or disable PATM\n"
-             "  -[no]csam                Enable or disable CSAM\n"
-             "  -[no]hwvirtex            Permit or deny the usage of VMX/SVN\n"
+             "  --warpdrive <pct>        Sets the warp driver rate in percent (100 = normal)\n"
+#endif
+             "\n"
+             "Key bindings:\n"
+             "  <hostkey> +  f           Switch to full screen / restore to previous view\n"
+             "               h           Press ACPI power button\n"
+             "               n           Take a snapshot and continue execution\n"
+             "               p           Pause / resume execution\n"
+             "               q           Power off\n"
+             "               r           VM reset\n"
+             "               s           Save state and power off\n"
+             "              <del>        Send <ctrl><alt><del>\n"
+             "       <F1>...<F12>        Send <ctrl><alt><Fx>\n"
+#if defined(DEBUG) || defined(VBOX_WITH_STATISTICS)
+             "\n"
+             "Further key bindings useful for debugging:\n"
+             "  LCtrl + Alt + F12        Reset statistics counter\n"
+             "  LCtrl + Alt + F11        Dump statistics to logfile\n"
+             "  Alt         + F8         Toggle single step mode\n"
+             "  LCtrl/RCtrl + F12        Toggle logger\n"
+             "  F12                      Write log marker to logfile\n"
 #endif
              "\n");
 }
 
-static void PrintError(const char *pszName, const BSTR pwszDescr, const BSTR pwszComponent=NULL)
+static void PrintError(const char *pszName, CBSTR pwszDescr, CBSTR pwszComponent=NULL)
 {
     const char *pszFile, *pszFunc, *pszStat;
     char  pszBuffer[1024];
     com::ErrorInfo info;
 
-    RTStrPrintf(pszBuffer, sizeof(pszBuffer), "%lS", pwszDescr);
+    RTStrPrintf(pszBuffer, sizeof(pszBuffer), "%ls", pwszDescr);
 
     RTPrintf("\n%s! Error info:\n", pszName);
     if (   (pszFile = strstr(pszBuffer, "At '"))
@@ -572,12 +654,12 @@ static void PrintError(const char *pszName, const BSTR pwszDescr, const BSTR pws
         RTPrintf("%s\n", pszBuffer);
 
     if (pwszComponent)
-        RTPrintf("(component %lS).\n", pwszComponent);
+        RTPrintf("(component %ls).\n", pwszComponent);
 
     RTPrintf("\n");
 }
 
-#ifdef __LINUX__
+#ifdef VBOXSDL_WITH_X11
 /**
  * Custom signal handler. Currently it is only used to release modifier
  * keys when receiving the USR1 signal. When switching VTs, we might not
@@ -585,8 +667,10 @@ static void PrintError(const char *pszName, const BSTR pwszDescr, const BSTR pws
  * on the new VT, the VM will be saved with modifier keys stuck. This is
  * annoying enough for introducing this hack.
  */
-void signal_handler(int sig, siginfo_t *info, void *secret)
+void signal_handler_SIGUSR1(int sig, siginfo_t *info, void *secret)
 {
+    RT_NOREF(info, secret);
+
     /* only SIGUSR1 is interesting */
     if (sig == SIGUSR1)
     {
@@ -594,116 +678,232 @@ void signal_handler(int sig, siginfo_t *info, void *secret)
         ResetKeys();
     }
 }
-#endif /* __LINUX__ */
+
+/**
+ * Custom signal handler for catching exit events.
+ */
+void signal_handler_SIGINT(int sig)
+{
+    if (gpszPidFile)
+        RTFileDelete(gpszPidFile);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGSEGV, SIG_DFL);
+    kill(getpid(), sig);
+}
+#endif /* VBOXSDL_WITH_X11 */
+
+/**
+ * Returns a stringified version of a keyboard modifier.
+ *
+ * @returns Stringified version of the keyboard modifier.
+ * @param   mod                 Modifier code to return a stringified version for.
+ */
+static const char *keyModToStr(unsigned mod)
+{
+    switch (mod)
+    {
+        RT_CASE_RET_STR(KMOD_NONE);
+        RT_CASE_RET_STR(KMOD_LSHIFT);
+        RT_CASE_RET_STR(KMOD_RSHIFT);
+        RT_CASE_RET_STR(KMOD_LCTRL);
+        RT_CASE_RET_STR(KMOD_RCTRL);
+        RT_CASE_RET_STR(KMOD_LALT);
+        RT_CASE_RET_STR(KMOD_RALT);
+        RT_CASE_RET_STR(KMOD_LGUI);
+        RT_CASE_RET_STR(KMOD_RGUI);
+        RT_CASE_RET_STR(KMOD_NUM);
+        RT_CASE_RET_STR(KMOD_CAPS);
+        RT_CASE_RET_STR(KMOD_MODE);
+        RT_CASE_RET_STR(KMOD_SCROLL);
+        default:
+            break;
+    }
+
+    return "<Unknown>";
+}
+
+/**
+ * Handles detecting a host key by printing its values to stdout.
+ *
+ * @returns RTEXITCODE
+ */
+static RTEXITCODE handleDetectHostKey(void)
+{
+    RTEXITCODE rcExit  = RTEXITCODE_SUCCESS;
+
+    int rc = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_TIMER);
+    if (rc == 0)
+    {
+        /* We need a window, otherwise we won't get any keypress events. */
+        SDL_Window *pWnd = SDL_CreateWindow("VBoxSDL",
+                                            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480, SDL_WINDOW_SHOWN);
+        RTPrintf("Please hit one or two function key(s) to get the --hostkey value. ..\n");
+        RTPrintf("Press CTRL+C to quit.\n");
+        SDL_Event e1;
+        while (SDL_WaitEvent(&e1))
+        {
+            if (    e1.key.keysym.sym == SDLK_c
+                && (e1.key.keysym.mod & KMOD_CTRL) != 0)
+                break;
+            if (e1.type == SDL_QUIT)
+                break;
+            if (e1.type == SDL_KEYDOWN)
+            {
+                unsigned const mod = SDL_GetModState() & ~(KMOD_MODE | KMOD_NUM | KMOD_RESERVED);
+                RTPrintf("--hostkey %d", e1.key.keysym.sym);
+                if (mod)
+                    RTPrintf(" %d\n", mod);
+                else
+                    RTPrintf("\n");
+
+                if (mod)
+                    RTPrintf("Host key is '%s' + '%s'\n", keyModToStr(mod), SDL_GetKeyName(e1.key.keysym.sym));
+                else
+                    RTPrintf("Host key is '%s'\n", SDL_GetKeyName(e1.key.keysym.sym));
+            }
+        }
+        SDL_DestroyWindow(pWnd);
+        SDL_Quit();
+    }
+    else
+    {
+        RTPrintf("Error: SDL_InitSubSystem failed with message '%s'\n", SDL_GetError());
+        rcExit = RTEXITCODE_FAILURE;
+    }
+
+    return rcExit;
+}
 
 /** entry point */
-int main(int argc, char *argv[])
+extern "C"
+DECLEXPORT(int) TrustedMain(int argc, char **argv, char **envp)
 {
-    /*
-     * Before we do *anything*, we initialize the runtime.
-     */
-    int rcRT = RTR3Init(true, ~(size_t)0);
-    if (VBOX_FAILURE(rcRT))
+    RT_NOREF(envp);
+#ifdef RT_OS_WINDOWS
+    /* As we run with the WINDOWS subsystem, we need to either attach to or create an own console
+     * to get any stdout / stderr output. */
+    bool fAllocConsole = IsDebuggerPresent();
+    if (!fAllocConsole)
     {
-        RTPrintf("Error: RTR3Init failed rcRC=%d\n", rcRT);
-        return 1;
+        if (!AttachConsole(ATTACH_PARENT_PROCESS))
+            fAllocConsole = true;
     }
+
+    if (fAllocConsole)
+    {
+        if (!AllocConsole())
+            MessageBox(GetDesktopWindow(), L"Unable to attach to or allocate a console!", L"VBoxSDL", MB_OK | MB_ICONERROR);
+        /* Continue running. */
+    }
+
+    RTFILE hStdIn;
+    RTFileFromNative(&hStdIn,  (RTHCINTPTR)GetStdHandle(STD_INPUT_HANDLE));
+    /** @todo Closing of standard handles not support via IPRT (yet). */
+    RTStrmOpenFileHandle(hStdIn, "r", 0, &g_pStdIn);
+
+    RTFILE hStdOut;
+    RTFileFromNative(&hStdOut,  (RTHCINTPTR)GetStdHandle(STD_OUTPUT_HANDLE));
+    /** @todo Closing of standard handles not support via IPRT (yet). */
+    RTStrmOpenFileHandle(hStdOut, "wt", 0, &g_pStdOut);
+
+    RTFILE hStdErr;
+    RTFileFromNative(&hStdErr,  (RTHCINTPTR)GetStdHandle(STD_ERROR_HANDLE));
+    RTStrmOpenFileHandle(hStdErr, "wt", 0, &g_pStdErr);
+
+    if (!fAllocConsole) /* When attaching to the parent console, make sure we start on a fresh line. */
+        RTPrintf("\n");
+
+    ATL::CComModule _Module; /* Required internally by ATL (constructor records instance in global variable). */
+#endif /* RT_OS_WINDOWS */
+
+#ifdef Q_WS_X11
+    if (!XInitThreads())
+        return 1;
+#endif
+#ifdef VBOXSDL_WITH_X11
+    /*
+     * Lock keys on SDL behave different from normal keys: A KeyPress event is generated
+     * if the lock mode gets active and a keyRelease event is generated if the lock mode
+     * gets inactive, that is KeyPress and KeyRelease are sent when pressing the lock key
+     * to change the mode. The current lock mode is reflected in SDL_GetModState().
+     *
+     * Debian patched libSDL to make the lock keys behave like normal keys
+     * generating a KeyPress/KeyRelease event if the lock key was
+     * pressed/released.  With the new behaviour, the lock status is not
+     * reflected in the mod status anymore, but the user can request the old
+     * behaviour by setting an environment variable.  To confuse matters further
+     * version 1.2.14 (fortunately including the Debian packaged versions)
+     * adopted the Debian behaviour officially, but inverted the meaning of the
+     * environment variable to select the new behaviour, keeping the old as the
+     * default.  We disable the new behaviour to ensure a defined environment
+     * and work around the missing KeyPress/KeyRelease events in ProcessKeys().
+     */
+    {
+#if 0
+        const SDL_version *pVersion = SDL_Linked_Version();
+        if (  SDL_VERSIONNUM(pVersion->major, pVersion->minor, pVersion->patch)
+            < SDL_VERSIONNUM(1, 2, 14))
+            RTEnvSet("SDL_DISABLE_LOCK_KEYS", "1");
+#endif
+    }
+#endif
+
+    RTEXITCODE rcExit = RTEXITCODE_SUCCESS;
 
     /*
      * the hostkey detection mode is unrelated to VM processing, so handle it before
      * we initialize anything COM related
      */
-    if (argc == 2 && !strcmp(argv[1], "-detecthostkey"))
+    if (argc == 2 && (   !strcmp(argv[1], "-detecthostkey")
+                      || !strcmp(argv[1], "--detecthostkey")))
     {
-        int rc = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_NOPARACHUTE);
-        if (rc != 0)
-        {
-            RTPrintf("Error: SDL_InitSubSystem failed with message '%s'\n", SDL_GetError());
-            return 1;
-        }
-        /* we need a video window for the keyboard stuff to work */
-        if (!SDL_SetVideoMode(640, 480, 16, SDL_SWSURFACE))
-        {
-            RTPrintf("Error: could not set SDL video mode\n");
-            return 1;
-        }
-
-        RTPrintf("Please hit one or two function key(s) to get the -hostkey value...\n");
-
-        SDL_Event event1;
-        while (SDL_WaitEvent(&event1))
-        {
-            if (event1.type == SDL_KEYDOWN)
-            {
-                SDL_Event event2;
-                unsigned  mod = SDL_GetModState() & ~(KMOD_MODE | KMOD_NUM | KMOD_RESERVED);
-                while (SDL_WaitEvent(&event2))
-                {
-                    if (event2.type == SDL_KEYDOWN || event2.type == SDL_KEYUP)
-                    {
-                        /* pressed additional host key */
-                        RTPrintf("-hostkey %d", event1.key.keysym.sym);
-                        if (event2.type == SDL_KEYDOWN)
-                        {
-                            RTPrintf(" %d", event2.key.keysym.sym);
-                            RTPrintf(" %d\n", SDL_GetModState() & ~(KMOD_MODE | KMOD_NUM | KMOD_RESERVED));
-                        }
-                        else
-                        {
-                            RTPrintf(" %d\n", mod);
-                        }
-                        /* we're done */
-                        break;
-                    }
-                }
-                /* we're down */
-                break;
-            }
-        }
-        SDL_Quit();
-        return 1;
+        rcExit = handleDetectHostKey();
+#ifdef RT_OS_WINDOWS
+        FreeConsole(); /* Detach or destroy (from) console. */
+#endif
+        return rcExit;
     }
 
-    HRESULT rc;
-    Guid uuid;
+    /** @todo r=andy This function is waaaaaay to long, uses goto's and leaks stuff. Use RTGetOpt handling. */
+
+    HRESULT hrc;
+    int vrc;
+    Guid uuidVM;
     char *vmName = NULL;
-    DeviceType_T bootDevice = DeviceType_NoDevice;
+    bool fSeparate = false;
+    DeviceType_T bootDevice = DeviceType_Null;
     uint32_t memorySize = 0;
     uint32_t vramSize = 0;
-    VBoxSDLCallback *callback = NULL;
-    VBoxSDLConsoleCallback *consoleCallback = NULL;
+    ComPtr<IEventListener> pVBoxClientListener;
+    ComPtr<IEventListener> pVBoxListener;
+    ComObjPtr<VBoxSDLConsoleEventListenerImpl> pConsoleListener;
+
     bool fFullscreen = false;
     bool fResizable = true;
+#ifdef USE_XPCOM_QUEUE_THREAD
     bool fXPCOMEventThreadSignaled = false;
-    bool fListVMs = false;
-    char *hdaFile   = NULL;
-    char *cdromFile = NULL;
-    char *fdaFile   = NULL;
-#ifdef VBOX_VRDP
-    int portVRDP = ~0;
 #endif
+    const char *pcszHdaFile   = NULL;
+    const char *pcszCdromFile = NULL;
+    const char *pcszFdaFile   = NULL;
+    const char *pszPortVRDP = NULL;
     bool fDiscardState = false;
-#ifdef VBOX_SECURELABEL
-    BOOL fSecureLabel = false;
-    uint32_t secureLabelPointSize = 12;
-    char *secureLabelFontFile = NULL;
-    uint32_t secureLabelColorFG = 0x0000FF00;
-    uint32_t secureLabelColorBG = 0x00FFFF00;
-#endif
+    const char *pcszSettingsPw = NULL;
+    const char *pcszSettingsPwFile = NULL;
 #ifdef VBOXSDL_ADVANCED_OPTIONS
-    unsigned fRawR0 = ~0U;
-    unsigned fRawR3 = ~0U;
-    unsigned fPATM  = ~0U;
-    unsigned fCSAM  = ~0U;
-    TriStateBool_T fHWVirt = TriStateBool_Default;
+    uint32_t u32WarpDrive = 0;
 #endif
 #ifdef VBOX_WIN32_UI
-    bool fWin32UI = false;
+    bool fWin32UI = true;
+    int64_t winId = 0;
 #endif
-    bool fShowSDLConfig = false;
-    int fixedWidth = ~0;
-    int fixedHeight = ~0;
-    int fixedBPP = ~0;
+    bool fShowSDLConfig    = false;
+    uint32_t fixedWidth    = ~(uint32_t)0;
+    uint32_t fixedHeight   = ~(uint32_t)0;
+    uint32_t fixedBPP      = ~(uint32_t)0;
+    uint32_t uResizeWidth  = ~(uint32_t)0;
+    uint32_t uResizeHeight = ~(uint32_t)0;
 
     /* The damned GOTOs forces this to be up here - totally out of place. */
     /*
@@ -771,8 +971,9 @@ int main(int argc, char *argv[])
     SDL_Event EvHKeyDown2;
 
     LogFlow(("SDL GUI started\n"));
-    RTPrintf("VirtualBox SDL GUI %d.%d.%d built %s %s\n",
-             VBOX_VERSION_MAJOR, VBOX_VERSION_MINOR, VBOX_VERSION_BUILD, __DATE__, __TIME__);
+    RTPrintf(VBOX_PRODUCT " SDL GUI version %s\n"
+             "Copyright (C) 2005-" VBOX_C_YEAR " " VBOX_VENDOR "\n",
+             VBOX_VERSION_STRING);
 
     // less than one parameter is not possible
     if (argc < 2)
@@ -781,363 +982,320 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    rc = com::Initialize();
-    if (FAILED(rc))
-    {
-        RTPrintf("Error: COM initialization failed, rc = 0x%x!\n", rc);
-        return 1;
-    }
-
-    do
-    {
-    // scopes all the stuff till shutdown
-    ////////////////////////////////////////////////////////////////////////////
-
-    ComPtr <IVirtualBox> virtualBox;
-    ComPtr <ISession> session;
-    bool sessionOpened = false;
-
-    rc = virtualBox.createLocalObject (CLSID_VirtualBox,
-                                       "VirtualBoxServer");
-    if (FAILED(rc))
-    {
-        com::ErrorInfo info;
-        if (info.isFullAvailable())
-            PrintError("Failed to create VirtualBox object",
-                       info.getText().raw(), info.getComponent().raw());
-        else
-            RTPrintf("Failed to create VirtualBox object! No error information available (rc = 0x%x).\n", rc);
-        break;
-    }
-    rc = session.createInprocObject (CLSID_Session);
-    if (FAILED(rc))
-    {
-        RTPrintf("Failed to create session object, rc = 0x%x!\n", rc);
-        break;
-    }
-
-    // create the event queue
-    // (here it is necessary only to process remaining XPCOM/IPC events
-    // after the session is closed)
-    /// @todo
-//    EventQueue eventQ;
-
-#ifdef __LINUX__
-    nsCOMPtr<nsIEventQueue> eventQ;
-    NS_GetMainEventQ(getter_AddRefs(eventQ));
-#endif /* __LINUX__ */
-
-    /* Get the number of network adapters */
-    ULONG NetworkAdapterCount = 0;
-    ComPtr <ISystemProperties> sysInfo;
-    virtualBox->COMGETTER(SystemProperties) (sysInfo.asOutParam());
-    sysInfo->COMGETTER (NetworkAdapterCount) (&NetworkAdapterCount);
-
-#ifdef __LINUX__
-    std::vector <Bstr> tapdev (NetworkAdapterCount);
-    std::vector <int> tapfd (NetworkAdapterCount, 0);
-#endif
-
     // command line argument parsing stuff
     for (int curArg = 1; curArg < argc; curArg++)
     {
-        if (strcmp(argv[curArg], "-list") == 0)
-        {
-            fListVMs = true;
-        }
-        else if (strcmp(argv[curArg], "-vm") == 0
-              || strcmp(argv[curArg], "-startvm") == 0)
+        if (   !strcmp(argv[curArg], "--vm")
+            || !strcmp(argv[curArg], "-vm")
+            || !strcmp(argv[curArg], "--startvm")
+            || !strcmp(argv[curArg], "-startvm")
+            || !strcmp(argv[curArg], "-s")
+            )
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: VM not specified (UUID or name)!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             // first check if a UUID was supplied
-            if (VBOX_FAILURE(RTUuidFromStr(uuid.ptr(), argv[curArg])))
+            uuidVM = argv[curArg];
+
+            if (!uuidVM.isValid())
             {
                 LogFlow(("invalid UUID format, assuming it's a VM name\n"));
                 vmName = argv[curArg];
             }
+            else if (uuidVM.isZero())
+            {
+                RTPrintf("Error: UUID argument is zero!\n");
+                return 1;
+            }
         }
-        else if (strcmp(argv[curArg], "-boot") == 0)
+        else if (   !strcmp(argv[curArg], "--separate")
+                 || !strcmp(argv[curArg], "-separate"))
+        {
+            fSeparate = true;
+        }
+        else if (   !strcmp(argv[curArg], "--comment")
+                 || !strcmp(argv[curArg], "-comment"))
+        {
+            if (++curArg >= argc)
+            {
+                RTPrintf("Error: missing argument for comment!\n");
+                return 1;
+            }
+        }
+        else if (   !strcmp(argv[curArg], "--boot")
+                 || !strcmp(argv[curArg], "-boot"))
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: missing argument for boot drive!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             switch (argv[curArg][0])
             {
                 case 'a':
                 {
-                    bootDevice = DeviceType_FloppyDevice;
+                    bootDevice = DeviceType_Floppy;
                     break;
                 }
 
                 case 'c':
                 {
-                    bootDevice = DeviceType_HardDiskDevice;
+                    bootDevice = DeviceType_HardDisk;
                     break;
                 }
 
                 case 'd':
                 {
-                    bootDevice = DeviceType_DVDDevice;
+                    bootDevice = DeviceType_DVD;
+                    break;
+                }
+
+                case 'n':
+                {
+                    bootDevice = DeviceType_Network;
                     break;
                 }
 
                 default:
                 {
                     RTPrintf("Error: wrong argument for boot drive!\n");
-                    rc = E_FAIL;
-                    break;
+                    return 1;
                 }
             }
-            if (FAILED (rc))
-                break;
         }
-        else if (strcmp(argv[curArg], "-m") == 0)
+        else if (   !strcmp(argv[curArg], "--detecthostkey")
+                 || !strcmp(argv[curArg], "-detecthostkey"))
+        {
+            RTPrintf("Error: please specify \"%s\" without any additional parameters!\n",
+                     argv[curArg]);
+            return 1;
+        }
+        else if (   !strcmp(argv[curArg], "--memory")
+                 || !strcmp(argv[curArg], "-memory")
+                 || !strcmp(argv[curArg], "-m"))
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: missing argument for memory size!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             memorySize = atoi(argv[curArg]);
         }
-        else if (strcmp(argv[curArg], "-vram") == 0)
+        else if (   !strcmp(argv[curArg], "--vram")
+                 || !strcmp(argv[curArg], "-vram"))
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: missing argument for vram size!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             vramSize = atoi(argv[curArg]);
         }
-        else if (strcmp(argv[curArg], "-fullscreen") == 0)
+        else if (   !strcmp(argv[curArg], "--fullscreen")
+                 || !strcmp(argv[curArg], "-fullscreen"))
         {
             fFullscreen = true;
         }
-        else if (strcmp(argv[curArg], "-fixedmode") == 0)
+        else if (   !strcmp(argv[curArg], "--fullscreenresize")
+                 || !strcmp(argv[curArg], "-fullscreenresize"))
+        {
+            gfFullscreenResize = true;
+#ifdef VBOXSDL_WITH_X11
+            RTEnvSet("SDL_VIDEO_X11_VIDMODE", "0");
+#endif
+        }
+        else if (   !strcmp(argv[curArg], "--fixedmode")
+                 || !strcmp(argv[curArg], "-fixedmode"))
         {
             /* three parameters follow */
             if (curArg + 3 >= argc)
             {
                 RTPrintf("Error: missing arguments for fixed video mode!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             fixedWidth  = atoi(argv[++curArg]);
             fixedHeight = atoi(argv[++curArg]);
             fixedBPP    = atoi(argv[++curArg]);
         }
-        else if (strcmp(argv[curArg], "-nofstoggle") == 0)
+        else if (   !strcmp(argv[curArg], "--nofstoggle")
+                 || !strcmp(argv[curArg], "-nofstoggle"))
         {
             gfAllowFullscreenToggle = FALSE;
         }
-        else if (strcmp(argv[curArg], "-noresize") == 0)
+        else if (   !strcmp(argv[curArg], "--noresize")
+                 || !strcmp(argv[curArg], "-noresize"))
         {
             fResizable = false;
         }
-        else if (strcmp(argv[curArg], "-nohostkey") == 0)
+        else if (   !strcmp(argv[curArg], "--nohostkey")
+                 || !strcmp(argv[curArg], "-nohostkey"))
         {
             gHostKeyMod  = 0;
             gHostKeySym1 = 0;
         }
-        else if (strcmp(argv[curArg], "-nograbonclick") == 0)
+        else if (   !strcmp(argv[curArg], "--nohostkeys")
+                 || !strcmp(argv[curArg], "-nohostkeys"))
+        {
+            if (++curArg >= argc)
+            {
+                RTPrintf("Error: missing a string of disabled hostkey combinations\n");
+                return 1;
+            }
+            gHostKeyDisabledCombinations = argv[curArg];
+            size_t cch = strlen(gHostKeyDisabledCombinations);
+            for (size_t i = 0; i < cch; i++)
+            {
+                if (!strchr("fhnpqrs", gHostKeyDisabledCombinations[i]))
+                {
+                    RTPrintf("Error: <hostkey> + '%c' is not a valid combination\n",
+                             gHostKeyDisabledCombinations[i]);
+                    return 1;
+                }
+            }
+        }
+        else if (   !strcmp(argv[curArg], "--nograbonclick")
+                 || !strcmp(argv[curArg], "-nograbonclick"))
         {
             gfGrabOnMouseClick = FALSE;
         }
-        else if (strcmp(argv[curArg], "-hda") == 0)
+        else if (   !strcmp(argv[curArg], "--termacpi")
+                 || !strcmp(argv[curArg], "-termacpi"))
+        {
+            gfACPITerm = TRUE;
+        }
+        else if (   !strcmp(argv[curArg], "--pidfile")
+                 || !strcmp(argv[curArg], "-pidfile"))
+        {
+            if (++curArg >= argc)
+            {
+                RTPrintf("Error: missing file name for --pidfile!\n");
+                return 1;
+            }
+            gpszPidFile = argv[curArg];
+        }
+        else if (   !strcmp(argv[curArg], "--hda")
+                 || !strcmp(argv[curArg], "-hda"))
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: missing file name for first hard disk!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             /* resolve it. */
-            hdaFile = RTPathRealDup(argv[curArg]);
-            if (!hdaFile)
+            if (RTPathExists(argv[curArg]))
+                pcszHdaFile = RTPathRealDup(argv[curArg]);
+            if (!pcszHdaFile)
             {
                 RTPrintf("Error: The path to the specified harddisk, '%s', could not be resolved.\n", argv[curArg]);
-                rc = E_FAIL;
-                break;
+                return 1;
             }
         }
-        else if (strcmp(argv[curArg], "-fda") == 0)
+        else if (   !strcmp(argv[curArg], "--fda")
+                 || !strcmp(argv[curArg], "-fda"))
         {
             if (++curArg >= argc)
             {
                 RTPrintf("Error: missing file/device name for first floppy disk!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             /* resolve it. */
-            fdaFile = RTPathRealDup(argv[curArg]);
-            if (!fdaFile)
+            if (RTPathExists(argv[curArg]))
+                pcszFdaFile = RTPathRealDup(argv[curArg]);
+            if (!pcszFdaFile)
             {
                 RTPrintf("Error: The path to the specified floppy disk, '%s', could not be resolved.\n", argv[curArg]);
-                rc = E_FAIL;
-                break;
+                return 1;
             }
         }
-        else if (strcmp(argv[curArg], "-cdrom") == 0)
+        else if (   !strcmp(argv[curArg], "--cdrom")
+                 || !strcmp(argv[curArg], "-cdrom"))
         {
             if (++curArg >= argc)
             {
-                RTPrintf("Error: missing file/device name for first hard disk!\n");
-                rc = E_FAIL;
-                break;
+                RTPrintf("Error: missing file/device name for cdrom!\n");
+                return 1;
             }
             /* resolve it. */
-            cdromFile = RTPathRealDup(argv[curArg]);
-            if (!cdromFile)
+            if (RTPathExists(argv[curArg]))
+                pcszCdromFile = RTPathRealDup(argv[curArg]);
+            if (!pcszCdromFile)
             {
                 RTPrintf("Error: The path to the specified cdrom, '%s', could not be resolved.\n", argv[curArg]);
-                rc = E_FAIL;
-                break;
+                return 1;
             }
         }
-#ifdef __LINUX__
-        else if (strncmp(argv[curArg], "-tapdev", 7) == 0)
-        {
-            ULONG n = 0;
-            if (!argv[curArg][7] || ((n = strtoul(&argv[curArg][7], NULL, 10)) < 1) ||
-                (n > NetworkAdapterCount) || (argc <= (curArg + 1)))
-            {
-                RTPrintf("Error: invalid TAP device option!\n");
-                rc = E_FAIL;
-                break;
-            }
-            tapdev[n - 1] = argv[curArg + 1];
-            curArg++;
-        }
-        else if (strncmp(argv[curArg], "-tapfd", 6) == 0)
-        {
-            ULONG n = 0;
-            if (!argv[curArg][6] || ((n = strtoul(&argv[curArg][6], NULL, 10)) < 1) ||
-                (n > NetworkAdapterCount) || (argc <= (curArg + 1)))
-            {
-                RTPrintf("Error: invalid TAP file descriptor option!\n");
-                rc = E_FAIL;
-                break;
-            }
-            tapfd[n - 1] = atoi(argv[curArg + 1]);
-            curArg++;
-        }
-#endif /* __LINUX__ */
-#ifdef VBOX_VRDP
-        else if (strcmp(argv[curArg], "-vrdp") == 0)
+        else if (   !strcmp(argv[curArg], "--vrdp")
+                 || !strcmp(argv[curArg], "-vrdp"))
         {
             // start with the standard VRDP port
-            portVRDP = 0;
+            pszPortVRDP = "0";
 
             // is there another argument
             if (argc > (curArg + 1))
             {
-                // check if the next argument is a number
-                int port = atoi(argv[curArg + 1]);
-                if (port > 0)
-                {
-                    curArg++;
-                    portVRDP = port;
-                    LogFlow(("Using non standard VRDP port %d\n", portVRDP));
-                }
+                curArg++;
+                pszPortVRDP = argv[curArg];
+                LogFlow(("Using non standard VRDP port %s\n", pszPortVRDP));
             }
         }
-#endif /* VBOX_VRDP */
-        else if (strcmp(argv[curArg], "-discardstate") == 0)
+        else if (   !strcmp(argv[curArg], "--discardstate")
+                 || !strcmp(argv[curArg], "-discardstate"))
         {
             fDiscardState = true;
         }
-#ifdef VBOX_SECURELABEL
-        else if (strcmp(argv[curArg], "-securelabel") == 0)
-        {
-            fSecureLabel = true;
-            LogFlow(("Secure labelling turned on\n"));
-        }
-        else if (strcmp(argv[curArg], "-seclabelfnt") == 0)
+        else if (!strcmp(argv[curArg], "--settingspw"))
         {
             if (++curArg >= argc)
             {
-                RTPrintf("Error: missing font file name for secure label!\n");
-                rc = E_FAIL;
-                break;
+                RTPrintf("Error: missing password");
+                return 1;
             }
-            secureLabelFontFile = argv[curArg];
+            pcszSettingsPw = argv[curArg];
         }
-        else if (strcmp(argv[curArg], "-seclabelsiz") == 0)
+        else if (!strcmp(argv[curArg], "--settingspwfile"))
         {
             if (++curArg >= argc)
             {
-                RTPrintf("Error: missing font point size for secure label!\n");
-                rc = E_FAIL;
-                break;
+                RTPrintf("Error: missing password file\n");
+                return 1;
             }
-            secureLabelPointSize = atoi(argv[curArg]);
+            pcszSettingsPwFile = argv[curArg];
         }
-        else if (strcmp(argv[curArg], "-seclabelfgcol") == 0)
-        {
-            if (++curArg >= argc)
-            {
-                RTPrintf("Error: missing text color value for secure label!\n");
-                rc = E_FAIL;
-                break;
-            }
-            sscanf(argv[curArg], "%X", &secureLabelColorFG);
-        }
-        else if (strcmp(argv[curArg], "-seclabelbgcol") == 0)
-        {
-            if (++curArg >= argc)
-            {
-                RTPrintf("Error: missing background color value for secure label!\n");
-                rc = E_FAIL;
-                break;
-            }
-            sscanf(argv[curArg], "%X", &secureLabelColorBG);
-        }
-#endif
 #ifdef VBOXSDL_ADVANCED_OPTIONS
-        else if (strcmp(argv[curArg], "-rawr0") == 0)
-            fRawR0 = true;
-        else if (strcmp(argv[curArg], "-norawr0") == 0)
-            fRawR0 = false;
-        else if (strcmp(argv[curArg], "-rawr3") == 0)
-            fRawR3 = true;
-        else if (strcmp(argv[curArg], "-norawr3") == 0)
-            fRawR3 = false;
-        else if (strcmp(argv[curArg], "-patm") == 0)
-            fPATM = true;
-        else if (strcmp(argv[curArg], "-nopatm") == 0)
-            fPATM = false;
-        else if (strcmp(argv[curArg], "-csam") == 0)
-            fCSAM = true;
-        else if (strcmp(argv[curArg], "-nocsam") == 0)
-            fCSAM = false;
-        else if (strcmp(argv[curArg], "-hwvirtex") == 0)
-            fHWVirt = TriStateBool_True;
-        else if (strcmp(argv[curArg], "-nohwvirtex") == 0)
-            fHWVirt = TriStateBool_False;
+        else if (   !strcmp(argv[curArg], "--warpdrive")
+                 || !strcmp(argv[curArg], "-warpdrive"))
+        {
+            if (++curArg >= argc)
+            {
+                RTPrintf("Error: missing the rate value for the --warpdrive option!\n");
+                return 1;
+            }
+            u32WarpDrive = RTStrToUInt32(argv[curArg]);
+            if (u32WarpDrive < 2 || u32WarpDrive > 20000)
+            {
+                RTPrintf("Error: the warp drive rate is restricted to [2..20000]. (%d)\n", u32WarpDrive);
+                return 1;
+            }
+        }
 #endif /* VBOXSDL_ADVANCED_OPTIONS */
 #ifdef VBOX_WIN32_UI
-        else if (strcmp(argv[curArg], "-win32ui") == 0)
+        else if (   !strcmp(argv[curArg], "--win32ui")
+                 || !strcmp(argv[curArg], "-win32ui"))
             fWin32UI = true;
 #endif
-        else if (strcmp(argv[curArg], "-showsdlconfig") == 0)
+        else if (   !strcmp(argv[curArg], "--showsdlconfig")
+                 || !strcmp(argv[curArg], "-showsdlconfig"))
             fShowSDLConfig = true;
-        else if (strcmp(argv[curArg], "-hostkey") == 0)
+        else if (   !strcmp(argv[curArg], "--hostkey")
+                 || !strcmp(argv[curArg], "-hostkey"))
         {
             if (++curArg + 1 >= argc)
             {
                 RTPrintf("Error: not enough arguments for host keys!\n");
-                rc = E_FAIL;
-                break;
+                return 1;
             }
             gHostKeySym1 = atoi(argv[curArg++]);
             if (curArg + 1 < argc && (argv[curArg+1][0] == '0' || atoi(argv[curArg+1]) > 0))
@@ -1150,106 +1308,214 @@ int main(int argc, char *argv[])
         /* just show the help screen */
         else
         {
-            RTPrintf("Error: unrecognized switch '%s'\n", argv[curArg]);
+            if (   strcmp(argv[curArg], "-h")
+                && strcmp(argv[curArg], "-help")
+                && strcmp(argv[curArg], "--help"))
+                RTPrintf("Error: unrecognized switch '%s'\n", argv[curArg]);
             show_usage();
             return 1;
         }
     }
-    if (FAILED (rc))
-        break;
 
-    /*
-     * Are we supposed to display the list of registered VMs?
-     */
-    if (fListVMs)
+    hrc = com::Initialize();
+#ifdef VBOX_WITH_XPCOM
+    if (hrc == NS_ERROR_FILE_ACCESS_DENIED)
     {
-        RTPrintf("\nList of registered VMs:\n");
-        /*
-         * Get the list of all registered VMs
-         */
-        ComPtr<IMachineCollection> collection;
-        rc = virtualBox->COMGETTER(Machines)(collection.asOutParam());
-        ComPtr<IMachineEnumerator> enumerator;
-        if (SUCCEEDED(rc))
-            rc = collection->Enumerate(enumerator.asOutParam());
-        if (SUCCEEDED(rc))
-        {
-            /*
-             * Iterate through the collection
-             */
-            BOOL hasMore = FALSE;
-            while (enumerator->HasMore(&hasMore), hasMore)
-            {
-                ComPtr<IMachine> machine;
-                rc =enumerator->GetNext(machine.asOutParam());
-                if ((SUCCEEDED(rc)) && machine)
-                {
-                    Bstr machineName;
-                    Guid machineGUID;
-                    Bstr settingsFilePath;
-                    ULONG memorySize;
-                    ULONG vramSize;
-                    machine->COMGETTER(Name)(machineName.asOutParam());
-                    machine->COMGETTER(Id)(machineGUID.asOutParam());
-                    machine->COMGETTER(SettingsFilePath)(settingsFilePath.asOutParam());
-                    machine->COMGETTER(MemorySize)(&memorySize);
-                    machine->COMGETTER(VRAMSize)(&vramSize);
-                    Utf8Str machineNameUtf8(machineName);
-                    Utf8Str settingsFilePathUtf8(settingsFilePath);
-                    RTPrintf("\tName:        %s\n", machineNameUtf8.raw());
-                    RTPrintf("\tUUID:        %s\n", machineGUID.toString().raw());
-                    RTPrintf("\tConfig file: %s\n", settingsFilePathUtf8.raw());
-                    RTPrintf("\tMemory size: %uMB\n", memorySize);
-                    RTPrintf("\tVRAM size:   %uMB\n\n", vramSize);
-                }
-            }
-        }
-        /* terminate application */
+        char szHome[RTPATH_MAX] = "";
+        com::GetVBoxUserHomeDirectory(szHome, sizeof(szHome));
+        RTPrintf("Failed to initialize COM because the global settings directory '%s' is not accessible!\n", szHome);
+        return 1;
+    }
+#endif
+    if (FAILED(hrc))
+    {
+        RTPrintf("Error: COM initialization failed (rc=%Rhrc)!\n", hrc);
+        return 1;
+    }
+
+    /* NOTE: do not convert the following scope to a "do {} while (0);", as
+     * this would make it all too tempting to use "break;" incorrectly - it
+     * would skip over the cleanup. */
+    {
+    // scopes all the stuff till shutdown
+    ////////////////////////////////////////////////////////////////////////////
+
+    ComPtr<IVirtualBoxClient> pVirtualBoxClient;
+    ComPtr<IVirtualBox> pVirtualBox;
+    ComPtr<ISession> pSession;
+    bool sessionOpened = false;
+    NativeEventQueue* eventQ = com::NativeEventQueue::getMainEventQueue();
+
+    ComPtr<IMachine> pMachine;
+    ComPtr<IGraphicsAdapter> pGraphicsAdapter;
+
+    hrc = pVirtualBoxClient.createInprocObject(CLSID_VirtualBoxClient);
+    if (FAILED(hrc))
+    {
+        com::ErrorInfo info;
+        if (info.isFullAvailable())
+            PrintError("Failed to create VirtualBoxClient object",
+                       info.getText().raw(), info.getComponent().raw());
+        else
+            RTPrintf("Failed to create VirtualBoxClient object! No error information available (rc=%Rhrc).\n", hrc);
         goto leave;
     }
 
-    /*
-     * Do we have a name but no UUID?
-     */
-    if (vmName && uuid.isEmpty())
+    hrc = pVirtualBoxClient->COMGETTER(VirtualBox)(pVirtualBox.asOutParam());
+    if (FAILED(hrc))
     {
-        ComPtr<IMachine> aMachine;
-        Bstr  bstrVMName = vmName;
-        rc = virtualBox->FindMachine(bstrVMName, aMachine.asOutParam());
-        if ((rc == S_OK) && aMachine)
-        {
-            aMachine->COMGETTER(Id)(uuid.asOutParam());
-        }
-        else
+        RTPrintf("Failed to get VirtualBox object (rc=%Rhrc)!\n", hrc);
+        goto leave;
+    }
+    hrc = pVirtualBoxClient->COMGETTER(Session)(pSession.asOutParam());
+    if (FAILED(hrc))
+    {
+        RTPrintf("Failed to get session object (rc=%Rhrc)!\n", hrc);
+        goto leave;
+    }
+
+    if (pcszSettingsPw)
+    {
+        CHECK_ERROR(pVirtualBox, SetSettingsSecret(Bstr(pcszSettingsPw).raw()));
+        if (FAILED(hrc))
+            goto leave;
+    }
+    else if (pcszSettingsPwFile)
+    {
+        rcExit = settingsPasswordFile(pVirtualBox, pcszSettingsPwFile);
+        if (rcExit != RTEXITCODE_SUCCESS)
+            goto leave;
+    }
+
+    /*
+     * Do we have a UUID?
+     */
+    if (uuidVM.isValid())
+    {
+        hrc = pVirtualBox->FindMachine(uuidVM.toUtf16().raw(), pMachine.asOutParam());
+        if (FAILED(hrc) || !pMachine)
         {
             RTPrintf("Error: machine with the given ID not found!\n");
             goto leave;
         }
     }
-    else if (uuid.isEmpty())
+    else if (vmName)
     {
-        RTPrintf("Error: no machine specified!\n");
+        /*
+         * Do we have a name but no UUID?
+         */
+        hrc = pVirtualBox->FindMachine(Bstr(vmName).raw(), pMachine.asOutParam());
+        if ((hrc == S_OK) && pMachine)
+        {
+            Bstr bstrId;
+            pMachine->COMGETTER(Id)(bstrId.asOutParam());
+            uuidVM = Guid(bstrId);
+        }
+        else
+        {
+            RTPrintf("Error: machine with the given name not found!\n");
+            RTPrintf("Check if this VM has been corrupted and is now inaccessible.");
+            goto leave;
+        }
+    }
+
+    /* create SDL event semaphore */
+    vrc = RTSemEventCreate(&g_EventSemSDLEvents);
+    AssertReleaseRC(vrc);
+
+    hrc = pVirtualBoxClient->CheckMachineError(pMachine);
+    if (FAILED(hrc))
+    {
+        com::ErrorInfo info;
+        if (info.isFullAvailable())
+            PrintError("The VM has errors",
+                       info.getText().raw(), info.getComponent().raw());
+        else
+            RTPrintf("Failed to check for VM errors! No error information available (rc=%Rhrc).\n", hrc);
         goto leave;
     }
 
-    rc = virtualBox->OpenSession(session, uuid);
-    if (FAILED(rc))
+    if (fSeparate)
+    {
+        MachineState_T machineState = MachineState_Null;
+        pMachine->COMGETTER(State)(&machineState);
+        if (   machineState == MachineState_Running
+            || machineState == MachineState_Teleporting
+            || machineState == MachineState_LiveSnapshotting
+            || machineState == MachineState_Paused
+            || machineState == MachineState_TeleportingPausedVM
+           )
+        {
+            RTPrintf("VM is already running.\n");
+        }
+        else
+        {
+            ComPtr<IProgress> progress;
+            hrc = pMachine->LaunchVMProcess(pSession, Bstr("headless").raw(), ComSafeArrayNullInParam(), progress.asOutParam());
+            if (SUCCEEDED(hrc) && !progress.isNull())
+            {
+                RTPrintf("Waiting for VM to power on...\n");
+                hrc = progress->WaitForCompletion(-1);
+                if (SUCCEEDED(hrc))
+                {
+                    BOOL completed = true;
+                    hrc = progress->COMGETTER(Completed)(&completed);
+                    if (SUCCEEDED(hrc))
+                    {
+                        LONG iRc;
+                        hrc = progress->COMGETTER(ResultCode)(&iRc);
+                        if (SUCCEEDED(hrc))
+                        {
+                            if (FAILED(iRc))
+                            {
+                                ProgressErrorInfo info(progress);
+                                com::GluePrintErrorInfo(info);
+                            }
+                            else
+                            {
+                                RTPrintf("VM has been successfully started.\n");
+                                /* LaunchVMProcess obtains a shared lock on the machine.
+                                 * Unlock it here, because the lock will be obtained below
+                                 * in the common code path as for already running VM.
+                                 */
+                                pSession->UnlockMachine();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (FAILED(hrc))
+        {
+            RTPrintf("Error: failed to power up VM! No error text available.\n");
+            goto leave;
+        }
+
+        hrc = pMachine->LockMachine(pSession, LockType_Shared);
+    }
+    else
+    {
+        pSession->COMSETTER(Name)(Bstr("GUI/SDL").raw());
+        hrc = pMachine->LockMachine(pSession, LockType_VM);
+    }
+
+    if (FAILED(hrc))
     {
         com::ErrorInfo info;
         if (info.isFullAvailable())
             PrintError("Could not open VirtualBox session",
-                    info.getText().raw(), info.getComponent().raw());
+                       info.getText().raw(), info.getComponent().raw());
         goto leave;
     }
-    if (!session)
+    if (!pSession)
     {
         RTPrintf("Could not open VirtualBox session!\n");
         goto leave;
     }
     sessionOpened = true;
-    // get the VM we're dealing with
-    session->COMGETTER(Machine)(gMachine.asOutParam());
-    if (!gMachine)
+    // get the mutable VM we're dealing with
+    pSession->COMGETTER(Machine)(gpMachine.asOutParam());
+    if (!gpMachine)
     {
         com::ErrorInfo info;
         if (info.isFullAvailable())
@@ -1259,9 +1525,10 @@ int main(int argc, char *argv[])
             RTPrintf("Error: given machine not found!\n");
         goto leave;
     }
+
     // get the VM console
-    session->COMGETTER(Console)(gConsole.asOutParam());
-    if (!gConsole)
+    pSession->COMGETTER(Console)(gpConsole.asOutParam());
+    if (!gpConsole)
     {
         RTPrintf("Given console not found!\n");
         goto leave;
@@ -1270,43 +1537,65 @@ int main(int argc, char *argv[])
     /*
      * Are we supposed to use a different hard disk file?
      */
-    if (hdaFile)
+    if (pcszHdaFile)
     {
+        ComPtr<IMedium> pMedium;
+
         /*
-         * Strategy: iterate through all registered hard disk
-         * and see if one of them points to the same file. If
-         * so, assign it. If not, register a new image and assing
-         * it to the VM.
+         * Strategy: if any registered hard disk points to the same file,
+         * assign it. If not, register a new image and assign it to the VM.
          */
-        Bstr hdaFileBstr = hdaFile;
-        ComPtr<IHardDisk> hardDisk;
-        ComPtr<IVirtualDiskImage> vdi;
-        virtualBox->FindVirtualDiskImage(hdaFileBstr, vdi.asOutParam());
-        if (vdi)
-        {
-            vdi.queryInterfaceTo (hardDisk.asOutParam());
-        }
-        else
+        Bstr bstrHdaFile(pcszHdaFile);
+        pVirtualBox->OpenMedium(bstrHdaFile.raw(), DeviceType_HardDisk,
+                                AccessMode_ReadWrite, FALSE /* fForceNewUuid */,
+                                pMedium.asOutParam());
+        if (!pMedium)
         {
             /* we've not found the image */
-            RTPrintf("Registering hard disk image %s\n", hdaFile);
-            virtualBox->OpenVirtualDiskImage (hdaFileBstr, vdi.asOutParam());
-            if (vdi)
-            {
-                vdi.queryInterfaceTo (hardDisk.asOutParam());
-                virtualBox->RegisterHardDisk (hardDisk);
-            }
+            RTPrintf("Adding hard disk '%s'...\n", pcszHdaFile);
+            pVirtualBox->OpenMedium(bstrHdaFile.raw(), DeviceType_HardDisk,
+                                    AccessMode_ReadWrite, FALSE /* fForceNewUuid */,
+                                    pMedium.asOutParam());
         }
         /* do we have the right image now? */
-        if (hardDisk)
+        if (pMedium)
         {
-            /*
-             * Go and attach it!
-             */
-            Guid uuid;
-            hardDisk->COMGETTER(Id)(uuid.asOutParam());
-            gMachine->DetachHardDisk(DiskControllerType_IDE0Controller, 0);
-            gMachine->AttachHardDisk(uuid, DiskControllerType_IDE0Controller, 0);
+            Bstr bstrSCName;
+
+            /* get the first IDE controller to attach the harddisk to
+             * and if there is none, add one temporarily */
+            {
+                ComPtr<IStorageController> pStorageCtl;
+                com::SafeIfaceArray<IStorageController> aStorageControllers;
+                CHECK_ERROR(gpMachine, COMGETTER(StorageControllers)(ComSafeArrayAsOutParam(aStorageControllers)));
+                for (size_t i = 0; i < aStorageControllers.size(); ++ i)
+                {
+                    StorageBus_T storageBus = StorageBus_Null;
+
+                    CHECK_ERROR(aStorageControllers[i], COMGETTER(Bus)(&storageBus));
+                    if (storageBus == StorageBus_IDE)
+                    {
+                        pStorageCtl = aStorageControllers[i];
+                        break;
+                    }
+                }
+
+                if (pStorageCtl)
+                {
+                    CHECK_ERROR(pStorageCtl, COMGETTER(Name)(bstrSCName.asOutParam()));
+                    gpMachine->DetachDevice(bstrSCName.raw(), 0, 0);
+                }
+                else
+                {
+                    bstrSCName = "IDE Controller";
+                    CHECK_ERROR(gpMachine, AddStorageController(bstrSCName.raw(),
+                                                                StorageBus_IDE,
+                                                                pStorageCtl.asOutParam()));
+                }
+            }
+
+            CHECK_ERROR(gpMachine, AttachDevice(bstrSCName.raw(), 0, 0,
+                                                DeviceType_HardDisk, pMedium));
             /// @todo why is this attachment saved?
         }
         else
@@ -1316,180 +1605,174 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (fdaFile)
+    /*
+     * Mount a floppy if requested.
+     */
+    if (pcszFdaFile)
+    do
     {
-        ComPtr<IFloppyDrive> floppyDrive;
-        gMachine->COMGETTER(FloppyDrive)(floppyDrive.asOutParam());
-        Assert(floppyDrive);
+        ComPtr<IMedium> pMedium;
 
-        ComPtr<IFloppyImageCollection> collection;
-        virtualBox->COMGETTER(FloppyImages)(collection.asOutParam());
-        Assert(collection);
-        ComPtr<IFloppyImageEnumerator> enumerator;
-        collection->Enumerate(enumerator.asOutParam());
-        Assert(enumerator);
-        ComPtr<IFloppyImage> floppyImage;
-        BOOL hasMore = false;
-        while (enumerator->HasMore(&hasMore), hasMore)
+        /* unmount? */
+        if (!strcmp(pcszFdaFile, "none"))
         {
-            enumerator->GetNext(floppyImage.asOutParam());
-            Assert(floppyImage);
-            Bstr file;
-            floppyImage->COMGETTER(FilePath)(file.asOutParam());
-            Assert(file);
-            /// @todo this will not work on case insensitive systems if the casing does not match the registration!!!
-            if (file == fdaFile)
-                break;
-            else
-                floppyImage = NULL;
-        }
-        /* we've not found the image? */
-        if (!floppyImage)
-        {
-            RTPrintf("Registering floppy disk image %s\n", fdaFile);
-            Guid uuid;
-            Bstr fileBstr = fdaFile;
-            virtualBox->OpenFloppyImage (fileBstr, uuid, floppyImage.asOutParam());
-            virtualBox->RegisterFloppyImage (floppyImage);
-        }
-        /* do we have the right image now? */
-        if (floppyImage)
-        {
-            /*
-             * Go and attach it!
-             */
-            Guid uuid;
-            floppyImage->COMGETTER(Id)(uuid.asOutParam());
-            floppyDrive->MountImage(uuid);
+            /* nothing to do, NULL object will cause unmount */
         }
         else
         {
-            RTPrintf("Error: failed to mount the specified floppy disk image!\n");
-            goto leave;
+            Bstr bstrFdaFile(pcszFdaFile);
+
+            /* Assume it's a host drive name */
+            ComPtr<IHost> pHost;
+            CHECK_ERROR_BREAK(pVirtualBox, COMGETTER(Host)(pHost.asOutParam()));
+            hrc = pHost->FindHostFloppyDrive(bstrFdaFile.raw(),
+                                            pMedium.asOutParam());
+            if (FAILED(hrc))
+            {
+                /* try to find an existing one */
+                hrc = pVirtualBox->OpenMedium(bstrFdaFile.raw(),
+                                             DeviceType_Floppy,
+                                             AccessMode_ReadWrite,
+                                             FALSE /* fForceNewUuid */,
+                                             pMedium.asOutParam());
+                if (FAILED(hrc))
+                {
+                    /* try to add to the list */
+                    RTPrintf("Adding floppy image '%s'...\n", pcszFdaFile);
+                    CHECK_ERROR_BREAK(pVirtualBox,
+                                      OpenMedium(bstrFdaFile.raw(),
+                                                 DeviceType_Floppy,
+                                                 AccessMode_ReadWrite,
+                                                 FALSE /* fForceNewUuid */,
+                                                 pMedium.asOutParam()));
+                }
+            }
         }
+
+        Bstr bstrSCName;
+
+        /* get the first floppy controller to attach the floppy to
+         * and if there is none, add one temporarily */
+        {
+            ComPtr<IStorageController> pStorageCtl;
+            com::SafeIfaceArray<IStorageController> aStorageControllers;
+            CHECK_ERROR(gpMachine, COMGETTER(StorageControllers)(ComSafeArrayAsOutParam(aStorageControllers)));
+            for (size_t i = 0; i < aStorageControllers.size(); ++ i)
+            {
+                StorageBus_T storageBus = StorageBus_Null;
+
+                CHECK_ERROR(aStorageControllers[i], COMGETTER(Bus)(&storageBus));
+                if (storageBus == StorageBus_Floppy)
+                {
+                    pStorageCtl = aStorageControllers[i];
+                    break;
+                }
+            }
+
+            if (pStorageCtl)
+            {
+                CHECK_ERROR(pStorageCtl, COMGETTER(Name)(bstrSCName.asOutParam()));
+                gpMachine->DetachDevice(bstrSCName.raw(), 0, 0);
+            }
+            else
+            {
+                bstrSCName = "Floppy Controller";
+                CHECK_ERROR(gpMachine, AddStorageController(bstrSCName.raw(),
+                                                            StorageBus_Floppy,
+                                                            pStorageCtl.asOutParam()));
+            }
+        }
+
+        CHECK_ERROR(gpMachine, AttachDevice(bstrSCName.raw(), 0, 0,
+                                            DeviceType_Floppy, pMedium));
     }
+    while (0);
+    if (FAILED(hrc))
+        goto leave;
 
     /*
-     * Are we supposed to use a different CDROM image?
+     * Mount a CD-ROM if requested.
      */
-    if (cdromFile)
+    if (pcszCdromFile)
+    do
     {
-        ComPtr<IDVDDrive> dvdDrive;
-        gMachine->COMGETTER(DVDDrive)(dvdDrive.asOutParam());
-        Assert(dvdDrive);
+        ComPtr<IMedium> pMedium;
 
-        /*
-         * First special case 'none' to unmount
-         */
-        if (strcmp(cdromFile, "none") == 0)
+        /* unmount? */
+        if (!strcmp(pcszCdromFile, "none"))
         {
-            dvdDrive->Unmount();
+            /* nothing to do, NULL object will cause unmount */
         }
         else
         {
-            /*
-             * Determine if it's a host device or ISO image
-             */
-            bool fHostDrive = false;
-#ifdef __WIN__
-            /* two characters with the 2nd being a colon */
-            if ((strlen(cdromFile) == 2) && (cdromFile[1] == ':'))
+            Bstr bstrCdromFile(pcszCdromFile);
+
+            /* Assume it's a host drive name */
+            ComPtr<IHost> pHost;
+            CHECK_ERROR_BREAK(pVirtualBox, COMGETTER(Host)(pHost.asOutParam()));
+            hrc = pHost->FindHostDVDDrive(bstrCdromFile.raw(), pMedium.asOutParam());
+            if (FAILED(hrc))
             {
-                cdromFile[0] = toupper(cdromFile[0]);
-                fHostDrive = true;
-            }
-#else /* !__WIN__ */
-            /* it has to start with /dev/ */
-            if (strncmp(cdromFile, "/dev/", 5) == 0)
-                fHostDrive = true;
-#endif /* !__WIN__ */
-            if (fHostDrive)
-            {
-                ComPtr<IHost> host;
-                virtualBox->COMGETTER(Host)(host.asOutParam());
-                ComPtr<IHostDVDDriveCollection> collection;
-                host->COMGETTER(DVDDrives)(collection.asOutParam());
-                ComPtr<IHostDVDDriveEnumerator> enumerator;
-                collection->Enumerate(enumerator.asOutParam());
-                ComPtr<IHostDVDDrive> hostDVDDrive;
-                BOOL hasMore = FALSE;
-                while (enumerator->HasMore(&hasMore), hasMore)
+                /* try to find an existing one */
+                hrc = pVirtualBox->OpenMedium(bstrCdromFile.raw(),
+                                            DeviceType_DVD,
+                                            AccessMode_ReadWrite,
+                                            FALSE /* fForceNewUuid */,
+                                            pMedium.asOutParam());
+                if (FAILED(hrc))
                 {
-                    enumerator->GetNext(hostDVDDrive.asOutParam());
-                    Bstr driveName;
-                    hostDVDDrive->COMGETTER(Name)(driveName.asOutParam());
-                    Utf8Str driveNameUtf8 = driveName;
-                    char *driveNameStr = (char*)driveNameUtf8.raw();
-                    if (strcmp(driveNameStr, cdromFile) == 0)
-                    {
-                        rc = dvdDrive->CaptureHostDrive(hostDVDDrive);
-                        if (rc != S_OK)
-                        {
-                            RTPrintf("Error: could not mount host DVD drive %s! rc = 0x%x\n", driveNameStr, rc);
-                        }
-                        break;
-                    }
-                }
-                if (!hasMore)
-                    RTPrintf("Error: did not recognize DVD drive '%s'!\n", cdromFile);
-            }
-            else
-            {
-                /*
-                 * Same strategy as with the HDD images: check if already registered,
-                 * if not, register on the fly.
-                 */
-                ComPtr<IDVDImageCollection> collection;
-                virtualBox->COMGETTER(DVDImages)(collection.asOutParam());
-                Assert(collection);
-                ComPtr<IDVDImageEnumerator> enumerator;
-                collection->Enumerate(enumerator.asOutParam());
-                Assert(enumerator);
-                ComPtr<IDVDImage> dvdImage;
-                BOOL hasMore = false;
-                while (enumerator->HasMore(&hasMore), hasMore)
-                {
-                    enumerator->GetNext(dvdImage.asOutParam());
-                    Assert(dvdImage);
-                    Bstr dvdImageFile;
-                    dvdImage->COMGETTER(FilePath)(dvdImageFile.asOutParam());
-                    Assert(dvdImageFile);
-                    /// @todo not correct for case insensitive platforms (win32)
-                    /// See comment on hdaFile.
-                    if (dvdImageFile == cdromFile)
-                        break;
-                    else
-                        dvdImage = NULL;
-                }
-                /* we've not found the image? */
-                if (!dvdImage)
-                {
-                    RTPrintf("Registering ISO image %s\n", cdromFile);
-                    Guid uuid; // the system will generate UUID
-                    Bstr cdImageFileBstr = cdromFile;
-                    virtualBox->OpenDVDImage(cdImageFileBstr, uuid, dvdImage.asOutParam());
-                    rc = virtualBox->RegisterDVDImage(dvdImage);
-                    if (!SUCCEEDED(rc))
-                    {
-                       RTPrintf("Image registration failed with %08X\n", rc);
-                    }
-                }
-                /* do we have the right image now? */
-                if (dvdImage)
-                {
-                    /* attach */
-                    Guid uuid;
-                    dvdImage->COMGETTER(Id)(uuid.asOutParam());
-                    dvdDrive->MountImage(uuid);
-                }
-                else
-                {
-                    RTPrintf("Error: failed to mount the specified ISO image!\n");
-                    goto leave;
+                    /* try to add to the list */
+                    RTPrintf("Adding ISO image '%s'...\n", pcszCdromFile);
+                    CHECK_ERROR_BREAK(pVirtualBox,
+                                      OpenMedium(bstrCdromFile.raw(),
+                                                 DeviceType_DVD,
+                                                 AccessMode_ReadWrite,
+                                                 FALSE /* fForceNewUuid */,
+                                                 pMedium.asOutParam()));
                 }
             }
         }
+
+        Bstr bstrSCName;
+
+        /* get the first IDE controller to attach the DVD drive to
+         * and if there is none, add one temporarily */
+        {
+            ComPtr<IStorageController> pStorageCtl;
+            com::SafeIfaceArray<IStorageController> aStorageControllers;
+            CHECK_ERROR(gpMachine, COMGETTER(StorageControllers)(ComSafeArrayAsOutParam(aStorageControllers)));
+            for (size_t i = 0; i < aStorageControllers.size(); ++ i)
+            {
+                StorageBus_T storageBus = StorageBus_Null;
+
+                CHECK_ERROR(aStorageControllers[i], COMGETTER(Bus)(&storageBus));
+                if (storageBus == StorageBus_IDE)
+                {
+                    pStorageCtl = aStorageControllers[i];
+                    break;
+                }
+            }
+
+            if (pStorageCtl)
+            {
+                CHECK_ERROR(pStorageCtl, COMGETTER(Name)(bstrSCName.asOutParam()));
+                gpMachine->DetachDevice(bstrSCName.raw(), 1, 0);
+            }
+            else
+            {
+                bstrSCName = "IDE Controller";
+                CHECK_ERROR(gpMachine, AddStorageController(bstrSCName.raw(),
+                                                            StorageBus_IDE,
+                                                            pStorageCtl.asOutParam()));
+            }
+        }
+
+        CHECK_ERROR(gpMachine, AttachDevice(bstrSCName.raw(), 1, 0,
+                                            DeviceType_DVD, pMedium));
     }
+    while (0);
+    if (FAILED(hrc))
+        goto leave;
 
     if (fDiscardState)
     {
@@ -1498,43 +1781,49 @@ int main(int argc, char *argv[])
          * discard the saved state first.
          */
         MachineState_T machineState;
-        gMachine->COMGETTER(State)(&machineState);
-        if (machineState == MachineState_Saved)
+        gpMachine->COMGETTER(State)(&machineState);
+        if (machineState == MachineState_Saved || machineState == MachineState_AbortedSaved)
         {
-            CHECK_ERROR(gConsole, DiscardSavedState());
+            CHECK_ERROR(gpMachine, DiscardSavedState(true /* fDeleteFile */));
         }
         /*
          * If there are snapshots, discard the current state,
          * i.e. revert to the last snapshot.
          */
         ULONG cSnapshots;
-        gMachine->COMGETTER(SnapshotCount)(&cSnapshots);
+        gpMachine->COMGETTER(SnapshotCount)(&cSnapshots);
         if (cSnapshots)
         {
-            gProgress = NULL;
-            CHECK_ERROR(gConsole, DiscardCurrentState(gProgress.asOutParam()));
-            rc = gProgress->WaitForCompletion(-1);
+            gpProgress = NULL;
+
+            ComPtr<ISnapshot> pCurrentSnapshot;
+            CHECK_ERROR(gpMachine, COMGETTER(CurrentSnapshot)(pCurrentSnapshot.asOutParam()));
+            if (FAILED(hrc))
+                goto leave;
+
+            CHECK_ERROR(gpMachine, RestoreSnapshot(pCurrentSnapshot, gpProgress.asOutParam()));
+            hrc = gpProgress->WaitForCompletion(-1);
         }
     }
 
     // get the machine debugger (does not have to be there)
-    gConsole->COMGETTER(Debugger)(gMachineDebugger.asOutParam());
-    if (gMachineDebugger)
+    gpConsole->COMGETTER(Debugger)(gpMachineDebugger.asOutParam());
+    if (gpMachineDebugger)
     {
         Log(("Machine debugger available!\n"));
     }
-    gConsole->COMGETTER(Display)(gDisplay.asOutParam());
-    if (!gDisplay)
+    gpConsole->COMGETTER(Display)(gpDisplay.asOutParam());
+    if (!gpDisplay)
     {
         RTPrintf("Error: could not get display object!\n");
         goto leave;
     }
 
     // set the boot drive
-    if (bootDevice != DeviceType_NoDevice)
+    if (bootDevice != DeviceType_Null)
     {
-        rc = gMachine->SetBootOrder(1, bootDevice);
-        if (rc != S_OK)
+        hrc = gpMachine->SetBootOrder(1, bootDevice);
+        if (hrc != S_OK)
         {
             RTPrintf("Error: could not set boot device, using default.\n");
         }
@@ -1543,21 +1832,28 @@ int main(int argc, char *argv[])
     // set the memory size if not default
     if (memorySize)
     {
-        rc = gMachine->COMSETTER(MemorySize)(memorySize);
-        if (rc != S_OK)
+        hrc = gpMachine->COMSETTER(MemorySize)(memorySize);
+        if (hrc != S_OK)
         {
             ULONG ramSize = 0;
-            gMachine->COMGETTER(MemorySize)(&ramSize);
+            gpMachine->COMGETTER(MemorySize)(&ramSize);
             RTPrintf("Error: could not set memory size, using current setting of %d MBytes\n", ramSize);
         }
     }
 
+    hrc = gpMachine->COMGETTER(GraphicsAdapter)(pGraphicsAdapter.asOutParam());
+    if (hrc != S_OK)
+    {
+        RTPrintf("Error: could not get graphics adapter object\n");
+        goto leave;
+    }
+
     if (vramSize)
     {
-        rc = gMachine->COMSETTER(VRAMSize)(vramSize);
-        if (rc != S_OK)
+        hrc = pGraphicsAdapter->COMSETTER(VRAMSize)(vramSize);
+        if (hrc != S_OK)
         {
-            gMachine->COMGETTER(VRAMSize)((ULONG*)&vramSize);
+            pGraphicsAdapter->COMGETTER(VRAMSize)((ULONG*)&vramSize);
             RTPrintf("Error: could not set VRAM size, using current setting of %d MBytes\n", vramSize);
         }
     }
@@ -1569,195 +1865,151 @@ int main(int argc, char *argv[])
     if (fWin32UI)
     {
         /* initialize the Win32 user interface inside which SDL will be embedded */
-        if (initUI(fResizable))
+        if (initUI(fResizable, winId))
             return 1;
     }
 #endif
 
-    // create our SDL framebuffer instance
-    gpFrameBuffer = new VBoxSDLFB(fFullscreen, fResizable, fShowSDLConfig,
-                                  fixedWidth, fixedHeight, fixedBPP);
+    /* static initialization of the SDL stuff */
+    if (!VBoxSDLFB::init(fShowSDLConfig))
+        goto leave;
 
-    if (!gpFrameBuffer)
+    pGraphicsAdapter->COMGETTER(MonitorCount)(&gcMonitors);
+    if (gcMonitors > 64)
+        gcMonitors = 64;
+
+    for (unsigned i = 0; i < gcMonitors; i++)
     {
-        RTPrintf("Error: could not create framebuffer object!\n");
-        goto leave;
-    }
-    if (!gpFrameBuffer->initialized())
-        goto leave;
-    gpFrameBuffer->AddRef();
-    if (fFullscreen)
-    {
-        gpFrameBuffer->setFullscreen(true);
-    }
-#ifdef VBOX_SECURELABEL
-    if (fSecureLabel)
-    {
-        if (!secureLabelFontFile)
+        // create our SDL framebuffer instance
+        gpFramebuffer[i].createObject();
+        hrc = gpFramebuffer[i]->init(i, fFullscreen, fResizable, fShowSDLConfig, false,
+                                    fixedWidth, fixedHeight, fixedBPP, fSeparate);
+        if (FAILED(hrc))
         {
-            RTPrintf("Error: no font file specified for secure label!\n");
+            RTPrintf("Error: could not create framebuffer object!\n");
             goto leave;
         }
-        /* load the SDL_ttf library and get the required imports */
-        int rcVBox;
-        rcVBox = RTLdrLoad(LIBSDL_TTF_NAME, &gLibrarySDL_ttf);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = RTLdrGetSymbol(gLibrarySDL_ttf, "TTF_Init", (void**)&pTTF_Init);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = RTLdrGetSymbol(gLibrarySDL_ttf, "TTF_OpenFont", (void**)&pTTF_OpenFont);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = RTLdrGetSymbol(gLibrarySDL_ttf, "TTF_RenderUTF8_Solid", (void**)&pTTF_RenderUTF8_Solid);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = RTLdrGetSymbol(gLibrarySDL_ttf, "TTF_CloseFont", (void**)&pTTF_CloseFont);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = RTLdrGetSymbol(gLibrarySDL_ttf, "TTF_Quit", (void**)&pTTF_Quit);
-        if (VBOX_SUCCESS(rcVBox))
-            rcVBox = gpFrameBuffer->initSecureLabel(SECURE_LABEL_HEIGHT, secureLabelFontFile, secureLabelPointSize);
-        if (VBOX_FAILURE(rcVBox))
-        {
-            RTPrintf("Error: could not initialize secure labeling: rc = %Vrc\n", rcVBox);
-            goto leave;
-        }
-        Bstr key = VBOXSDL_SECURELABEL_EXTRADATA;
-        Bstr label;
-        gMachine->GetExtraData(key, label.asOutParam());
-        Utf8Str labelUtf8 = label;
-        /*
-         * Now update the label
-         */
-        gpFrameBuffer->setSecureLabelColor(secureLabelColorFG, secureLabelColorBG);
-        gpFrameBuffer->setSecureLabelText(labelUtf8.raw());
     }
+
+#ifdef VBOX_WIN32_UI
+    gpFramebuffer[0]->setWinId(winId);
 #endif
 
-    // register our framebuffer
-    rc = gDisplay->RegisterExternalFramebuffer(gpFrameBuffer);
-    if (rc != S_OK)
+    for (unsigned i = 0; i < gcMonitors; i++)
     {
-        RTPrintf("Error: could not register framebuffer object!\n");
-        goto leave;
+        if (!gpFramebuffer[i]->initialized())
+            goto leave;
+        gpFramebuffer[i]->AddRef();
+        if (fFullscreen)
+            SetFullscreen(true);
     }
 
-    // register a callback for global events
-    callback = new VBoxSDLCallback();
-    callback->AddRef();
-    virtualBox->RegisterCallback(callback);
+#ifdef VBOXSDL_WITH_X11
+    /* NOTE1: We still want Ctrl-C to work, so we undo the SDL redirections.
+     * NOTE2: We have to remove the PidFile if this file exists. */
+    signal(SIGINT,  signal_handler_SIGINT);
+    signal(SIGQUIT, signal_handler_SIGINT);
+    signal(SIGSEGV, signal_handler_SIGINT);
+#endif
 
-    // register a callback for machine events
-    consoleCallback = new VBoxSDLConsoleCallback();
-    consoleCallback->AddRef();
-    gConsole->RegisterCallback(consoleCallback);
-    // until we've tried to to start the VM, ignore power off events
-    consoleCallback->ignorePowerOffEvents(true);
 
-#ifdef __LINUX__
-    /*
-     * Do we have a TAP device name or file descriptor? If so, communicate
-     * it to the network adapter so that it doesn't allocate a new one
-     * in case TAP is already configured.
-     */
+    for (ULONG i = 0; i < gcMonitors; i++)
     {
-        ComPtr<INetworkAdapter> networkAdapter;
-        for (ULONG i = 0; i < NetworkAdapterCount; i++)
+        // register our framebuffer
+        hrc = gpDisplay->AttachFramebuffer(i, gpFramebuffer[i], gaFramebufferId[i].asOutParam());
+        if (FAILED(hrc))
         {
-            if (tapdev[i] || tapfd[i])
-            {
-                gMachine->GetNetworkAdapter(i, networkAdapter.asOutParam());
-                if (networkAdapter)
-                {
-                    NetworkAttachmentType_T attachmentType;
-                    networkAdapter->COMGETTER(AttachmentType)(&attachmentType);
-                    if (attachmentType == NetworkAttachmentType_HostInterfaceNetworkAttachment)
-                    {
-                        if (tapdev[i])
-                            networkAdapter->COMSETTER(HostInterface)(tapdev[i]);
-                        else
-                            networkAdapter->COMSETTER(TAPFileDescriptor)(tapfd[i]);
-                    }
-                    else
-                    {
-                        RTPrintf("Warning: network adapter %d is not configured for TAP. Command ignored!\n", i + 1);
-                    }
-                }
-                else
-                {
-                    /* warning */
-                    RTPrintf("Warning: network adapter %d not defined. Command ignored!\n", i + 1);
-                }
-            }
+            RTPrintf("Error: could not register framebuffer object!\n");
+            goto leave;
         }
+        ULONG dummy;
+        LONG xOrigin, yOrigin;
+        GuestMonitorStatus_T monitorStatus;
+        hrc = gpDisplay->GetScreenResolution(i, &dummy, &dummy, &dummy, &xOrigin, &yOrigin, &monitorStatus);
+        gpFramebuffer[i]->setOrigin(xOrigin, yOrigin);
     }
-#endif /* __LINUX__ */
 
-#ifdef VBOX_VRDP
-    if (portVRDP != ~0)
     {
-        rc = gMachine->COMGETTER(VRDPServer)(gVrdpServer.asOutParam());
-        AssertMsg((rc == S_OK) && gVrdpServer, ("Could not get VRDP Server! rc = 0x%x\n", rc));
-        if (gVrdpServer)
+        // register listener for VirtualBoxClient events
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(pVirtualBoxClient, COMGETTER(EventSource)(pES.asOutParam()));
+        ComObjPtr<VBoxSDLClientEventListenerImpl> listener;
+        listener.createObject();
+        listener->init(new VBoxSDLClientEventListener());
+        pVBoxClientListener = listener;
+        com::SafeArray<VBoxEventType_T> eventTypes;
+        eventTypes.push_back(VBoxEventType_OnVBoxSVCAvailabilityChanged);
+        CHECK_ERROR(pES, RegisterListener(pVBoxClientListener, ComSafeArrayAsInParam(eventTypes), true));
+    }
+
+    {
+        // register listener for VirtualBox (server) events
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(pVirtualBox, COMGETTER(EventSource)(pES.asOutParam()));
+        ComObjPtr<VBoxSDLEventListenerImpl> listener;
+        listener.createObject();
+        listener->init(new VBoxSDLEventListener());
+        pVBoxListener = listener;
+        com::SafeArray<VBoxEventType_T> eventTypes;
+        eventTypes.push_back(VBoxEventType_OnExtraDataChanged);
+        CHECK_ERROR(pES, RegisterListener(pVBoxListener, ComSafeArrayAsInParam(eventTypes), true));
+    }
+
+    {
+        // register listener for Console events
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(gpConsole, COMGETTER(EventSource)(pES.asOutParam()));
+        pConsoleListener.createObject();
+        pConsoleListener->init(new VBoxSDLConsoleEventListener());
+        com::SafeArray<VBoxEventType_T> eventTypes;
+        eventTypes.push_back(VBoxEventType_OnMousePointerShapeChanged);
+        eventTypes.push_back(VBoxEventType_OnMouseCapabilityChanged);
+        eventTypes.push_back(VBoxEventType_OnKeyboardLedsChanged);
+        eventTypes.push_back(VBoxEventType_OnStateChanged);
+        eventTypes.push_back(VBoxEventType_OnRuntimeError);
+        eventTypes.push_back(VBoxEventType_OnCanShowWindow);
+        eventTypes.push_back(VBoxEventType_OnShowWindow);
+        CHECK_ERROR(pES, RegisterListener(pConsoleListener, ComSafeArrayAsInParam(eventTypes), true));
+        // until we've tried to to start the VM, ignore power off events
+        pConsoleListener->getWrapped()->ignorePowerOffEvents(true);
+    }
+
+    if (pszPortVRDP)
+    {
+        hrc = gpMachine->COMGETTER(VRDEServer)(gpVRDEServer.asOutParam());
+        AssertMsg((hrc == S_OK) && gpVRDEServer, ("Could not get VRDP Server! rc = 0x%x\n", hrc));
+        if (gpVRDEServer)
         {
             // has a non standard VRDP port been requested?
-            if (portVRDP > 0)
+            if (strcmp(pszPortVRDP, "0"))
             {
-                rc = gVrdpServer->COMSETTER(Port)(portVRDP);
-                if (rc != S_OK)
+                hrc = gpVRDEServer->SetVRDEProperty(Bstr("TCP/Ports").raw(), Bstr(pszPortVRDP).raw());
+                if (hrc != S_OK)
                 {
-                    RTPrintf("Error: could not set VRDP port! rc = 0x%x\n", rc);
+                    RTPrintf("Error: could not set VRDP port! rc = 0x%x\n", hrc);
                     goto leave;
                 }
             }
             // now enable VRDP
-            rc = gVrdpServer->COMSETTER(Enabled)(TRUE);
-            if (rc != S_OK)
+            hrc = gpVRDEServer->COMSETTER(Enabled)(TRUE);
+            if (hrc != S_OK)
             {
-                RTPrintf("Error: could not enable VRDP server! rc = 0x%x\n", rc);
+                RTPrintf("Error: could not enable VRDP server! rc = 0x%x\n", hrc);
                 goto leave;
             }
         }
     }
-#endif
 
-    rc = E_FAIL;
+    hrc = E_FAIL;
 #ifdef VBOXSDL_ADVANCED_OPTIONS
-    if (fRawR0 != ~0U)
+    if (u32WarpDrive != 0)
     {
-        if (!gMachineDebugger)
+        if (!gpMachineDebugger)
         {
-            RTPrintf("Error: No debugger object; -%srawr0 cannot be executed!\n", fRawR0 ? "" : "no");
+            RTPrintf("Error: No debugger object; --warpdrive %d cannot be executed!\n", u32WarpDrive);
             goto leave;
         }
-        gMachineDebugger->COMSETTER(RecompileSupervisor)(!fRawR0);
-    }
-    if (fRawR3 != ~0U)
-    {
-        if (!gMachineDebugger)
-        {
-            RTPrintf("Error: No debugger object; -%srawr3 cannot be executed!\n", fRawR0 ? "" : "no");
-            goto leave;
-        }
-        gMachineDebugger->COMSETTER(RecompileUser)(!fRawR3);
-    }
-    if (fPATM != ~0U)
-    {
-        if (!gMachineDebugger)
-        {
-            RTPrintf("Error: No debugger object; -%spatm cannot be executed!\n", fRawR0 ? "" : "no");
-            goto leave;
-        }
-        gMachineDebugger->COMSETTER(PATMEnabled)(fPATM);
-    }
-    if (fCSAM != ~0U)
-    {
-        if (!gMachineDebugger)
-        {
-            RTPrintf("Error: No debugger object; -%scsam cannot be executed!\n", fRawR0 ? "" : "no");
-            goto leave;
-        }
-        gMachineDebugger->COMSETTER(CSAMEnabled)(fCSAM);
-    }
-    if (fHWVirt != TriStateBool_Default)
-    {
-        gMachine->COMSETTER(HWVirtExEnabled)(fHWVirt);
+        gpMachineDebugger->COMSETTER(VirtualTimeRate)(u32WarpDrive);
     }
 #endif /* VBOXSDL_ADVANCED_OPTIONS */
 
@@ -1766,41 +2018,16 @@ int main(int argc, char *argv[])
 
     /* memorize the default cursor */
     gpDefaultCursor = SDL_GetCursor();
-
-#ifdef __LINUX__
-    /* Get Window Manager info. We only need the X11 display. */
-    SDL_VERSION(&gSdlInfo.version);
-    if (!SDL_GetWMInfo(&gSdlInfo))
-    {
-        RTPrintf("Error: could not get SDL Window Manager info!\n");
-        goto leave;
-    }
-
-    /* SDL uses its own (plain) default cursor. Use the left arrow cursor instead which might look
-     * much better if a mouse cursor theme is installed. */
-    gpDefaultOrigX11Cursor = *(Cursor*)gpDefaultCursor->wm_cursor;
-    *(Cursor*)gpDefaultCursor->wm_cursor = XCreateFontCursor(gSdlInfo.info.x11.display, XC_left_ptr);
-    SDL_SetCursor(gpDefaultCursor);
-#endif /* __LINUX__ */
-
-    /* create a fake empty cursor */
-    {
-        uint8_t cursorData[1] = {0};
-        gpCustomCursor = SDL_CreateCursor(cursorData, cursorData, 8, 1, 0, 0);
-        gpCustomOrigWMcursor = gpCustomCursor->wm_cursor;
-        gpCustomCursor->wm_cursor = NULL;
-    }
-
     /*
      * Register our user signal handler.
      */
-#ifdef __LINUX__
+#ifdef VBOXSDL_WITH_X11
     struct sigaction sa;
-    sa.sa_sigaction = signal_handler;
-    sigemptyset (&sa.sa_mask);
+    sa.sa_sigaction = signal_handler_SIGUSR1;
+    sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART | SA_SIGINFO;
-    sigaction (SIGUSR1, &sa, NULL);
-#endif /* __LINUX__ */
+    sigaction(SIGUSR1, &sa, NULL);
+#endif /* VBOXSDL_WITH_X11 */
 
     /*
      * Start the VM execution thread. This has to be done
@@ -1810,19 +2037,22 @@ int main(int argc, char *argv[])
      */
     SDL_Event event;
 
-    LogFlow(("Powering up the VM...\n"));
-    rc = gConsole->PowerUp(gProgress.asOutParam());
-    if (rc != S_OK)
+    if (!fSeparate)
     {
-        com::ErrorInfo info(gConsole);
-        if (info.isBasicAvailable())
-            PrintError("Failed to power up VM", info.getText().raw());
-        else
-            RTPrintf("Error: failed to power up VM! No error text available.\n");
-        goto leave;
+        LogFlow(("Powering up the VM...\n"));
+        hrc = gpConsole->PowerUp(gpProgress.asOutParam());
+        if (hrc != S_OK)
+        {
+            com::ErrorInfo info(gpConsole, COM_IIDOF(IConsole));
+            if (info.isBasicAvailable())
+                PrintError("Failed to power up VM", info.getText().raw());
+            else
+                RTPrintf("Error: failed to power up VM! No error text available.\n");
+            goto leave;
+        }
     }
 
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
     /*
      * Before we starting to do stuff, we have to launch the XPCOM
      * event queue thread. It will wait for events and send messages
@@ -1831,12 +2061,16 @@ int main(int argc, char *argv[])
      * event storm might arrive. Stupid SDL has a ridiculously small
      * event queue buffer!
      */
-    startXPCOMEventQueueThread(eventQ->GetEventQueueSelectFD());
-#endif /** __LINUX__ */
+    startXPCOMEventQueueThread(eventQ->getSelectFD());
+#endif /* USE_XPCOM_QUEUE_THREAD */
 
     /* termination flag */
     bool fTerminateDuringStartup;
     fTerminateDuringStartup = false;
+
+    LogRel(("VBoxSDL: NUM lock initially %s, CAPS lock initially %s\n",
+            !!(SDL_GetModState() & KMOD_NUM)  ? "ON" : "OFF",
+            !!(SDL_GetModState() & KMOD_CAPS) ? "ON" : "OFF"));
 
     /* start regular timer so we don't starve in the event loop */
     SDL_TimerID sdlTimer;
@@ -1846,10 +2080,13 @@ int main(int argc, char *argv[])
     MachineState_T machineState;
     do
     {
-        rc = gMachine->COMGETTER(State)(&machineState);
-        if (    rc == S_OK
+        hrc = gpMachine->COMGETTER(State)(&machineState);
+        if (    hrc == S_OK
             &&  (   machineState == MachineState_Starting
-                 || machineState == MachineState_Restoring))
+                 || machineState == MachineState_Restoring
+                 || machineState == MachineState_TeleportingIn
+                )
+            )
         {
             /*
              * wait for the next event. This is uncritical as
@@ -1858,7 +2095,7 @@ int main(int argc, char *argv[])
              * change will send us an event. However, we have to
              * service the XPCOM event queue!
              */
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
             if (!fXPCOMEventThreadSignaled)
             {
                 signalXPCOMEventQueueThread();
@@ -1868,7 +2105,7 @@ int main(int argc, char *argv[])
             /*
              * Wait for SDL events.
              */
-            if (SDL_WaitEvent(&event))
+            if (WaitSDLEvent(&event))
             {
                 switch (event.type)
                 {
@@ -1885,29 +2122,33 @@ int main(int argc, char *argv[])
                     }
 
                     /*
-                     * User specific resize event.
+                     * User specific framebuffer change event.
                      */
-                    case SDL_USER_EVENT_RESIZE:
+                    case SDL_USER_EVENT_NOTIFYCHANGE:
                     {
-                        LogFlow(("SDL_USER_EVENT_RESIZE\n"));
-                        gpFrameBuffer->resizeGuest();
-                        /* notify the display that the resize has been completed */
-                        gDisplay->ResizeCompleted();
+                        LogFlow(("SDL_USER_EVENT_NOTIFYCHANGE\n"));
+                        LONG xOrigin, yOrigin;
+                        gpFramebuffer[event.user.code]->notifyChange(event.user.code);
+                        /* update xOrigin, yOrigin -> mouse */
+                        ULONG dummy;
+                        GuestMonitorStatus_T monitorStatus;
+                        hrc = gpDisplay->GetScreenResolution(event.user.code, &dummy, &dummy, &dummy, &xOrigin, &yOrigin, &monitorStatus);
+                        gpFramebuffer[event.user.code]->setOrigin(xOrigin, yOrigin);
                         break;
                     }
 
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
                     /*
                      * User specific XPCOM event queue event
                      */
                     case SDL_USER_EVENT_XPCOM_EVENTQUEUE:
                     {
                         LogFlow(("SDL_USER_EVENT_XPCOM_EVENTQUEUE: processing XPCOM event queue...\n"));
-                        eventQ->ProcessPendingEvents();
+                        eventQ->processEventQueue(0);
                         signalXPCOMEventQueueThread();
                         break;
                     }
-#endif /* __LINUX__ */
+#endif /* USE_XPCOM_QUEUE_THREAD */
 
                     /*
                      * Termination event from the on state change callback.
@@ -1916,7 +2157,7 @@ int main(int argc, char *argv[])
                     {
                         if (event.user.code != VBOXSDL_TERM_NORMAL)
                         {
-                            com::ProgressErrorInfo info(gProgress);
+                            com::ProgressErrorInfo info(gpProgress);
                             if (info.isBasicAvailable())
                                 PrintError("Failed to power up VM", info.getText().raw());
                             else
@@ -1928,16 +2169,20 @@ int main(int argc, char *argv[])
 
                     default:
                     {
-                        LogBird(("VBoxSDL: Unknown SDL event %d (pre)\n", event.type));
+                        Log8(("VBoxSDL: Unknown SDL event %d (pre)\n", event.type));
                         break;
                     }
                 }
 
             }
         }
-    } while (   rc == S_OK
+        eventQ->processEventQueue(0);
+    } while (   hrc == S_OK
              && (   machineState == MachineState_Starting
-                 || machineState == MachineState_Restoring));
+                 || machineState == MachineState_Restoring
+                 || machineState == MachineState_TeleportingIn
+                )
+            );
 
     /* kill the timer again */
     SDL_RemoveTimer(sdlTimer);
@@ -1950,59 +2195,140 @@ int main(int argc, char *argv[])
     /* did the power up succeed? */
     if (machineState != MachineState_Running)
     {
-        com::ProgressErrorInfo info(gProgress);
+        com::ProgressErrorInfo info(gpProgress);
         if (info.isBasicAvailable())
             PrintError("Failed to power up VM", info.getText().raw());
         else
-            RTPrintf("Error: failed to power up VM! No error text available (rc = 0x%x state = %d)\n", rc, machineState);
+            RTPrintf("Error: failed to power up VM! No error text available (rc = 0x%x state = %d)\n", hrc, machineState);
         goto leave;
     }
 
     // accept power off events from now on because we're running
     // note that there's a possible race condition here...
-    consoleCallback->ignorePowerOffEvents(false);
+    pConsoleListener->getWrapped()->ignorePowerOffEvents(false);
 
-    rc = gConsole->COMGETTER(Keyboard)(gKeyboard.asOutParam());
-    if (!gKeyboard)
+    hrc = gpConsole->COMGETTER(Keyboard)(gpKeyboard.asOutParam());
+    if (!gpKeyboard)
     {
         RTPrintf("Error: could not get keyboard object!\n");
         goto leave;
     }
-    gConsole->COMGETTER(Mouse)(gMouse.asOutParam());
-    if (!gMouse)
+    gpConsole->COMGETTER(Mouse)(gpMouse.asOutParam());
+    if (!gpMouse)
     {
         RTPrintf("Error: could not get mouse object!\n");
         goto leave;
     }
 
+    if (fSeparate && gpMouse)
+    {
+        LogFlow(("Fetching mouse caps\n"));
+
+        /* Fetch current mouse status, etc */
+        gpMouse->COMGETTER(AbsoluteSupported)(&gfAbsoluteMouseGuest);
+        gpMouse->COMGETTER(RelativeSupported)(&gfRelativeMouseGuest);
+        gpMouse->COMGETTER(NeedsHostCursor)(&gfGuestNeedsHostCursor);
+
+        HandleGuestCapsChanged();
+
+        ComPtr<IMousePointerShape> mps;
+        gpMouse->COMGETTER(PointerShape)(mps.asOutParam());
+        if (!mps.isNull())
+        {
+            BOOL  visible,  alpha;
+            ULONG hotX, hotY, width, height;
+            com::SafeArray <BYTE> shape;
+
+            mps->COMGETTER(Visible)(&visible);
+            mps->COMGETTER(Alpha)(&alpha);
+            mps->COMGETTER(HotX)(&hotX);
+            mps->COMGETTER(HotY)(&hotY);
+            mps->COMGETTER(Width)(&width);
+            mps->COMGETTER(Height)(&height);
+            mps->COMGETTER(Shape)(ComSafeArrayAsOutParam(shape));
+
+            if (shape.size() > 0)
+            {
+                PointerShapeChangeData data(visible, alpha, hotX, hotY, width, height,
+                                            ComSafeArrayAsInParam(shape));
+                SetPointerShape(&data);
+            }
+        }
+    }
+
     UpdateTitlebar(TITLEBAR_NORMAL);
 
     /*
-     * Enable keyboard repeats
+     * Create PID file.
      */
-    SDL_EnableKeyRepeat(SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
+    if (gpszPidFile)
+    {
+        char szBuf[32];
+        const char *pcszLf = "\n";
+        RTFILE PidFile;
+        RTFileOpen(&PidFile, gpszPidFile, RTFILE_O_WRITE | RTFILE_O_CREATE_REPLACE | RTFILE_O_DENY_NONE);
+        RTStrFormatNumber(szBuf, RTProcSelf(), 10, 0, 0, 0);
+        RTFileWrite(PidFile, szBuf, strlen(szBuf), NULL);
+        RTFileWrite(PidFile, pcszLf, strlen(pcszLf), NULL);
+        RTFileClose(PidFile);
+    }
 
     /*
      * Main event loop
      */
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
     if (!fXPCOMEventThreadSignaled)
     {
         signalXPCOMEventQueueThread();
     }
 #endif
     LogFlow(("VBoxSDL: Entering big event loop\n"));
-    while (SDL_WaitEvent(&event))
+    while (WaitSDLEvent(&event))
     {
         switch (event.type)
         {
             /*
              * The screen needs to be repainted.
              */
-            case SDL_VIDEOEXPOSE:
+            case SDL_WINDOWEVENT:
             {
-                /// @todo that somehow doesn't seem to work!
-                gpFrameBuffer->repaint();
+                switch (event.window.event)
+                {
+                    case SDL_WINDOWEVENT_EXPOSED:
+                    {
+                        VBoxSDLFB *fb = getFbFromWinId(event.window.windowID);
+                        if (fb)
+                            fb->repaint();
+                        break;
+                    }
+                    case SDL_WINDOWEVENT_FOCUS_GAINED:
+                    {
+                        break;
+                    }
+                    case SDL_WINDOWEVENT_FOCUS_LOST:
+                    {
+                        break;
+                    }
+                    case SDL_WINDOWEVENT_RESIZED:
+                    {
+                        if (gpDisplay)
+                        {
+                            if (gfIgnoreNextResize)
+                            {
+                                gfIgnoreNextResize = FALSE;
+                                break;
+                            }
+                            uResizeWidth  = event.window.data1;
+                            uResizeHeight = event.window.data2;
+                            if (gSdlResizeTimer)
+                                SDL_RemoveTimer(gSdlResizeTimer);
+                            gSdlResizeTimer = SDL_AddTimer(300, ResizeTimer, NULL);
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
                 break;
             }
 
@@ -2012,8 +2338,7 @@ int main(int argc, char *argv[])
             case SDL_KEYDOWN:
             case SDL_KEYUP:
             {
-                SDLKey ksym = event.key.keysym.sym;
-
+                SDL_Keycode ksym = event.key.keysym.sym;
                 switch (enmHKeyState)
                 {
                     case HKEYSTATE_NORMAL:
@@ -2038,34 +2363,40 @@ int main(int argc, char *argv[])
                         {
                             if (   event.type == SDL_KEYDOWN
                                 && ksym != SDLK_UNKNOWN
-                                && (   enmHKeyState == HKEYSTATE_DOWN_1ST && ksym == gHostKeySym2
-                                    || enmHKeyState == HKEYSTATE_DOWN_2ND && ksym == gHostKeySym1))
+                                && (   (enmHKeyState == HKEYSTATE_DOWN_1ST && ksym == gHostKeySym2)
+                                    || (enmHKeyState == HKEYSTATE_DOWN_2ND && ksym == gHostKeySym1)))
                             {
                                 EvHKeyDown2  = event;
                                 enmHKeyState = HKEYSTATE_DOWN;
                                 break;
                             }
-                            enmHKeyState = event.type == SDL_KEYUP ? HKEYSTATE_NORMAL 
+                            enmHKeyState = event.type == SDL_KEYUP ? HKEYSTATE_NORMAL
                                                                  : HKEYSTATE_NOT_IT;
                             ProcessKey(&EvHKeyDown1.key);
+                            /* ugly hack: Some guests (e.g. mstsc.exe on Windows XP)
+                             * expect a small delay between two key events. 5ms work
+                             * reliable here so use 10ms to be on the safe side. A
+                             * better but more complicated fix would be to introduce
+                             * a new state and don't wait here. */
+                            RTThreadSleep(10);
                             ProcessKey(&event.key);
                             break;
                         }
-                        /* fall through if no two-key sequence is used */
                     }
+                    RT_FALL_THRU();
 
                     case HKEYSTATE_DOWN:
                     {
                         if (event.type == SDL_KEYDOWN)
                         {
                             /* potential host key combination, try execute it */
-                            int rc = HandleHostKey(&event.key);
-                            if (rc == VINF_SUCCESS)
+                            int irc = HandleHostKey(&event.key);
+                            if (irc == VINF_SUCCESS)
                             {
                                 enmHKeyState = HKEYSTATE_USED;
                                 break;
                             }
-                            if (VBOX_SUCCESS(rc))
+                            if (RT_SUCCESS(irc))
                                 goto leave;
                         }
                         else /* SDL_KEYUP */
@@ -2089,8 +2420,14 @@ int main(int argc, char *argv[])
                         /* not host key */
                         enmHKeyState = HKEYSTATE_NOT_IT;
                         ProcessKey(&EvHKeyDown1.key);
+                        /* see the comment for the 2-key case above */
+                        RTThreadSleep(10);
                         if (gHostKeySym2 != SDLK_UNKNOWN)
+                        {
                             ProcessKey(&EvHKeyDown2.key);
+                            /* see the comment for the 2-key case above */
+                            RTThreadSleep(10);
+                        }
                         ProcessKey(&event.key);
                         break;
                     }
@@ -2101,8 +2438,8 @@ int main(int argc, char *argv[])
                             enmHKeyState = HKEYSTATE_NORMAL;
                         if (event.type == SDL_KEYDOWN)
                         {
-                            int rc = HandleHostKey(&event.key);
-                            if (VBOX_SUCCESS(rc) && rc != VINF_SUCCESS)
+                            int irc = HandleHostKey(&event.key);
+                            if (RT_SUCCESS(irc) && irc != VINF_SUCCESS)
                                 goto leave;
                         }
                         break;
@@ -2110,7 +2447,7 @@ int main(int argc, char *argv[])
 
                     default:
                         AssertMsgFailed(("enmHKeyState=%d\n", enmHKeyState));
-                        /* fall thru */
+                        RT_FALL_THRU();
                     case HKEYSTATE_NOT_IT:
                     {
                         if ((SDL_GetModState() & ~(KMOD_MODE | KMOD_NUM | KMOD_RESERVED)) == 0)
@@ -2127,7 +2464,11 @@ int main(int argc, char *argv[])
              */
             case SDL_QUIT:
             {
-                goto leave;
+                if (!gfACPITerm || gSdlQuitTimer)
+                    goto leave;
+                if (gpConsole)
+                    gpConsole->PowerButton();
+                gSdlQuitTimer = SDL_AddTimer(1000, QuitTimer, NULL);
                 break;
             }
 
@@ -2138,11 +2479,20 @@ int main(int argc, char *argv[])
             {
                 if (gfGrabbed || UseAbsoluteMouse())
                 {
-                    SendMouseEvent(0, 0, 0);
+                    VBoxSDLFB *fb = getFbFromWinId(event.motion.windowID);
+                    if (fb)
+                        SendMouseEvent(fb, 0, 0, 0);
                 }
                 break;
             }
 
+            case SDL_MOUSEWHEEL:
+            {
+                VBoxSDLFB *fb = getFbFromWinId(event.button.windowID);
+                if (fb)
+                    SendMouseEvent(fb, -1 * event.wheel.y, 0, 0);
+                break;
+            }
             /*
              * A mouse button has been clicked or released.
              */
@@ -2159,14 +2509,8 @@ int main(int argc, char *argv[])
                         InputGrabStart();
                     }
                 }
-                else
+                else if (gfGrabbed || UseAbsoluteMouse())
                 {
-                    int dz = bev->button == SDL_BUTTON_WHEELUP
-                                         ? -1
-                                         : bev->button == SDL_BUTTON_WHEELDOWN
-                                                       ? +1
-                                                       :  0;
-
                     /* end host key combination (CTRL+MouseButton) */
                     switch (enmHKeyState)
                     {
@@ -2174,26 +2518,36 @@ int main(int argc, char *argv[])
                         case HKEYSTATE_DOWN_2ND:
                             enmHKeyState = HKEYSTATE_NOT_IT;
                             ProcessKey(&EvHKeyDown1.key);
+                            /* ugly hack: small delay to ensure that the key event is
+                             * actually handled _prior_ to the mouse click event */
+                            RTThreadSleep(20);
                             break;
                         case HKEYSTATE_DOWN:
                             enmHKeyState = HKEYSTATE_NOT_IT;
                             ProcessKey(&EvHKeyDown1.key);
                             if (gHostKeySym2 != SDLK_UNKNOWN)
                                 ProcessKey(&EvHKeyDown2.key);
+                            /* ugly hack: small delay to ensure that the key event is
+                             * actually handled _prior_ to the mouse click event */
+                            RTThreadSleep(20);
                             break;
                         default:
                             break;
                     }
 
-                    SendMouseEvent(dz, event.type == SDL_MOUSEBUTTONDOWN, bev->button);
+                    VBoxSDLFB *fb;
+                    fb = getFbFromWinId(event.button.windowID);
+                    if (fb)
+                        SendMouseEvent(fb, 0 /*wheel vertical movement*/, event.type == SDL_MOUSEBUTTONDOWN, bev->button);
                 }
                 break;
             }
 
+#if 0
             /*
              * The window has gained or lost focus.
              */
-            case SDL_ACTIVEEVENT:
+            case SDL_ACTIVEEVENT: /** @todo Needs to be also fixed with SDL2? Check! */
             {
                 /*
                  * There is a strange behaviour in SDL when running without a window
@@ -2212,23 +2566,27 @@ int main(int argc, char *argv[])
             }
 
             /*
-             * The SDL window was resized
+             * The SDL window was resized.
+             * For SDL2 this is done in SDL_WINDOWEVENT.
              */
             case SDL_VIDEORESIZE:
             {
-                if (gDisplay)
+                if (gpDisplay)
                 {
-#ifdef VBOX_SECURELABEL
-                    /* communicate the resize event to the guest */
-                    gDisplay->SetVideoModeHint(event.resize.w, RT_MAX(0, event.resize.h - SECURE_LABEL_HEIGHT), 0);
-#else
-                    /* communicate the resize event to the guest */
-                    gDisplay->SetVideoModeHint(event.resize.w, event.resize.h, 0);
-#endif
+                    if (gfIgnoreNextResize)
+                    {
+                        gfIgnoreNextResize = FALSE;
+                        break;
+                    }
+                    uResizeWidth  = event.resize.w;
+                    uResizeHeight = event.resize.h;
+                    if (gSdlResizeTimer)
+                        SDL_RemoveTimer(gSdlResizeTimer);
+                    gSdlResizeTimer = SDL_AddTimer(300, ResizeTimer, NULL);
                 }
                 break;
             }
-
+#endif
             /*
              * User specific update event.
              */
@@ -2240,56 +2598,73 @@ int main(int argc, char *argv[])
                 /*
                  * Decode event parameters.
                  */
-                #define DECODEX(event) ((int)(event).user.data1 >> 16)
-                #define DECODEY(event) ((int)(event).user.data1 & 0xFFFF)
-                #define DECODEW(event) ((int)(event).user.data2 >> 16)
-                #define DECODEH(event) ((int)(event).user.data2 & 0xFFFF)
-                int x = DECODEX(event);
-                int y = DECODEY(event);
-                int w = DECODEW(event);
-                int h = DECODEH(event);
-                LogFlow(("SDL_USER_EVENT_UPDATERECT: x = %d, y = %d, w = %d, h = %d\n",
-                        x, y, w, h));
+                ASMAtomicDecS32(&g_cNotifyUpdateEventsPending);
 
-                Assert(gpFrameBuffer);
-                /*
-                 * Lock the framebuffer, perform the update and lock again
-                 */
-                gpFrameBuffer->Lock();
-                gpFrameBuffer->update(x, y, w, h, true /* fGuestRelative */);
-                gpFrameBuffer->Unlock();
+                SDL_Rect *pUpdateRect = (SDL_Rect *)event.user.data1;
+                AssertPtrBreak(pUpdateRect);
 
-                #undef DECODEX
-                #undef DECODEY
-                #undef DECODEW
-                #undef DECODEH
+                int const x = pUpdateRect->x;
+                int const y = pUpdateRect->y;
+                int const w = pUpdateRect->w;
+                int const h = pUpdateRect->h;
+
+                RTMemFree(event.user.data1);
+
+                Log3Func(("SDL_USER_EVENT_UPDATERECT: x=%d y=%d, w=%d, h=%d\n", x, y, w, h));
+
+                Assert(gpFramebuffer[event.user.code]);
+                gpFramebuffer[event.user.code]->update(x, y, w, h, true /* fGuestRelative */);
                 break;
             }
 
             /*
-             * User specific resize event.
+             * User event: Window resize done
              */
-            case SDL_USER_EVENT_RESIZE:
+            case SDL_USER_EVENT_WINDOW_RESIZE_DONE:
             {
-                LogFlow(("SDL_USER_EVENT_RESIZE\n"));
-                gpFrameBuffer->resizeGuest();
-                /* notify the display that the resize has been completed */
-                gDisplay->ResizeCompleted();
+                /**
+                 * @todo This is a workaround for synchronization problems between EMT and the
+                 *       SDL main thread. It can happen that the SDL thread already starts a
+                 *       new resize operation while the EMT is still busy with the old one
+                 *       leading to a deadlock. Therefore we call SetVideoModeHint only once
+                 *       when the mouse button was released.
+                 */
+                /* communicate the resize event to the guest */
+                gpDisplay->SetVideoModeHint(0 /*=display*/, true /*=enabled*/, false /*=changeOrigin*/,
+                                            0 /*=originX*/, 0 /*=originY*/,
+                                            uResizeWidth, uResizeHeight, 0 /*=don't change bpp*/, true /*=notify*/);
+                break;
+
+            }
+
+            /*
+             * User specific framebuffer change event.
+             */
+            case SDL_USER_EVENT_NOTIFYCHANGE:
+            {
+                LogFlow(("SDL_USER_EVENT_NOTIFYCHANGE\n"));
+                LONG xOrigin, yOrigin;
+                gpFramebuffer[event.user.code]->notifyChange(event.user.code);
+                /* update xOrigin, yOrigin -> mouse */
+                ULONG dummy;
+                GuestMonitorStatus_T monitorStatus;
+                hrc = gpDisplay->GetScreenResolution(event.user.code, &dummy, &dummy, &dummy, &xOrigin, &yOrigin, &monitorStatus);
+                gpFramebuffer[event.user.code]->setOrigin(xOrigin, yOrigin);
                 break;
             }
 
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
             /*
              * User specific XPCOM event queue event
              */
             case SDL_USER_EVENT_XPCOM_EVENTQUEUE:
             {
                 LogFlow(("SDL_USER_EVENT_XPCOM_EVENTQUEUE: processing XPCOM event queue...\n"));
-                eventQ->ProcessPendingEvents();
+                eventQ->processEventQueue(0);
                 signalXPCOMEventQueueThread();
                 break;
             }
-#endif /* __LINUX__ */
+#endif /* USE_XPCOM_QUEUE_THREAD */
 
             /*
              * User specific update title bar notification event
@@ -2309,34 +2684,12 @@ int main(int argc, char *argv[])
                     RTPrintf("Error: VM terminated abnormally!\n");
                 goto leave;
             }
-
-#ifdef VBOX_SECURELABEL
-            /*
-             * User specific secure label update event
-             */
-            case SDL_USER_EVENT_SECURELABEL_UPDATE:
-            {
-                /*
-                 * Query the new label text
-                 */
-                Bstr key = VBOXSDL_SECURELABEL_EXTRADATA;
-                Bstr label;
-                gMachine->GetExtraData(key, label.asOutParam());
-                Utf8Str labelUtf8 = label;
-                /*
-                 * Now update the label
-                 */
-                gpFrameBuffer->setSecureLabelText(labelUtf8.raw());
-                break;
-            }
-#endif /* VBOX_SECURELABEL */
-
             /*
              * User specific pointer shape change event
              */
             case SDL_USER_EVENT_POINTER_CHANGE:
             {
-                PointerShapeChangeData *data = (PointerShapeChangeData *) event.user.data1;
+                PointerShapeChangeData *data = (PointerShapeChangeData *)event.user.data1;
                 SetPointerShape (data);
                 delete data;
                 break;
@@ -2353,143 +2706,193 @@ int main(int argc, char *argv[])
 
             default:
             {
-                LogBird(("unknown SDL event %d\n", event.type));
+                Log8(("unknown SDL event %d\n", event.type));
                 break;
             }
         }
     }
 
 leave:
+    if (gpszPidFile)
+        RTFileDelete(gpszPidFile);
+
     LogFlow(("leaving...\n"));
-#ifdef __LINUX__
+#if defined(VBOX_WITH_XPCOM) && !defined(RT_OS_DARWIN) && !defined(RT_OS_OS2)
     /* make sure the XPCOM event queue thread doesn't do anything harmful */
     terminateXPCOMQueueThread();
-#endif /* __LINUX__ */
+#endif /* VBOX_WITH_XPCOM */
 
-#ifdef VBOX_VRDP
-    if (gVrdpServer)
-        rc = gVrdpServer->COMSETTER(Enabled)(FALSE);
-#endif
+    if (gpVRDEServer)
+        hrc = gpVRDEServer->COMSETTER(Enabled)(FALSE);
 
     /*
      * Get the machine state.
      */
-    if (gMachine)
-        gMachine->COMGETTER(State)(&machineState);
+    if (gpMachine)
+        gpMachine->COMGETTER(State)(&machineState);
     else
         machineState = MachineState_Aborted;
 
-    /*
-     * Turn off the VM if it's running
-     */
-    if (   gConsole
-        && machineState == MachineState_Running)
+    if (!fSeparate)
     {
-        consoleCallback->ignorePowerOffEvents(true);
-        rc = gConsole->PowerDown();
-        if (FAILED(rc))
+        /*
+         * Turn off the VM if it's running
+         */
+        if (   gpConsole
+            && (   machineState == MachineState_Running
+                || machineState == MachineState_Teleporting
+                || machineState == MachineState_LiveSnapshotting
+                /** @todo power off paused VMs too? */
+               )
+           )
+        do
         {
-            com::ErrorInfo info;
-            if (info.isFullAvailable())
-                PrintError("Failed to power down VM",
-                           info.getText().raw(), info.getComponent().raw());
-            else
-                RTPrintf("Failed to power down virtual machine! No error information available (rc = 0x%x).\n", rc);
-            break;
-        }
+            pConsoleListener->getWrapped()->ignorePowerOffEvents(true);
+            ComPtr<IProgress> pProgress;
+            CHECK_ERROR_BREAK(gpConsole, PowerDown(pProgress.asOutParam()));
+            CHECK_ERROR_BREAK(pProgress, WaitForCompletion(-1));
+            BOOL completed;
+            CHECK_ERROR_BREAK(pProgress, COMGETTER(Completed)(&completed));
+            ASSERT(completed);
+            LONG hrc2;
+            CHECK_ERROR_BREAK(pProgress, COMGETTER(ResultCode)(&hrc2));
+            if (FAILED(hrc2))
+            {
+                com::ErrorInfo info;
+                if (info.isFullAvailable())
+                    PrintError("Failed to power down VM",
+                               info.getText().raw(), info.getComponent().raw());
+                else
+                    RTPrintf("Failed to power down virtual machine! No error information available (rc=%Rhrc).\n", hrc2);
+                break;
+            }
+        } while (0);
+    }
+
+    /* unregister Console listener */
+    if (pConsoleListener)
+    {
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(gpConsole, COMGETTER(EventSource)(pES.asOutParam()));
+        if (!pES.isNull())
+            CHECK_ERROR(pES, UnregisterListener(pConsoleListener));
+        pConsoleListener.setNull();
     }
 
     /*
      * Now we discard all settings so that our changes will
      * not be flushed to the permanent configuration
      */
-    if (   gMachine
-        && machineState != MachineState_Saved)
+    if (   gpMachine
+        && machineState != MachineState_Saved
+        && machineState != MachineState_AbortedSaved)
     {
-        rc = gMachine->DiscardSettings();
-        AssertComRC(rc);
+        hrc = gpMachine->DiscardSettings();
+        AssertMsg(SUCCEEDED(hrc), ("DiscardSettings %Rhrc, machineState %d\n", hrc, machineState));
     }
 
     /* close the session */
     if (sessionOpened)
     {
-        rc = session->Close();
-        AssertComRC(rc);
+        hrc = pSession->UnlockMachine();
+        AssertComRC(hrc);
     }
 
-    /* restore the default cursor and free the custom one if any */
-    if (gpDefaultCursor)
+    LogFlow(("Releasing mouse, keyboard, remote desktop server, display, console...\n"));
+    if (gpDisplay)
     {
-#ifdef __LINUX__
-        Cursor pDefaultTempX11Cursor = *(Cursor*)gpDefaultCursor->wm_cursor;
-        *(Cursor*)gpDefaultCursor->wm_cursor = gpDefaultOrigX11Cursor;
-#endif /* __LNUX__ */
-        SDL_SetCursor(gpDefaultCursor);
-#ifdef __LINUX__
-        XFreeCursor(gSdlInfo.info.x11.display, pDefaultTempX11Cursor);
-#endif /* __LINUX__ */
+        for (unsigned i = 0; i < gcMonitors; i++)
+            gpDisplay->DetachFramebuffer(i, gaFramebufferId[i].raw());
     }
 
-    if (gpCustomCursor)
+    gpMouse = NULL;
+    gpKeyboard = NULL;
+    gpVRDEServer = NULL;
+    gpDisplay = NULL;
+    gpConsole = NULL;
+    gpMachineDebugger = NULL;
+    gpProgress = NULL;
+    // we can only uninitialize SDL here because it is not threadsafe
+
+    for (unsigned i = 0; i < gcMonitors; i++)
     {
-        WMcursor *pCustomTempWMCursor = gpCustomCursor->wm_cursor;
-        gpCustomCursor->wm_cursor = gpCustomOrigWMcursor;
-        SDL_FreeCursor(gpCustomCursor);
-        if (pCustomTempWMCursor)
+        if (gpFramebuffer[i])
         {
-#if defined (__WIN__)
-            ::DestroyCursor(*(HCURSOR *) pCustomTempWMCursor);
-#elif defined (__LINUX__)
-            XFreeCursor(gSdlInfo.info.x11.display, *(Cursor *) pCustomTempWMCursor);
-#endif
-            free(pCustomTempWMCursor);
+            LogFlow(("Releasing framebuffer...\n"));
+            gpFramebuffer[i]->Release();
+            gpFramebuffer[i] = NULL;
         }
     }
 
-    LogFlow(("Releasing mouse, keyboard, vrdpserver, display, console...\n"));
-    gMouse = NULL;
-    gKeyboard = NULL;
-    gVrdpServer = NULL;
-    gDisplay = NULL;
-    gConsole = NULL;
-    gMachineDebugger = NULL;
-    gProgress = NULL;
-    // we can only uninitialize SDL here because it is not threadsafe
-    if (gpFrameBuffer)
-    {
-        LogFlow(("Releasing framebuffer...\n"));
-        gpFrameBuffer->uninit();
-        gpFrameBuffer->Release();
-    }
-#ifdef VBOX_SECURELABEL
-    /* must do this after destructing the framebuffer */
-    if (gLibrarySDL_ttf)
-        RTLdrClose(gLibrarySDL_ttf);
-#endif
-    LogFlow(("Releasing machine, session...\n"));
-    gMachine = NULL;
-    session = NULL;
-    LogFlow(("Releasing callback handlers...\n"));
-    if (callback)
-        callback->Release();
-    if (consoleCallback)
-        consoleCallback->Release();
+    VBoxSDLFB::uninit();
 
+    /* VirtualBox (server) listener unregistration. */
+    if (pVBoxListener)
+    {
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(pVirtualBox, COMGETTER(EventSource)(pES.asOutParam()));
+        if (!pES.isNull())
+            CHECK_ERROR(pES, UnregisterListener(pVBoxListener));
+        pVBoxListener.setNull();
+    }
+
+    /* VirtualBoxClient listener unregistration. */
+    if (pVBoxClientListener)
+    {
+        ComPtr<IEventSource> pES;
+        CHECK_ERROR(pVirtualBoxClient, COMGETTER(EventSource)(pES.asOutParam()));
+        if (!pES.isNull())
+            CHECK_ERROR(pES, UnregisterListener(pVBoxClientListener));
+        pVBoxClientListener.setNull();
+    }
+
+    LogFlow(("Releasing machine, session...\n"));
+    gpMachine = NULL;
+    pSession = NULL;
     LogFlow(("Releasing VirtualBox object...\n"));
-    virtualBox = NULL;
+    pVirtualBox = NULL;
+    LogFlow(("Releasing VirtualBoxClient object...\n"));
+    pVirtualBoxClient = NULL;
 
     // end "all-stuff" scope
     ////////////////////////////////////////////////////////////////////////////
     }
-    while (0);
 
+    /* Must be before com::Shutdown() */
     LogFlow(("Uninitializing COM...\n"));
     com::Shutdown();
 
     LogFlow(("Returning from main()!\n"));
     RTLogFlush(NULL);
-    return FAILED (rc) ? 1 : 0;
+
+#ifdef RT_OS_WINDOWS
+    FreeConsole(); /* Detach or destroy (from) console. */
+#endif
+
+    return FAILED(hrc) ? 1 : 0;
 }
+
+#ifndef VBOX_WITH_HARDENING
+/**
+ * Main entry point
+ */
+int main(int argc, char **argv)
+{
+#ifdef Q_WS_X11
+    if (!XInitThreads())
+        return 1;
+#endif
+    /*
+     * Before we do *anything*, we initialize the runtime.
+     */
+    int rc = RTR3InitExe(argc, &argv, RTR3INIT_FLAGS_TRY_SUPLIB);
+    if (RT_FAILURE(rc))
+        return RTMsgInitFailure(rc);
+
+    return TrustedMain(argc, argv, NULL);
+}
+#endif /* !VBOX_WITH_HARDENING */
+
 
 /**
  * Returns whether the absolute mouse is in use, i.e. both host
@@ -2502,108 +2905,6 @@ static bool UseAbsoluteMouse(void)
     return (gfAbsoluteMouseHost && gfAbsoluteMouseGuest);
 }
 
-/**
- * Converts an SDL keyboard eventcode to a XT scancode.
- *
- * @returns XT scancode
- * @param   ev SDL scancode
- */
-static uint8_t Keyevent2Keycode(const SDL_KeyboardEvent *ev)
-{
-    int keycode;
-
-    // start with the scancode determined by SDL
-    keycode = ev->keysym.scancode;
-
-#ifdef __LINUX__
-    // workaround for SDL keyboard translation issues on Linux
-    // keycodes > 0x80 are sent as 0xe0 keycode
-    static const uint8_t x_keycode_to_pc_keycode[61] =
-    {
-       0xc7,      /*  97  Home   */
-       0xc8,      /*  98  Up     */
-       0xc9,      /*  99  PgUp   */
-       0xcb,      /* 100  Left   */
-       0x4c,      /* 101  KP-5   */
-       0xcd,      /* 102  Right  */
-       0xcf,      /* 103  End    */
-       0xd0,      /* 104  Down   */
-       0xd1,      /* 105  PgDn   */
-       0xd2,      /* 106  Ins    */
-       0xd3,      /* 107  Del    */
-       0x9c,      /* 108  Enter  */
-       0x9d,      /* 109  Ctrl-R */
-       0x0,       /* 110  Pause  */
-       0xb7,      /* 111  Print  */
-       0xb5,      /* 112  Divide */
-       0xb8,      /* 113  Alt-R  */
-       0xc6,      /* 114  Break  */
-       0xdb,      /* 115  Win Left */
-       0xdc,      /* 116  Win Right */
-       0xdd,      /* 117  Win Menu */
-       0x0,       /* 118 */
-       0x0,       /* 119 */
-       0x70,      /* 120 Hiragana_Katakana */
-       0x0,       /* 121 */
-       0x0,       /* 122 */
-       0x73,      /* 123 backslash */
-       0x0,       /* 124 */
-       0x0,       /* 125 */
-       0x0,       /* 126 */
-       0x0,       /* 127 */
-       0x0,       /* 128 */
-       0x79,      /* 129 Henkan */
-       0x0,       /* 130 */
-       0x7b,      /* 131 Muhenkan */
-       0x0,       /* 132 */
-       0x7d,      /* 133 Yen */
-       0x0,       /* 134 */
-       0x0,       /* 135 */
-       0x47,      /* 136 KP_7 */
-       0x48,      /* 137 KP_8 */
-       0x49,      /* 138 KP_9 */
-       0x4b,      /* 139 KP_4 */
-       0x4c,      /* 140 KP_5 */
-       0x4d,      /* 141 KP_6 */
-       0x4f,      /* 142 KP_1 */
-       0x50,      /* 143 KP_2 */
-       0x51,      /* 144 KP_3 */
-       0x52,      /* 145 KP_0 */
-       0x53,      /* 146 KP_. */
-       0x47,      /* 147 KP_HOME */
-       0x48,      /* 148 KP_UP */
-       0x49,      /* 149 KP_PgUp */
-       0x4b,      /* 150 KP_Left */
-       0x4c,      /* 151 KP_ */
-       0x4d,      /* 152 KP_Right */
-       0x4f,      /* 153 KP_End */
-       0x50,      /* 154 KP_Down */
-       0x51,      /* 155 KP_PgDn */
-       0x52,      /* 156 KP_Ins */
-       0x53,      /* 157 KP_Del */
-    };
-
-    if (keycode < 9)
-    {
-        keycode = 0;
-    }
-    else if (keycode < 97)
-    {
-        // just an offset (Xorg MIN_KEYCODE)
-        keycode -= 8;
-    }
-    else if (keycode < 158)
-    {
-        // apply conversion table
-        keycode = x_keycode_to_pc_keycode[keycode - 97];
-    }
-    else
-    {
-        keycode = 0;
-    }
-#endif
-    return keycode;
-}
 
 /**
  * Releases any modifier keys that are currently in pressed state.
@@ -2612,7 +2913,7 @@ static void ResetKeys(void)
 {
     int i;
 
-    if (!gKeyboard)
+    if (!gpKeyboard)
         return;
 
     for(i = 0; i < 256; i++)
@@ -2620,8 +2921,8 @@ static void ResetKeys(void)
         if (gaModifiersState[i])
         {
             if (i & 0x80)
-                gKeyboard->PutScancode(0xe0);
-            gKeyboard->PutScancode(i | 0x80);
+                gpKeyboard->PutScancode(0xe0);
+            gpKeyboard->PutScancode(i | 0x80);
             gaModifiersState[i] = 0;
         }
     }
@@ -2634,196 +2935,85 @@ static void ResetKeys(void)
  */
 static void ProcessKey(SDL_KeyboardEvent *ev)
 {
-#if defined(DEBUG) || defined(VBOX_WITH_STATISTICS)
-    if (gMachineDebugger && ev->type == SDL_KEYDOWN)
-    {
-        // first handle the debugger hotkeys
-        uint8_t *keystate = SDL_GetKeyState(NULL);
-#if 0
-        // CTRL+ALT+Fn is not free on Linux hosts with Xorg ..
-        if (keystate[SDLK_LALT] && !keystate[SDLK_LCTRL])
-#else
-        if (keystate[SDLK_LALT] && keystate[SDLK_LCTRL])
-#endif
-        {
-            switch (ev->keysym.sym)
-            {
-                // pressing CTRL+ALT+F11 dumps the statistics counter
-                case SDLK_F12:
-                    RTPrintf("ResetStats\n"); /* Visual feedback in console window */
-                    gMachineDebugger->ResetStats();
-                    break;
-                // pressing CTRL+ALT+F12 resets all statistics counter
-                case SDLK_F11:
-                    gMachineDebugger->DumpStats();
-                    RTPrintf("DumpStats\n");  /* Vistual feedback in console window */
-                    break;
-                default:
-                    break;
-            }
-        }
-#if 1
-        else if (keystate[SDLK_LALT] && !keystate[SDLK_LCTRL])
-        {
-            switch (ev->keysym.sym)
-            {
-                // pressing Alt-F12 toggles the supervisor recompiler
-                case SDLK_F12:
-                    {
-                        BOOL recompileSupervisor;
-                        gMachineDebugger->COMGETTER(RecompileSupervisor)(&recompileSupervisor);
-                        gMachineDebugger->COMSETTER(RecompileSupervisor)(!recompileSupervisor);
-                        break;
-                    }
-                    // pressing Alt-F11 toggles the user recompiler
-                case SDLK_F11:
-                    {
-                        BOOL recompileUser;
-                        gMachineDebugger->COMGETTER(RecompileUser)(&recompileUser);
-                        gMachineDebugger->COMSETTER(RecompileUser)(!recompileUser);
-                        break;
-                    }
-                    // pressing Alt-F10 toggles the patch manager
-                case SDLK_F10:
-                    {
-                        BOOL patmEnabled;
-                        gMachineDebugger->COMGETTER(PATMEnabled)(&patmEnabled);
-                        gMachineDebugger->COMSETTER(PATMEnabled)(!patmEnabled);
-                        break;
-                    }
-                    // pressing Alt-F9 toggles CSAM
-                case SDLK_F9:
-                    {
-                        BOOL csamEnabled;
-                        gMachineDebugger->COMGETTER(CSAMEnabled)(&csamEnabled);
-                        gMachineDebugger->COMSETTER(CSAMEnabled)(!csamEnabled);
-                        break;
-                    }
-                    // pressing Alt-F8 toggles singlestepping mode
-                case SDLK_F8:
-                    {
-                        BOOL singlestepEnabled;
-                        gMachineDebugger->COMGETTER(Singlestep)(&singlestepEnabled);
-                        gMachineDebugger->COMSETTER(Singlestep)(!singlestepEnabled);
-                        break;
-                    }
-                default:
-                    break;
-            }
-        }
-#endif
-        // pressing Ctrl-F12 toggles the logger
-        else if ((keystate[SDLK_RCTRL] || keystate[SDLK_LCTRL]) && ev->keysym.sym == SDLK_F12)
-        {
-            BOOL logEnabled = TRUE;
-            gMachineDebugger->COMGETTER(LogEnabled)(&logEnabled);
-            gMachineDebugger->COMSETTER(LogEnabled)(!logEnabled);
-#ifdef DEBUG_bird
-            return;
-#endif
-        }
-        // pressing F12 sets a logmark
-        else if (ev->keysym.sym == SDLK_F12)
-        {
-            RTLogPrintf("****** LOGGING MARK ******\n");
-            RTLogFlush(NULL);
-        }
-        // now update the titlebar flags
-        UpdateTitlebar(TITLEBAR_NORMAL);
-    }
-#endif // DEBUG || VBOX_WITH_STATISTICS
-
-    // the pause key is the weirdest, needs special handling
-    if (ev->keysym.sym == SDLK_PAUSE)
-    {
-        int v = 0;
-        if (ev->type == SDL_KEYUP)
-            v |= 0x80;
-        gKeyboard->PutScancode(0xe1);
-        gKeyboard->PutScancode(0x1d | v);
-        gKeyboard->PutScancode(0x45 | v);
-        return;
-    }
-
-    /*
-     * Perform SDL key event to scancode conversion
-     */
-    int keycode = Keyevent2Keycode(ev);
-
-    switch(keycode)
-    {
-        case 0x00:
-        {
-            /* sent when leaving window: reset the modifiers state */
-            ResetKeys();
-            return;
-        }
-
-        case 0x2a:  /* Left Shift */
-        case 0x36:  /* Right Shift */
-        case 0x1d:  /* Left CTRL */
-        case 0x9d:  /* Right CTRL */
-        case 0x38:  /* Left ALT */
-        case 0xb8:  /* Right ALT */
-        {
-            if (ev->type == SDL_KEYUP)
-                gaModifiersState[keycode] = 0;
-            else
-                gaModifiersState[keycode] = 1;
-            break;
-        }
-
-        case 0x45: /* Num Lock */
-        case 0x3a: /* Caps Lock */
-        {
-            /* SDL does not send the key up event, so we generate it.
-             * r=frank: This is not true for never SDL versions. */
-            if (ev->type == SDL_KEYDOWN)
-            {
-                gKeyboard->PutScancode(keycode);
-                gKeyboard->PutScancode(keycode | 0x80);
-            }
-            return;
-        }
-    }
-
-    /*
-     * Some keyboards (e.g. the one of mine T60) don't send a NumLock scan code on every
-     * press of the key. Both the guest and the host should agree on the NumLock state.
-     * If they differ, we try to alter the guest NumLock state by sending the NumLock key
-     * scancode. We will get a feedback through the KBD_CMD_SET_LEDS command if the guest
-     * tries to set/clear the NumLock LED. If a (silly) guest doesn't change the LED, don't
-     * bother him with NumLock scancodes. At least our BIOS, Linux and Windows handle the
-     * NumLock LED well.
-     */
-    if (   guGuestNumLockAdaptionCnt
-        && (gfGuestNumLockPressed ^ !!(SDL_GetModState() & KMOD_NUM)))
-    {
-        guGuestNumLockAdaptionCnt--;
-        gKeyboard->PutScancode(0x45);
-        gKeyboard->PutScancode(0x45 | 0x80);
-    }
-
-    /*
-     * Now we send the event. Apply extended and release prefixes.
-     */
-    if (keycode & 0x80)
-        gKeyboard->PutScancode(0xe0);
-
-    gKeyboard->PutScancode(ev->type == SDL_KEYUP ? keycode | 0x80
-                                                 : keycode & 0x7f);
+    /* According to SDL2/SDL_scancodes.h ev->keysym.sym stores scancodes which are
+    * based on USB usage page standard. This is what we can directly pass to
+    * IKeyboard::putUsageCode. */
+    gpKeyboard->PutUsageCode(SDL_GetScancodeFromKey(ev->keysym.sym), 0x07 /*usage code page id*/, ev->type == SDL_KEYUP ? TRUE : FALSE);
 }
+
+#ifdef RT_OS_DARWIN
+#include <Carbon/Carbon.h>
+RT_C_DECLS_BEGIN
+/* Private interface in 10.3 and later. */
+typedef int CGSConnection;
+typedef enum
+{
+    kCGSGlobalHotKeyEnable = 0,
+    kCGSGlobalHotKeyDisable,
+    kCGSGlobalHotKeyInvalid = -1 /* bird */
+} CGSGlobalHotKeyOperatingMode;
+extern CGSConnection _CGSDefaultConnection(void);
+extern CGError CGSGetGlobalHotKeyOperatingMode(CGSConnection Connection, CGSGlobalHotKeyOperatingMode *enmMode);
+extern CGError CGSSetGlobalHotKeyOperatingMode(CGSConnection Connection, CGSGlobalHotKeyOperatingMode enmMode);
+RT_C_DECLS_END
+
+/** Keeping track of whether we disabled the hotkeys or not. */
+static bool g_fHotKeysDisabled = false;
+/** Whether we've connected or not. */
+static bool g_fConnectedToCGS = false;
+/** Cached connection. */
+static CGSConnection g_CGSConnection;
+
+/**
+ * Disables or enabled global hot keys.
+ */
+static void DisableGlobalHotKeys(bool fDisable)
+{
+    if (!g_fConnectedToCGS)
+    {
+        g_CGSConnection = _CGSDefaultConnection();
+        g_fConnectedToCGS = true;
+    }
+
+    /* get current mode. */
+    CGSGlobalHotKeyOperatingMode enmMode = kCGSGlobalHotKeyInvalid;
+    CGSGetGlobalHotKeyOperatingMode(g_CGSConnection, &enmMode);
+
+    /* calc new mode. */
+    if (fDisable)
+    {
+        if (enmMode != kCGSGlobalHotKeyEnable)
+            return;
+        enmMode = kCGSGlobalHotKeyDisable;
+    }
+    else
+    {
+        if (    enmMode != kCGSGlobalHotKeyDisable
+            /*||  !g_fHotKeysDisabled*/)
+            return;
+        enmMode = kCGSGlobalHotKeyEnable;
+    }
+
+    /* try set it and check the actual result. */
+    CGSSetGlobalHotKeyOperatingMode(g_CGSConnection, enmMode);
+    CGSGlobalHotKeyOperatingMode enmNewMode = kCGSGlobalHotKeyInvalid;
+    CGSGetGlobalHotKeyOperatingMode(g_CGSConnection, &enmNewMode);
+    if (enmNewMode == enmMode)
+        g_fHotKeysDisabled = enmMode == kCGSGlobalHotKeyDisable;
+}
+#endif /* RT_OS_DARWIN */
 
 /**
  * Start grabbing the mouse.
  */
 static void InputGrabStart(void)
 {
-    if (!gfGuestNeedsHostCursor)
+#ifdef RT_OS_DARWIN
+    DisableGlobalHotKeys(true);
+#endif
+    if (!gfGuestNeedsHostCursor && gfRelativeMouseGuest)
         SDL_ShowCursor(SDL_DISABLE);
-    SDL_WM_GrabInput(SDL_GRAB_ON);
-    // dummy read to avoid moving the mouse
-    SDL_GetRelativeMouseState(NULL, NULL);
+    SDL_SetRelativeMouseMode(SDL_TRUE);
     gfGrabbed = TRUE;
     UpdateTitlebar(TITLEBAR_NORMAL);
 }
@@ -2833,9 +3023,12 @@ static void InputGrabStart(void)
  */
 static void InputGrabEnd(void)
 {
-    SDL_WM_GrabInput(SDL_GRAB_OFF);
-    if (!gfGuestNeedsHostCursor)
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+    if (!gfGuestNeedsHostCursor && gfRelativeMouseGuest)
         SDL_ShowCursor(SDL_ENABLE);
+#ifdef RT_OS_DARWIN
+    DisableGlobalHotKeys(false);
+#endif
     gfGrabbed = FALSE;
     UpdateTitlebar(TITLEBAR_NORMAL);
 }
@@ -2845,15 +3038,23 @@ static void InputGrabEnd(void)
  *
  * @param dz  Relative mouse wheel movement
  */
-static void SendMouseEvent(int dz, int down, int button)
+static void SendMouseEvent(VBoxSDLFB *fb, int dz, int down, int button)
 {
     int  x, y, state, buttons;
     bool abs;
 
+    if (!fb)
+    {
+        SDL_GetMouseState(&x, &y);
+        RTPrintf("MouseEvent: Cannot find fb mouse = %d,%d\n", x, y);
+        return;
+    }
+
     /*
      * If supported and we're not in grabbed mode, we'll use the absolute mouse.
      * If we are in grabbed mode and the guest is not able to draw the mouse cursor
-     * itself, we have to use absolute coordinates, otherwise the host cursor and
+     * itself, or can't handle relative reporting, we have to use absolute
+     * coordinates, otherwise the host cursor and
      * the coordinates the guest thinks the mouse is at could get out-of-sync. From
      * the SDL mailing list:
      *
@@ -2861,15 +3062,20 @@ static void SendMouseEvent(int dz, int down, int button)
      * SDL_GetMouseState is returning the immediate mouse state. So at the time you
      * call SDL_GetMouseState, the "button" is already up."
      */
-    abs = (UseAbsoluteMouse() && !gfGrabbed) || gfGuestNeedsHostCursor;
+    abs =    (UseAbsoluteMouse() && !gfGrabbed)
+          || gfGuestNeedsHostCursor
+          || !gfRelativeMouseGuest;
 
     /* only used if abs == TRUE */
-    int  xMin = gpFrameBuffer->getXOffset();
-    int  yMin = gpFrameBuffer->getYOffset();
-    int  xMax = xMin + (int)gpFrameBuffer->getGuestXRes();
-    int  yMax = yMin + (int)gpFrameBuffer->getGuestYRes();
+    int  xOrigin = fb->getOriginX();
+    int  yOrigin = fb->getOriginY();
+    int  xMin = fb->getXOffset() + xOrigin;
+    int  yMin = fb->getYOffset() + yOrigin;
+    int  xMax = xMin + (int)fb->getGuestXRes();
+    int  yMax = yMin + (int)fb->getGuestYRes();
 
-    state = abs ? SDL_GetMouseState(&x, &y) : SDL_GetRelativeMouseState(&x, &y);
+    state = abs ? SDL_GetMouseState(&x, &y)
+                : SDL_GetRelativeMouseState(&x, &y);
 
     /*
      * process buttons
@@ -2884,6 +3090,9 @@ static void SendMouseEvent(int dz, int down, int button)
 
     if (abs)
     {
+        x += xOrigin;
+        y += yOrigin;
+
         /*
          * Check if the mouse event is inside the guest area. This solves the
          * following problem: Some guests switch off the VBox hardware mouse
@@ -2922,7 +3131,7 @@ static void SendMouseEvent(int dz, int down, int button)
                 gpOffCursor       = SDL_GetCursor();    /* Cursor image */
                 gfOffCursorActive = SDL_ShowCursor(-1); /* enabled / disabled */
                 SDL_SetCursor(gpDefaultCursor);
-                SDL_ShowCursor (SDL_ENABLE);
+                SDL_ShowCursor(SDL_ENABLE);
             }
         }
         else
@@ -2966,13 +3175,16 @@ static void SendMouseEvent(int dz, int down, int button)
              * should we do the increment internally in PutMouseEventAbsolute()
              * or state it in PutMouseEventAbsolute() docs?
              */
-            gMouse->PutMouseEventAbsolute(x + 1 - xMin,
-                                          y + 1 - yMin,
-                                          dz, buttons | tmp_button);
+            gpMouse->PutMouseEventAbsolute(x + 1 - xMin + xOrigin,
+                                           y + 1 - yMin + yOrigin,
+                                           dz, 0 /* horizontal scroll wheel */,
+                                           buttons | tmp_button);
         }
         else
         {
-            gMouse->PutMouseEvent(0, 0, dz, buttons | tmp_button);
+            gpMouse->PutMouseEvent(0, 0, dz,
+                                   0 /* horizontal scroll wheel */,
+                                   buttons | tmp_button);
         }
     }
 
@@ -2985,13 +3197,13 @@ static void SendMouseEvent(int dz, int down, int button)
          * should we do the increment internally in PutMouseEventAbsolute()
          * or state it in PutMouseEventAbsolute() docs?
          */
-        gMouse->PutMouseEventAbsolute(x + 1 - xMin,
-                                      y + 1 - yMin,
-                                      dz, buttons);
+        gpMouse->PutMouseEventAbsolute(x + 1 - xMin + xOrigin,
+                                       y + 1 - yMin + yOrigin,
+                                       dz, 0 /* Horizontal wheel */, buttons);
     }
     else
     {
-        gMouse->PutMouseEvent(x, y, dz, buttons);
+        gpMouse->PutMouseEvent(x, y, dz, 0 /* Horizontal wheel */, buttons);
     }
 }
 
@@ -3000,8 +3212,8 @@ static void SendMouseEvent(int dz, int down, int button)
  */
 void ResetVM(void)
 {
-    if (gConsole)
-        gConsole->Reset();
+    if (gpConsole)
+        gpConsole->Reset();
 }
 
 /**
@@ -3015,29 +3227,30 @@ void SaveState(void)
         InputGrabEnd();
     RTThreadYield();
     UpdateTitlebar(TITLEBAR_SAVE);
-    gProgress = NULL;
-    HRESULT rc = gConsole->SaveState(gProgress.asOutParam());
-    if (FAILED(S_OK))
+    gpProgress = NULL;
+    HRESULT hrc = gpMachine->SaveState(gpProgress.asOutParam());
+    if (FAILED(hrc))
     {
-        RTPrintf("Error saving state! rc = 0x%x\n", rc);
+        RTPrintf("Error saving state! rc=%Rhrc\n", hrc);
         return;
     }
-    Assert(gProgress);
+    Assert(gpProgress);
 
     /*
      * Wait for the operation to be completed and work
      * the title bar in the mean while.
      */
-    LONG    cPercent = 0;
+    ULONG    cPercent = 0;
+#ifndef RT_OS_DARWIN /* don't break the other guys yet. */
     for (;;)
     {
         BOOL fCompleted = false;
-        rc = gProgress->COMGETTER(Completed)(&fCompleted);
-        if (FAILED(rc) || fCompleted)
+        hrc = gpProgress->COMGETTER(Completed)(&fCompleted);
+        if (FAILED(hrc) || fCompleted)
             break;
-        LONG cPercentNow;
-        rc = gProgress->COMGETTER(Percent)(&cPercentNow);
-        if (FAILED(rc))
+        ULONG cPercentNow;
+        hrc = gpProgress->COMGETTER(Percent)(&cPercentNow);
+        if (FAILED(hrc))
             break;
         if (cPercentNow != cPercent)
         {
@@ -3046,18 +3259,90 @@ void SaveState(void)
         }
 
         /* wait */
-        rc = gProgress->WaitForCompletion(100);
-        if (FAILED(rc))
+        hrc = gpProgress->WaitForCompletion(100);
+        if (FAILED(hrc))
             break;
         /// @todo process gui events.
     }
 
+#else /* new loop which processes GUI events while saving. */
+
+    /* start regular timer so we don't starve in the event loop */
+    SDL_TimerID sdlTimer;
+    sdlTimer = SDL_AddTimer(100, StartupTimer, NULL);
+
+    for (;;)
+    {
+        /*
+         * Check for completion.
+         */
+        BOOL fCompleted = false;
+        hrc = gpProgress->COMGETTER(Completed)(&fCompleted);
+        if (FAILED(hrc) || fCompleted)
+            break;
+        ULONG cPercentNow;
+        hrc = gpProgress->COMGETTER(Percent)(&cPercentNow);
+        if (FAILED(hrc))
+            break;
+        if (cPercentNow != cPercent)
+        {
+            UpdateTitlebar(TITLEBAR_SAVE, cPercent);
+            cPercent = cPercentNow;
+        }
+
+        /*
+         * Wait for and process GUI a event.
+         * This is necessary for XPCOM IPC and for updating the
+         * title bar on the Mac.
+         */
+        SDL_Event event;
+        if (WaitSDLEvent(&event))
+        {
+            switch (event.type)
+            {
+                /*
+                 * Timer event preventing us from getting stuck.
+                 */
+                case SDL_USER_EVENT_TIMER:
+                    break;
+
+#ifdef USE_XPCOM_QUEUE_THREAD
+                /*
+                 * User specific XPCOM event queue event
+                 */
+                case SDL_USER_EVENT_XPCOM_EVENTQUEUE:
+                {
+                    LogFlow(("SDL_USER_EVENT_XPCOM_EVENTQUEUE: processing XPCOM event queue...\n"));
+                    eventQ->ProcessPendingEvents();
+                    signalXPCOMEventQueueThread();
+                    break;
+                }
+#endif /* USE_XPCOM_QUEUE_THREAD */
+
+
+                /*
+                 * Ignore all other events.
+                 */
+                case SDL_USER_EVENT_NOTIFYCHANGE:
+                case SDL_USER_EVENT_TERMINATE:
+                default:
+                    break;
+            }
+        }
+    }
+
+    /* kill the timer */
+    SDL_RemoveTimer(sdlTimer);
+    sdlTimer = 0;
+
+#endif /* RT_OS_DARWIN */
+
     /*
      * What's the result of the operation?
      */
-    HRESULT lrc;
-    rc = gProgress->COMGETTER(ResultCode)(&lrc);
-    if (FAILED(rc))
+    LONG lrc;
+    hrc = gpProgress->COMGETTER(ResultCode)(&lrc);
+    if (FAILED(hrc))
         lrc = ~0;
     if (!lrc)
     {
@@ -3074,22 +3359,17 @@ void SaveState(void)
  */
 static void UpdateTitlebar(TitlebarMode mode, uint32_t u32User)
 {
-    static char pszTitle[1024] = {0};
+    static char szTitle[1024] = {0};
 
     /* back up current title */
-    char pszPrevTitle[1024];
-    strcpy(pszPrevTitle, pszTitle);
+    char szPrevTitle[1024];
+    strcpy(szPrevTitle, szTitle);
 
+    Bstr bstrName;
+    gpMachine->COMGETTER(Name)(bstrName.asOutParam());
 
-    strcpy(pszTitle, "InnoTek VirtualBox - ");
-
-    Bstr name;
-    gMachine->COMGETTER(Name)(name.asOutParam());
-    if (name)
-        strcat(pszTitle, Utf8Str(name).raw());
-    else
-        strcat(pszTitle, "<noname>");
-
+    RTStrPrintf(szTitle, sizeof(szTitle), "%s - " VBOX_PRODUCT,
+                !bstrName.isEmpty() ? Utf8Str(bstrName).c_str() : "<noname>");
 
     /* which mode are we in? */
     switch (mode)
@@ -3097,44 +3377,42 @@ static void UpdateTitlebar(TitlebarMode mode, uint32_t u32User)
         case TITLEBAR_NORMAL:
         {
             MachineState_T machineState;
-            gMachine->COMGETTER(State)(&machineState);
+            gpMachine->COMGETTER(State)(&machineState);
             if (machineState == MachineState_Paused)
-                strcat(pszTitle, " - [Paused]");
+                RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle), " - [Paused]");
 
             if (gfGrabbed)
-                strcat(pszTitle, " - [Input captured]");
+                RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle), " - [Input captured]");
 
-            // do we have a debugger interface
-            if (gMachineDebugger)
-            {
 #if defined(DEBUG) || defined(VBOX_WITH_STATISTICS)
+            // do we have a debugger interface
+            if (gpMachineDebugger)
+            {
                 // query the machine state
-                BOOL recompileSupervisor = FALSE;
-                BOOL recompileUser = FALSE;
-                BOOL patmEnabled = FALSE;
-                BOOL csamEnabled = FALSE;
                 BOOL singlestepEnabled = FALSE;
                 BOOL logEnabled = FALSE;
-                BOOL hwVirtEnabled = FALSE;
-                gMachineDebugger->COMGETTER(RecompileSupervisor)(&recompileSupervisor);
-                gMachineDebugger->COMGETTER(RecompileUser)(&recompileUser);
-                gMachineDebugger->COMGETTER(PATMEnabled)(&patmEnabled);
-                gMachineDebugger->COMGETTER(CSAMEnabled)(&csamEnabled);
-                gMachineDebugger->COMGETTER(LogEnabled)(&logEnabled);
-                gMachineDebugger->COMGETTER(Singlestep)(&singlestepEnabled);
-                gMachineDebugger->COMGETTER(HWVirtExEnabled)(&hwVirtEnabled);
-                RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
-                            " [STEP=%d CS=%d PAT=%d RR0=%d RR3=%d LOG=%d HWVirt=%d]",
-                            singlestepEnabled == TRUE, csamEnabled == TRUE, patmEnabled == TRUE,
-                            recompileSupervisor == FALSE, recompileUser == FALSE,
-                            logEnabled == TRUE, hwVirtEnabled == TRUE);
-#else
-                BOOL hwVirtEnabled = FALSE;
-                gMachineDebugger->COMGETTER(HWVirtExEnabled)(&hwVirtEnabled);
-                RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
-                            "%s", hwVirtEnabled ? " (HWVirtEx)" : "");
-#endif /* DEBUG */
+                VMExecutionEngine_T enmExecEngine = VMExecutionEngine_NotSet;
+                ULONG virtualTimeRate = 100;
+                gpMachineDebugger->COMGETTER(LogEnabled)(&logEnabled);
+                gpMachineDebugger->COMGETTER(SingleStep)(&singlestepEnabled);
+                gpMachineDebugger->COMGETTER(ExecutionEngine)(&enmExecEngine);
+                gpMachineDebugger->COMGETTER(VirtualTimeRate)(&virtualTimeRate);
+                RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
+                            " [STEP=%d LOG=%d EXEC=%s",
+                            singlestepEnabled == TRUE, logEnabled == TRUE,
+                              enmExecEngine == VMExecutionEngine_NotSet      ? "NotSet"
+                            : enmExecEngine == VMExecutionEngine_Default     ? "Default"
+                            : enmExecEngine == VMExecutionEngine_HwVirt      ? "HM"
+                            : enmExecEngine == VMExecutionEngine_NativeApi   ? "NEM"
+                            : enmExecEngine == VMExecutionEngine_Interpreter ? "Interpreter"
+                            : enmExecEngine == VMExecutionEngine_Recompiler  ? "Recompiler" : "UNK");
+                char *psz = strchr(szTitle, '\0');
+                if (virtualTimeRate != 100)
+                    RTStrPrintf(psz, &szTitle[sizeof(szTitle)] - psz, " WD=%d%%]", virtualTimeRate);
+                else
+                    RTStrPrintf(psz, &szTitle[sizeof(szTitle)] - psz, "]");
             }
+#endif /* DEBUG || VBOX_WITH_STATISTICS */
             break;
         }
 
@@ -3144,19 +3422,31 @@ static void UpdateTitlebar(TitlebarMode mode, uint32_t u32User)
              * Format it.
              */
             MachineState_T machineState;
-            gMachine->COMGETTER(State)(&machineState);
+            gpMachine->COMGETTER(State)(&machineState);
             if (machineState == MachineState_Starting)
-                strcat(pszTitle, " - Starting...");
+                RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
+                            " - Starting...");
             else if (machineState == MachineState_Restoring)
             {
-                LONG cPercentNow;
-                HRESULT rc = gProgress->COMGETTER(Percent)(&cPercentNow);
-                if (SUCCEEDED(rc))
-                    RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
+                ULONG cPercentNow;
+                HRESULT hrc = gpProgress->COMGETTER(Percent)(&cPercentNow);
+                if (SUCCEEDED(hrc))
+                    RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
                                 " - Restoring %d%%...", (int)cPercentNow);
                 else
-                    RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
+                    RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
                                 " - Restoring...");
+            }
+            else if (machineState == MachineState_TeleportingIn)
+            {
+                ULONG cPercentNow;
+                HRESULT hrc = gpProgress->COMGETTER(Percent)(&cPercentNow);
+                if (SUCCEEDED(hrc))
+                    RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
+                                " - Teleporting %d%%...", (int)cPercentNow);
+                else
+                    RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
+                                " - Teleporting...");
             }
             /* ignore other states, we could already be in running or aborted state */
             break;
@@ -3164,16 +3454,16 @@ static void UpdateTitlebar(TitlebarMode mode, uint32_t u32User)
 
         case TITLEBAR_SAVE:
         {
-            AssertMsg(u32User >= 0 && u32User <= 100, ("%d\n", u32User));
-            RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
+            AssertMsg(u32User <= 100, ("%d\n", u32User));
+            RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
                         " - Saving %d%%...", u32User);
             break;
         }
 
         case TITLEBAR_SNAPSHOT:
         {
-            AssertMsg(u32User >= 0 && u32User <= 100, ("%d\n", u32User));
-            RTStrPrintf(pszTitle + strlen(pszTitle), sizeof(pszTitle) - strlen(pszTitle),
+            AssertMsg(u32User <= 100, ("%d\n", u32User));
+            RTStrPrintf(szTitle + strlen(szTitle), sizeof(szTitle) - strlen(szTitle),
                         " - Taking snapshot %d%%...", u32User);
             break;
         }
@@ -3186,22 +3476,23 @@ static void UpdateTitlebar(TitlebarMode mode, uint32_t u32User)
     /*
      * Don't update if it didn't change.
      */
-    if (strcmp(pszTitle, pszPrevTitle) == 0)
+    if (!strcmp(szTitle, szPrevTitle))
         return;
 
     /*
      * Set the new title
      */
 #ifdef VBOX_WIN32_UI
-    setUITitle(pszTitle);
+    setUITitle(szTitle);
 #else
-    SDL_WM_SetCaption(pszTitle, "InnoTek VirtualBox");
+    for (unsigned i = 0; i < gcMonitors; i++)
+        gpFramebuffer[i]->setWindowTitle(szTitle);
 #endif
 }
 
 #if 0
-static void vbox_show_shape (unsigned short w, unsigned short h,
-                             uint32_t bg, const uint8_t *image)
+static void vbox_show_shape(unsigned short w, unsigned short h,
+                            uint32_t bg, const uint8_t *image)
 {
     size_t x, y;
     unsigned short pitch;
@@ -3213,25 +3504,25 @@ static void vbox_show_shape (unsigned short w, unsigned short h,
     pitch = (w + 7) / 8;
     size_mask = (pitch * h + 3) & ~3;
 
-    color = (const uint32_t *) (image + size_mask);
+    color = (const uint32_t *)(image + size_mask);
 
-    printf ("show_shape %dx%d pitch %d size mask %d\n",
-            w, h, pitch, size_mask);
+    printf("show_shape %dx%d pitch %d size mask %d\n",
+           w, h, pitch, size_mask);
     for (y = 0; y < h; ++y, mask += pitch, color += w)
     {
         for (x = 0; x < w; ++x) {
             if (mask[x / 8] & (1 << (7 - (x % 8))))
-                printf (" ");
+                printf(" ");
             else
             {
                 uint32_t c = color[x];
                 if (c == bg)
-                    printf ("Y");
+                    printf("Y");
                 else
-                    printf ("X");
+                    printf("X");
             }
         }
-        printf ("\n");
+        printf("\n");
     }
 }
 #endif
@@ -3240,7 +3531,7 @@ static void vbox_show_shape (unsigned short w, unsigned short h,
  *  Sets the pointer shape according to parameters.
  *  Must be called only from the main SDL thread.
  */
-static void SetPointerShape (const PointerShapeChangeData *data)
+static void SetPointerShape(const PointerShapeChangeData *data)
 {
     /*
      * don't allow to change the pointer shape if we are outside the valid
@@ -3250,15 +3541,19 @@ static void SetPointerShape (const PointerShapeChangeData *data)
     if (gpOffCursor)
         return;
 
-    if (data->shape)
+    if (data->shape.size() > 0)
     {
         bool ok = false;
 
-        uint32_t andMaskSize = (data->width + 7) / 8 * data->height;
-        uint32_t srcShapePtrScan = data->width * 4;
+#if defined(RT_OS_WINDOWS) || (defined(VBOXSDL_WITH_X11) && !defined(VBOX_WITHOUT_XCURSOR))
+        AssertReturnVoid(data->height); /* Prevent division by zero. */
+        uint32_t const  andMaskSize = (data->width + 7) / 8 * data->height;
+        uint32_t const  srcShapePtrScan = data->width * 4;
 
-        const uint8_t *srcAndMaskPtr = data->shape;
-        const uint8_t *srcShapePtr = data->shape + ((andMaskSize + 3) & ~3);
+        uint8_t  const *shape = data->shape.raw();
+        uint8_t  const *srcAndMaskPtr = shape;
+        uint8_t  const *srcShapePtr = shape + ((andMaskSize + 3) & ~3);
+#endif
 
 #if 0
         /* pointer debugging code */
@@ -3278,21 +3573,19 @@ static void SetPointerShape (const PointerShapeChangeData *data)
         printf("};\n");
 #endif
 
-#if defined (__WIN__)
-
+#if defined(RT_OS_WINDOWS)
         BITMAPV5HEADER bi;
         HBITMAP hBitmap;
         void *lpBits;
-        HCURSOR hAlphaCursor = NULL;
 
-        ::ZeroMemory (&bi, sizeof (BITMAPV5HEADER));
-        bi.bV5Size = sizeof (BITMAPV5HEADER);
+        ::ZeroMemory(&bi, sizeof(BITMAPV5HEADER));
+        bi.bV5Size = sizeof(BITMAPV5HEADER);
         bi.bV5Width = data->width;
-        bi.bV5Height = - (LONG) data->height;
+        bi.bV5Height = -(LONG)data->height;
         bi.bV5Planes = 1;
         bi.bV5BitCount = 32;
         bi.bV5Compression = BI_BITFIELDS;
-        // specifiy a supported 32 BPP alpha format for Windows XP
+        // specify a supported 32 BPP alpha format for Windows XP
         bi.bV5RedMask   = 0x00FF0000;
         bi.bV5GreenMask = 0x0000FF00;
         bi.bV5BlueMask  = 0x000000FF;
@@ -3301,19 +3594,19 @@ static void SetPointerShape (const PointerShapeChangeData *data)
         else
             bi.bV5AlphaMask = 0;
 
-        HDC hdc = ::GetDC (NULL);
+        HDC hdc = ::GetDC(NULL);
 
         // create the DIB section with an alpha channel
-        hBitmap = ::CreateDIBSection (hdc, (BITMAPINFO *) &bi, DIB_RGB_COLORS,
-                                      (void **) &lpBits, NULL, (DWORD) 0);
+        hBitmap = ::CreateDIBSection(hdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS,
+                                     (void **)&lpBits, NULL, (DWORD)0);
 
-        ::ReleaseDC (NULL, hdc);
+        ::ReleaseDC(NULL, hdc);
 
         HBITMAP hMonoBitmap = NULL;
         if (data->alpha)
         {
             // create an empty mask bitmap
-            hMonoBitmap = ::CreateBitmap (data->width, data->height, 1, 1, NULL);
+            hMonoBitmap = ::CreateBitmap(data->width, data->height, 1, 1, NULL);
         }
         else
         {
@@ -3328,7 +3621,7 @@ static void SetPointerShape (const PointerShapeChangeData *data)
                 /* Original AND mask is not word aligned. */
 
                 /* Allocate memory for aligned AND mask. */
-                pu8AndMaskWordAligned = (uint8_t *)RTMemTmpAllocZ ((cbAndMaskScan + 1) * data->height);
+                pu8AndMaskWordAligned = (uint8_t *)RTMemTmpAllocZ((cbAndMaskScan + 1) * data->height);
 
                 Assert(pu8AndMaskWordAligned);
 
@@ -3350,7 +3643,7 @@ static void SetPointerShape (const PointerShapeChangeData *data)
                     unsigned i;
                     for (i = 0; i < data->height; i++)
                     {
-                        memcpy (dst, src, cbAndMaskScan);
+                        memcpy(dst, src, cbAndMaskScan);
 
                         dst[cbAndMaskScan - 1] &= u8LastBytesPaddingMask;
 
@@ -3361,157 +3654,100 @@ static void SetPointerShape (const PointerShapeChangeData *data)
             }
 
             // create the AND mask bitmap
-            hMonoBitmap = ::CreateBitmap (data->width, data->height, 1, 1,
-                                          pu8AndMaskWordAligned? pu8AndMaskWordAligned: srcAndMaskPtr);
+            hMonoBitmap = ::CreateBitmap(data->width, data->height, 1, 1,
+                                         pu8AndMaskWordAligned? pu8AndMaskWordAligned: srcAndMaskPtr);
 
             if (pu8AndMaskWordAligned)
             {
-                RTMemTmpFree (pu8AndMaskWordAligned);
+                RTMemTmpFree(pu8AndMaskWordAligned);
             }
         }
 
-        Assert (hBitmap);
-        Assert (hMonoBitmap);
+        Assert(hBitmap);
+        Assert(hMonoBitmap);
         if (hBitmap && hMonoBitmap)
         {
-            DWORD *dstShapePtr = (DWORD *) lpBits;
+            DWORD *dstShapePtr = (DWORD *)lpBits;
 
             for (uint32_t y = 0; y < data->height; y ++)
             {
-                memcpy (dstShapePtr, srcShapePtr, srcShapePtrScan);
+                memcpy(dstShapePtr, srcShapePtr, srcShapePtrScan);
                 srcShapePtr += srcShapePtrScan;
                 dstShapePtr += data->width;
-            }
-
-            ICONINFO ii;
-            ii.fIcon = FALSE;
-            ii.xHotspot = data->xHot;
-            ii.yHotspot = data->yHot;
-            ii.hbmMask = hMonoBitmap;
-            ii.hbmColor = hBitmap;
-
-            hAlphaCursor = ::CreateIconIndirect (&ii);
-            Assert (hAlphaCursor);
-            if (hAlphaCursor)
-            {
-                // here we do a dirty trick by substituting a Window Manager's
-                // cursor handle with the handle we created
-
-                WMcursor *pCustomTempWMCursor = gpCustomCursor->wm_cursor;
-
-                // see SDL12/src/video/wincommon/SDL_sysmouse.c
-                void *wm_cursor = malloc (sizeof (HCURSOR) + sizeof (uint8_t *) * 2);
-                *(HCURSOR *) wm_cursor = hAlphaCursor;
-
-                gpCustomCursor->wm_cursor = (WMcursor *) wm_cursor;
-                SDL_SetCursor (gpCustomCursor);
-                SDL_ShowCursor (SDL_ENABLE);
-
-                if (pCustomTempWMCursor)
-                {
-                    ::DestroyCursor (* (HCURSOR *) pCustomTempWMCursor);
-                    free (pCustomTempWMCursor);
-                }
-
-                ok = true;
             }
         }
 
         if (hMonoBitmap)
-            ::DeleteObject (hMonoBitmap);
+            ::DeleteObject(hMonoBitmap);
         if (hBitmap)
-            ::DeleteObject (hBitmap);
+            ::DeleteObject(hBitmap);
 
-#elif defined (__LINUX__)
+#elif defined(VBOXSDL_WITH_X11) && !defined(VBOX_WITHOUT_XCURSOR)
 
-        XcursorImage *img = XcursorImageCreate (data->width, data->height);
-        Assert (img);
-        if (img)
+        if (gfXCursorEnabled)
         {
-            img->xhot = data->xHot;
-            img->yhot = data->yHot;
-
-            XcursorPixel *dstShapePtr = img->pixels;
-
-            for (uint32_t y = 0; y < data->height; y ++)
+            XcursorImage *img = XcursorImageCreate(data->width, data->height);
+            Assert(img);
+            if (img)
             {
-                memcpy (dstShapePtr, srcShapePtr, srcShapePtrScan);
+                img->xhot = data->xHot;
+                img->yhot = data->yHot;
 
-                if (!data->alpha)
+                XcursorPixel *dstShapePtr = img->pixels;
+
+                for (uint32_t y = 0; y < data->height; y ++)
                 {
-                    // convert AND mask to the alpha channel
-                    uint8_t byte = 0;
-                    for (uint32_t x = 0; x < data->width; x ++)
+                    memcpy(dstShapePtr, srcShapePtr, srcShapePtrScan);
+
+                    if (!data->alpha)
                     {
-                        if (!(x % 8))
-                            byte = *(srcAndMaskPtr ++);
-                        else
-                            byte <<= 1;
-
-                        if (byte & 0x80)
+                        // convert AND mask to the alpha channel
+                        uint8_t byte = 0;
+                        for (uint32_t x = 0; x < data->width; x ++)
                         {
-                            // Linux doesn't support inverted pixels (XOR ops,
-                            // to be exact) in cursor shapes, so we detect such
-                            // pixels and always replace them with black ones to
-                            // make them visible at least over light colors
-                            if (dstShapePtr [x] & 0x00FFFFFF)
-                                dstShapePtr [x] = 0xFF000000;
+                            if (!(x % 8))
+                                byte = *(srcAndMaskPtr ++);
                             else
-                                dstShapePtr [x] = 0x00000000;
+                                byte <<= 1;
+
+                            if (byte & 0x80)
+                            {
+                                // Linux doesn't support inverted pixels (XOR ops,
+                                // to be exact) in cursor shapes, so we detect such
+                                // pixels and always replace them with black ones to
+                                // make them visible at least over light colors
+                                if (dstShapePtr [x] & 0x00FFFFFF)
+                                    dstShapePtr [x] = 0xFF000000;
+                                else
+                                    dstShapePtr [x] = 0x00000000;
+                            }
+                            else
+                                dstShapePtr [x] |= 0xFF000000;
                         }
-                        else
-                            dstShapePtr [x] |= 0xFF000000;
                     }
+
+                    srcShapePtr += srcShapePtrScan;
+                    dstShapePtr += data->width;
                 }
-
-                srcShapePtr += srcShapePtrScan;
-                dstShapePtr += data->width;
             }
-
-            Cursor cur = XcursorImageLoadCursor (gSdlInfo.info.x11.display, img);
-            Assert (cur);
-            if (cur)
-            {
-                // here we do a dirty trick by substituting a Window Manager's
-                // cursor handle with the handle we created
-
-                WMcursor *pCustomTempWMCursor = gpCustomCursor->wm_cursor;
-
-                // see SDL12/src/video/x11/SDL_x11mouse.c
-                void *wm_cursor = malloc (sizeof (Cursor));
-                *(Cursor *) wm_cursor = cur;
-
-                gpCustomCursor->wm_cursor = (WMcursor *) wm_cursor;
-                SDL_SetCursor (gpCustomCursor);
-                SDL_ShowCursor (SDL_ENABLE);
-
-                if (pCustomTempWMCursor)
-                {
-                    XFreeCursor (gSdlInfo.info.x11.display, *(Cursor *) pCustomTempWMCursor);
-                    free (pCustomTempWMCursor);
-                }
-
-                ok = true;
-            }
-
-            XcursorImageDestroy (img);
+            XcursorImageDestroy(img);
         }
 
-#endif
+#endif /* VBOXSDL_WITH_X11 && !VBOX_WITHOUT_XCURSOR */
 
         if (!ok)
         {
-            SDL_SetCursor (gpDefaultCursor);
-            SDL_ShowCursor (SDL_ENABLE);
+            SDL_SetCursor(gpDefaultCursor);
+            SDL_ShowCursor(SDL_ENABLE);
         }
     }
     else
     {
         if (data->visible)
-            SDL_ShowCursor (SDL_ENABLE);
+            SDL_ShowCursor(SDL_ENABLE);
         else if (gfAbsoluteMouseGuest)
             /* Don't disable the cursor if the guest additions are not active (anymore) */
-            SDL_ShowCursor (SDL_DISABLE);
+            SDL_ShowCursor(SDL_DISABLE);
     }
 }
 
@@ -3524,15 +3760,15 @@ static void HandleGuestCapsChanged(void)
     {
         // Cursor could be overwritten by the guest tools
         SDL_SetCursor(gpDefaultCursor);
-        SDL_ShowCursor (SDL_ENABLE);
+        SDL_ShowCursor(SDL_ENABLE);
         gpOffCursor = NULL;
     }
-    if (gMouse && UseAbsoluteMouse())
+    if (gpMouse && UseAbsoluteMouse())
     {
         // Actually switch to absolute coordinates
         if (gfGrabbed)
             InputGrabEnd();
-        gMouse->PutMouseEventAbsolute(-1, -1, 0, 0);
+        gpMouse->PutMouseEventAbsolute(-1, -1, 0, 0, 0);
     }
 }
 
@@ -3555,7 +3791,7 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
         /* Control-Alt-Delete */
         case SDLK_DELETE:
         {
-            gKeyboard->PutCAD();
+            gpKeyboard->PutCAD();
             break;
         }
 
@@ -3564,27 +3800,31 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_f:
         {
-            if (gfAllowFullscreenToggle)
-            {
-                /*
-                 * We have to pause/resume the machine during this
-                 * process because there might be a short moment
-                 * without a valid framebuffer
-                 */
-                MachineState_T machineState;
-                gMachine->COMGETTER(State)(&machineState);
-                if (machineState == MachineState_Running)
-                    gConsole->Pause();
-                gpFrameBuffer->setFullscreen(!gpFrameBuffer->getFullscreen());
-                if (machineState == MachineState_Running)
-                    gConsole->Resume();
+            if (   strchr(gHostKeyDisabledCombinations, 'f')
+                || !gfAllowFullscreenToggle)
+                return VERR_NOT_SUPPORTED;
 
-                /*
-                 * We have switched from/to fullscreen, so request a full
-                 * screen repaint, just to be sure.
-                 */
-                gDisplay->InvalidateAndUpdate();
-            }
+            /*
+             * We have to pause/resume the machine during this
+             * process because there might be a short moment
+             * without a valid framebuffer
+             */
+            MachineState_T machineState;
+            gpMachine->COMGETTER(State)(&machineState);
+            bool fPauseIt = machineState == MachineState_Running
+                         || machineState == MachineState_Teleporting
+                         || machineState == MachineState_LiveSnapshotting;
+            if (fPauseIt)
+                gpConsole->Pause();
+            SetFullscreen(!gpFramebuffer[0]->getFullscreen());
+            if (fPauseIt)
+                gpConsole->Resume();
+
+            /*
+             * We have switched from/to fullscreen, so request a full
+             * screen repaint, just to be sure.
+             */
+            gpDisplay->InvalidateAndUpdate();
             break;
         }
 
@@ -3593,17 +3833,23 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_p:
         {
+            if (strchr(gHostKeyDisabledCombinations, 'p'))
+                return VERR_NOT_SUPPORTED;
+
             MachineState_T machineState;
-            gMachine->COMGETTER(State)(&machineState);
-            if (machineState == MachineState_Running)
+            gpMachine->COMGETTER(State)(&machineState);
+            if (   machineState == MachineState_Running
+                || machineState == MachineState_Teleporting
+                || machineState == MachineState_LiveSnapshotting
+               )
             {
                 if (gfGrabbed)
                     InputGrabEnd();
-                gConsole->Pause();
+                gpConsole->Pause();
             }
             else if (machineState == MachineState_Paused)
             {
-                gConsole->Resume();
+                gpConsole->Resume();
             }
             UpdateTitlebar(TITLEBAR_NORMAL);
             break;
@@ -3614,6 +3860,9 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_r:
         {
+            if (strchr(gHostKeyDisabledCombinations, 'r'))
+                return VERR_NOT_SUPPORTED;
+
             ResetVM();
             break;
         }
@@ -3623,8 +3872,10 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_q:
         {
+            if (strchr(gHostKeyDisabledCombinations, 'q'))
+                return VERR_NOT_SUPPORTED;
+
             return VINF_EM_TERMINATE;
-            break;
         }
 
         /*
@@ -3632,14 +3883,20 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_s:
         {
+            if (strchr(gHostKeyDisabledCombinations, 's'))
+                return VERR_NOT_SUPPORTED;
+
             SaveState();
             return VINF_EM_TERMINATE;
         }
 
         case SDLK_h:
         {
-            if (gConsole)
-                gConsole->PowerButton();
+            if (strchr(gHostKeyDisabledCombinations, 'h'))
+                return VERR_NOT_SUPPORTED;
+
+            if (gpConsole)
+                gpConsole->PowerButton();
             break;
         }
 
@@ -3648,18 +3905,24 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
          */
         case SDLK_n:
         {
+            if (strchr(gHostKeyDisabledCombinations, 'n'))
+                return VERR_NOT_SUPPORTED;
+
             RTThreadYield();
             ULONG cSnapshots = 0;
-            gMachine->COMGETTER(SnapshotCount)(&cSnapshots);
+            gpMachine->COMGETTER(SnapshotCount)(&cSnapshots);
             char pszSnapshotName[20];
             RTStrPrintf(pszSnapshotName, sizeof(pszSnapshotName), "Snapshot %d", cSnapshots + 1);
-            gProgress = NULL;
-            HRESULT rc;
-            CHECK_ERROR(gConsole, TakeSnapshot(Bstr(pszSnapshotName), Bstr("Taken by VBoxSDL"),
-                                               gProgress.asOutParam()));
-            if (FAILED(rc))
+            gpProgress = NULL;
+            HRESULT hrc;
+            Bstr snapId;
+            CHECK_ERROR(gpMachine, TakeSnapshot(Bstr(pszSnapshotName).raw(),
+                                                Bstr("Taken by VBoxSDL").raw(),
+                                                TRUE, snapId.asOutParam(),
+                                                gpProgress.asOutParam()));
+            if (FAILED(hrc))
             {
-                RTPrintf("Error taking snapshot! rc = 0x%x\n", rc);
+                RTPrintf("Error taking snapshot! rc=%Rhrc\n", hrc);
                 /* continue operation */
                 return VINF_SUCCESS;
             }
@@ -3667,16 +3930,16 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
              * Wait for the operation to be completed and work
              * the title bar in the mean while.
              */
-            LONG    cPercent = 0;
+            ULONG    cPercent = 0;
             for (;;)
             {
                 BOOL fCompleted = false;
-                rc = gProgress->COMGETTER(Completed)(&fCompleted);
-                if (FAILED(rc) || fCompleted)
+                hrc = gpProgress->COMGETTER(Completed)(&fCompleted);
+                if (FAILED(hrc) || fCompleted)
                     break;
-                LONG cPercentNow;
-                rc = gProgress->COMGETTER(Percent)(&cPercentNow);
-                if (FAILED(rc))
+                ULONG cPercentNow;
+                hrc = gpProgress->COMGETTER(Percent)(&cPercentNow);
+                if (FAILED(hrc))
                     break;
                 if (cPercentNow != cPercent)
                 {
@@ -3685,8 +3948,8 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
                 }
 
                 /* wait */
-                rc = gProgress->WaitForCompletion(100);
-                if (FAILED(rc))
+                hrc = gpProgress->WaitForCompletion(100);
+                if (FAILED(hrc))
                     break;
                 /// @todo process gui events.
             }
@@ -3701,20 +3964,12 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
         case SDLK_F10: case SDLK_F11: case SDLK_F12:
         {
             /* send Ctrl-Alt-Fx to guest */
-            static LONG keySequence[] = {
-                0x1d, // Ctrl down
-                0x38, // Alt down
-                0x00, // Fx down (placeholder)
-                0x00, // Fx up (placeholder)
-                0xb8, // Alt up
-                0x9d  // Ctrl up
-            };
-
-            /* put in the right Fx key */
-            keySequence[2] = Keyevent2Keycode(pEv);
-            keySequence[3] = keySequence[2] + 0x80;
-
-            gKeyboard->PutScancodes(keySequence, ELEMENTS(keySequence), NULL);
+            gpKeyboard->PutUsageCode(0xE0 /*left ctrl*/, 0x07 /*usage code page id*/, FALSE);
+            gpKeyboard->PutUsageCode(0xE2 /*left alt*/, 0x07 /*usage code page id*/, FALSE);
+            gpKeyboard->PutUsageCode(pEv->keysym.sym,  0x07 /*usage code page id*/, FALSE);
+            gpKeyboard->PutUsageCode(pEv->keysym.sym,  0x07 /*usage code page id*/, TRUE);
+            gpKeyboard->PutUsageCode(0xE0 /*left ctrl*/, 0x07 /*usage code page id*/, TRUE);
+            gpKeyboard->PutUsageCode(0xE2 /*left alt*/, 0x07 /*usage code page id*/, TRUE);
             return VINF_SUCCESS;
         }
 
@@ -3732,12 +3987,185 @@ static int HandleHostKey(const SDL_KeyboardEvent *pEv)
 /**
  * Timer callback function for startup processing
  */
-static Uint32 StartupTimer(Uint32 interval, void *param)
+static Uint32 StartupTimer(Uint32 interval, void *param) RT_NOTHROW_DEF
 {
+    RT_NOREF(param);
+
     /* post message so we can do something in the startup loop */
     SDL_Event event = {0};
     event.type      = SDL_USEREVENT;
     event.user.type = SDL_USER_EVENT_TIMER;
     SDL_PushEvent(&event);
+    RTSemEventSignal(g_EventSemSDLEvents);
     return interval;
+}
+
+/**
+ * Timer callback function to check if resizing is finished
+ */
+static Uint32 ResizeTimer(Uint32 interval, void *param) RT_NOTHROW_DEF
+{
+    RT_NOREF(interval, param);
+
+    /* post message so the window is actually resized */
+    SDL_Event event = {0};
+    event.type      = SDL_USEREVENT;
+    event.user.type = SDL_USER_EVENT_WINDOW_RESIZE_DONE;
+    PushSDLEventForSure(&event);
+    /* one-shot */
+    return 0;
+}
+
+/**
+ * Timer callback function to check if an ACPI power button event was handled by the guest.
+ */
+static Uint32 QuitTimer(Uint32 interval, void *param) RT_NOTHROW_DEF
+{
+    RT_NOREF(interval, param);
+
+    BOOL fHandled = FALSE;
+
+    gSdlQuitTimer = 0;
+    if (gpConsole)
+    {
+        int rc = gpConsole->GetPowerButtonHandled(&fHandled);
+        LogRel(("QuitTimer: rc=%d handled=%d\n", rc, fHandled));
+        if (RT_FAILURE(rc) || !fHandled)
+        {
+            /* event was not handled, power down the guest */
+            gfACPITerm = FALSE;
+            SDL_Event event = {0};
+            event.type = SDL_QUIT;
+            PushSDLEventForSure(&event);
+        }
+    }
+    /* one-shot */
+    return 0;
+}
+
+/**
+ * Wait for the next SDL event. Don't use SDL_WaitEvent since this function
+ * calls SDL_Delay(10) if the event queue is empty.
+ */
+static int WaitSDLEvent(SDL_Event *event)
+{
+    for (;;)
+    {
+        int rc = SDL_PollEvent(event);
+        if (rc == 1)
+        {
+#ifdef USE_XPCOM_QUEUE_THREAD
+            if (event->type == SDL_USER_EVENT_XPCOM_EVENTQUEUE)
+                consumedXPCOMUserEvent();
+#endif
+            return 1;
+        }
+        /* Immediately wake up if new SDL events are available. This does not
+         * work for internal SDL events. Don't wait more than 10ms. */
+        RTSemEventWait(g_EventSemSDLEvents, 10);
+    }
+}
+
+/**
+ * Ensure that an SDL event is really enqueued. Try multiple times if necessary.
+ */
+int PushSDLEventForSure(SDL_Event *event)
+{
+    int ntries = 10;
+    for (; ntries > 0; ntries--)
+    {
+        int rc = SDL_PushEvent(event);
+        RTSemEventSignal(g_EventSemSDLEvents);
+        if (rc == 1)
+            return 0;
+        Log(("PushSDLEventForSure: waiting for 2ms (rc = %d)\n", rc));
+        RTThreadSleep(2);
+    }
+    LogRel(("WARNING: Failed to enqueue SDL event %d.%d!\n",
+            event->type, event->type == SDL_USEREVENT ? event->user.type : 0));
+    return -1;
+}
+
+#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
+/**
+ * Special SDL_PushEvent function for NotifyUpdate events. These events may occur in bursts
+ * so make sure they don't flood the SDL event queue.
+ */
+void PushNotifyUpdateEvent(SDL_Event *event)
+{
+    int rc = SDL_PushEvent(event);
+    bool fSuccess = (rc == 1);
+
+    RTSemEventSignal(g_EventSemSDLEvents);
+    AssertMsg(fSuccess, ("SDL_PushEvent returned SDL error\n"));
+    /* A global counter is faster than SDL_PeepEvents() */
+    if (fSuccess)
+        ASMAtomicIncS32(&g_cNotifyUpdateEventsPending);
+    /* In order to not flood the SDL event queue, yield the CPU or (if there are already many
+     * events queued) even sleep */
+    if (g_cNotifyUpdateEventsPending > 96)
+    {
+        /* Too many NotifyUpdate events, sleep for a small amount to give the main thread time
+         * to handle these events. The SDL queue can hold up to 128 events. */
+        Log(("PushNotifyUpdateEvent: Sleep 1ms\n"));
+        RTThreadSleep(1);
+    }
+    else
+        RTThreadYield();
+}
+#endif /* VBOXSDL_WITH_X11 */
+
+/**
+ *
+ */
+static void SetFullscreen(bool enable)
+{
+    if (enable == gpFramebuffer[0]->getFullscreen())
+        return;
+
+    if (!gfFullscreenResize)
+    {
+        /*
+         * The old/default way: SDL will resize the host to fit the guest screen resolution.
+         */
+        gpFramebuffer[0]->setFullscreen(enable);
+    }
+    else
+    {
+        /*
+         * The alternate way: Switch to fullscreen with the host screen resolution and adapt
+         * the guest screen resolution to the host window geometry.
+         */
+        uint32_t NewWidth = 0, NewHeight = 0;
+        if (enable)
+        {
+            /* switch to fullscreen */
+            gmGuestNormalXRes = gpFramebuffer[0]->getGuestXRes();
+            gmGuestNormalYRes = gpFramebuffer[0]->getGuestYRes();
+            gpFramebuffer[0]->getFullscreenGeometry(&NewWidth, &NewHeight);
+        }
+        else
+        {
+            /* switch back to saved geometry */
+            NewWidth  = gmGuestNormalXRes;
+            NewHeight = gmGuestNormalYRes;
+        }
+        if (NewWidth != 0 && NewHeight != 0)
+        {
+            gpFramebuffer[0]->setFullscreen(enable);
+            gfIgnoreNextResize = TRUE;
+            gpDisplay->SetVideoModeHint(0 /*=display*/, true /*=enabled*/,
+                                        false /*=changeOrigin*/, 0 /*=originX*/, 0 /*=originY*/,
+                                        NewWidth, NewHeight, 0 /*don't change bpp*/, true /*=notify*/);
+        }
+    }
+}
+
+static VBoxSDLFB *getFbFromWinId(Uint32 id)
+{
+    for (unsigned i = 0; i < gcMonitors; i++)
+        if (gpFramebuffer[i]->hasWindow(id))
+            return gpFramebuffer[i];
+
+    return NULL;
 }

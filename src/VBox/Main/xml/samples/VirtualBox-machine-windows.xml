@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<!-- InnoTek VirtualBox Sample Machine Configuration (for a win32 host) -->
+<!-- Oracle VirtualBox Sample Machine Configuration (for a win32 host) -->
 <!--
  *  :tabSize=2:indentSize=2:noTabs=true:
  *  :folding=explicit:collapseFolds=1:
@@ -19,6 +19,9 @@
     lastStateChange="2005-01-01T10:22:22Z"
     aborted="true"
   >
+    <Description>
+        Something is here.
+    </Description>
     <Hardware>
       <Memory RAMSize="128"/>
       <Boot>
@@ -49,7 +52,7 @@
           <HostInterface name="Home LAN"/>
         </Adapter>
       </Network>
-      <AudioAdapter driver="winmm" enabled="true"/>
+      <AudioAdapter driver="WAS" enabled="true"/>
     </Hardware>
 
     <HardDiskAttachments>
@@ -95,7 +98,7 @@
             <HostInterface name="Home LAN"/>
           </Adapter>
         </Network>
-        <AudioAdapter driver="winmm" enabled="true"/>
+        <AudioAdapter driver="WAS" enabled="true"/>
         <Clipboard mode="Disabled"/>
       </Hardware>
       <HardDiskAttachments>
@@ -141,7 +144,7 @@
                 <HostInterface name="Home LAN"/>
               </Adapter>
             </Network>
-            <AudioAdapter driver="winmm" enabled="true"/>
+            <AudioAdapter driver="WAS" enabled="true"/>
           </Hardware>
           <HardDiskAttachments>
             <HardDiskAttachment hardDisk="{508b474f-62ce-4872-9a42-3af09037a277}"
@@ -184,7 +187,7 @@
                 <HostInterface name="Home LAN"/>
               </Adapter>
             </Network>
-            <AudioAdapter driver="winmm" enabled="true"/>
+            <AudioAdapter driver="WAS" enabled="true"/>
           </Hardware>
           <HardDiskAttachments>
             <HardDiskAttachment hardDisk="{508b474f-62ce-4872-9a42-3af09037a277}"

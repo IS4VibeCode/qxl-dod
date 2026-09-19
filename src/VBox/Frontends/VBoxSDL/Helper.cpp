@@ -1,3 +1,4 @@
+/* $Id: Helper.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VBox frontends: VBoxSDL (simple frontend based on SDL):
@@ -5,39 +6,51 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 #define LOG_GROUP LOG_GROUP_GUI
-#include <VBox/err.h>
+#include <iprt/errcore.h>
 #include <VBox/log.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/thread.h>
 #include <iprt/semaphore.h>
 #include "VBoxSDL.h"
 #include "Helper.h"
 
+
 /**
  * Globals
  */
 
 
-#ifdef __LINUX__
+#ifdef USE_XPCOM_QUEUE_THREAD
 
 /** global flag indicating that the event queue thread should terminate */
-bool volatile   g_fTerminateXPCOMQueueThread = false;
+static bool volatile   g_fTerminateXPCOMQueueThread = false;
+
+/** How many XPCOM user events are on air. Only allow one pending event to
+ *  prevent an overflow of the SDL event queue. */
+static volatile int32_t g_s32XPCOMEventsPending;
 
 /** Semaphore the XPCOM event thread will sleep on while it waits for the main thread to process pending requests. */
 RTSEMEVENT    g_EventSemXPCOMQueueThread = NULL;
@@ -50,9 +63,10 @@ RTSEMEVENT    g_EventSemXPCOMQueueThread = NULL;
  * @param   pvUser  User specific parameter, the file descriptor
  *                  of the event queue socket
  */
-DECLCALLBACK(int) xpcomEventThread(RTTHREAD thread, void *pvUser)
+DECLCALLBACK(int) xpcomEventThread(RTTHREAD hThreadSelf, void *pvUser)
 {
-    int eqFD = (int)pvUser;
+    RT_NOREF(hThreadSelf);
+    int eqFD = (intptr_t)pvUser;
     unsigned cErrors = 0;
     int rc;
 
@@ -70,27 +84,44 @@ DECLCALLBACK(int) xpcomEventThread(RTTHREAD thread, void *pvUser)
         if ((n > 0) && !g_fTerminateXPCOMQueueThread)
         {
             /*
-             * Post the event and wait for it to be processed. If we don't wait,
-             * we'll flood the queue on SMP systems and when the main thread is busy.
-             * In the event of a push error, we'll yield the timeslice and retry.
+             * Wait until all XPCOM events are processed. 1s just for sanity.
              */
-            SDL_Event event = {0};
-            event.type = SDL_USEREVENT;
-            event.user.type = SDL_USER_EVENT_XPCOM_EVENTQUEUE;
-            rc = SDL_PushEvent(&event);
-            if (!rc)
+            int iWait = 1000;
+            /*
+             * Don't post an event if there is a pending XPCOM event to prevent an
+             * overflow of the SDL event queue.
+             */
+            if (g_s32XPCOMEventsPending < 1)
             {
-                RTSemEventWait(g_EventSemXPCOMQueueThread, 100);
-                cErrors = 0;
+                /*
+                 * Post the event and wait for it to be processed. If we don't wait,
+                 * we'll flood the queue on SMP systems and when the main thread is busy.
+                 * In the event of a push error, we'll yield the timeslice and retry.
+                 */
+                SDL_Event event = {0};
+                event.type = SDL_USEREVENT;
+                event.user.type = SDL_USER_EVENT_XPCOM_EVENTQUEUE;
+                rc = SDL_PushEvent(&event);
+                if (!rc)
+                {
+                    /* success */
+                    ASMAtomicIncS32(&g_s32XPCOMEventsPending);
+                    cErrors = 0;
+                }
+                else
+                {
+                    /* failure */
+                    cErrors++;
+                    if (!RTThreadYield())
+                        RTThreadSleep(2);
+                    iWait = (cErrors >= 10) ? RT_MIN(cErrors - 8, 50) : 0;
+                }
             }
             else
-            {
-                cErrors++;
-                if (!RTThreadYield())
-                    RTThreadSleep(2);
-                if (cErrors >= 10)
-                    RTSemEventWait(g_EventSemXPCOMQueueThread, RT_MIN(cErrors - 8, 50));
-            }
+                Log2(("not enqueueing SDL XPCOM event (%d)\n", g_s32XPCOMEventsPending));
+
+            if (iWait)
+                RTSemEventWait(g_EventSemXPCOMQueueThread, iWait);
         }
     } while (!g_fTerminateXPCOMQueueThread);
     return VINF_SUCCESS;
@@ -105,13 +136,22 @@ DECLCALLBACK(int) xpcomEventThread(RTTHREAD thread, void *pvUser)
 int startXPCOMEventQueueThread(int eqFD)
 {
     int rc = RTSemEventCreate(&g_EventSemXPCOMQueueThread);
-    if (VBOX_SUCCESS(rc))
+    if (RT_SUCCESS(rc))
     {
         RTTHREAD Thread;
-        rc = RTThreadCreate(&Thread, xpcomEventThread, (void *)eqFD, 0, RTTHREADTYPE_MSG_PUMP, 0, "XPCOMEvent");
+        rc = RTThreadCreate(&Thread, xpcomEventThread, (void *)(intptr_t)eqFD,
+                            0, RTTHREADTYPE_MSG_PUMP, 0, "XPCOMEvent");
     }
     AssertRC(rc);
     return rc;
+}
+
+/**
+ * Notify the XPCOM thread that we consumed an XPCOM event.
+ */
+void consumedXPCOMUserEvent(void)
+{
+    ASMAtomicDecS32(&g_s32XPCOMEventsPending);
 }
 
 /**
@@ -136,7 +176,4 @@ void terminateXPCOMQueueThread(void)
     }
 }
 
-
-
-#endif /* __LINUX__ */
-
+#endif /* USE_XPCOM_QUEUE_THREAD */

@@ -45,7 +45,7 @@
 /*
  * To add error code to your module, you need to do the following:
  *
- * 1) Add a module offset code.  Add yours to the bottom of the list 
+ * 1) Add a module offset code.  Add yours to the bottom of the list
  *    right below this comment, adding 1.
  *
  * 2) In your module, define a header file which uses one of the
@@ -102,7 +102,7 @@
  * returning codes from other modules that might also use
  * the generic base.
  */
-#define NS_ERROR_MODULE_GENERAL    51  
+#define NS_ERROR_MODULE_GENERAL    51
 
 /**
  * @name Standard Error Handling Macros
@@ -179,6 +179,9 @@
 /* Returned when a function fails */
 #define NS_ERROR_FAILURE                   ((nsresult) 0x80004005L)
 
+/* Returned when an IPC fails */
+#define NS_ERROR_CALL_FAILED               ((nsresult) 0x800706beL)
+
 /* Returned when an unexpected error occurs */
 #define NS_ERROR_UNEXPECTED                ((nsresult) 0x8000ffffL)
 
@@ -211,13 +214,16 @@
 /* Returned when a factory already is registered */
 #define NS_ERROR_FACTORY_EXISTS            (NS_ERROR_BASE + 0x100)
 
+/* Socket failures */
+#define NS_ERROR_SOCKET_FAIL               (NS_ERROR_BASE + 0x200)
+
 
 /* For COM compatibility reasons, we want to use exact error code numbers
    for NS_ERROR_PROXY_INVALID_IN_PARAMETER and NS_ERROR_PROXY_INVALID_OUT_PARAMETER.
    The first matches:
 
      #define RPC_E_INVALID_PARAMETER          _HRESULT_TYPEDEF_(0x80010010L)
-   
+
    Errors returning this mean that the xpcom proxy code could not create a proxy for
    one of the in paramaters.
 
@@ -227,13 +233,13 @@
 */
 
 /* Returned when a proxy could not be create a proxy for one of the IN parameters
-   This is returned only when the "real" meathod has NOT been invoked. 
+   This is returned only when the "real" meathod has NOT been invoked.
 */
 
 #define NS_ERROR_PROXY_INVALID_IN_PARAMETER        ((nsresult) 0x80010010L)
 
 /* Returned when a proxy could not be create a proxy for one of the OUT parameters
-   This is returned only when the "real" meathod has ALREADY been invoked. 
+   This is returned only when the "real" meathod has ALREADY been invoked.
 */
 
 #define NS_ERROR_PROXY_INVALID_OUT_PARAMETER        ((nsresult) 0x80010011L)
@@ -288,24 +294,6 @@
 #define NS_ERROR_LOSS_OF_SIGNIFICANT_DATA       NS_ERROR_GENERATE_FAILURE(NS_ERROR_MODULE_XPCOM,  3)
 
 #define NS_SUCCESS_LOSS_OF_INSIGNIFICANT_DATA   NS_ERROR_GENERATE_SUCCESS(NS_ERROR_MODULE_XPCOM,  1)
-
-
- /*
-  * This will return the nsresult corresponding to the most recent NSPR failure
-  * returned by PR_GetError.
-  *
-  ***********************************************************************
-  *      Do not depend on this function. It will be going away!
-  ***********************************************************************
-  */
-extern NS_COM nsresult
-NS_ErrorAccordingToNSPR();
-
-
-#ifdef _MSC_VER
-#pragma warning(disable: 4251) /* 'nsCOMPtr<class nsIInputStream>' needs to have dll-interface to be used by clients of class 'nsInputStream' */
-#pragma warning(disable: 4275) /* non dll-interface class 'nsISupports' used as base for dll-interface class 'nsIRDFNode' */
-#endif
 
 #endif
 

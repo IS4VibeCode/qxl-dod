@@ -1,128 +1,142 @@
+/* $Id: SnapshotImpl.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
  * VirtualBox COM class implementation
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_SNAPSHOTIMPL
-#define ____H_SNAPSHOTIMPL
+#ifndef MAIN_INCLUDED_SnapshotImpl_h
+#define MAIN_INCLUDED_SnapshotImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
-#include "VirtualBoxBase.h"
-#include "Collection.h"
-
-#include <list>
+#include "SnapshotWrap.h"
 
 class SnapshotMachine;
 
+namespace settings
+{
+    struct Snapshot;
+}
+
 class ATL_NO_VTABLE Snapshot :
-    public VirtualBoxSupportErrorInfoImpl <Snapshot, ISnapshot>,
-    public VirtualBoxSupportTranslation <Snapshot>,
-    public VirtualBoxBaseWithTypedChildren <Snapshot>,
-    public ISnapshot
+    public SnapshotWrap
 {
 public:
-
-    struct Data
-    {
-        Data();
-        ~Data();
-
-        Guid mId;
-        Bstr mName;
-        Bstr mDescription;
-        LONG64 mTimeStamp;
-        ComObjPtr <SnapshotMachine> mMachine;
-    };
-
-    typedef VirtualBoxBaseWithTypedChildren <Snapshot>::DependentChildren
-        SnapshotList;
-
-    DECLARE_NOT_AGGREGATABLE(Snapshot)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(Snapshot)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(ISnapshot)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS(Snapshot)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer only for internal purposes
-    HRESULT init (const Guid &aId, INPTR BSTR aName, INPTR BSTR aDescription,
-                  LONG64 aTimeStamp, SnapshotMachine *aMachine,
-                  Snapshot *aParent);
+    HRESULT init(VirtualBox *aVirtualBox,
+                 const Guid &aId,
+                 const com::Utf8Str &aName,
+                 const com::Utf8Str &aDescription,
+                 const RTTIMESPEC &aTimeStamp,
+                 SnapshotMachine *aMachine,
+                 Snapshot *aParent);
     void uninit();
 
-    void discard();
+    void i_beginSnapshotDelete();
 
-    // ISnapshot properties
-    STDMETHOD(COMGETTER(Id)) (GUIDPARAMOUT aId);
-    STDMETHOD(COMGETTER(Name)) (BSTR *aName);
-    STDMETHOD(COMSETTER(Name)) (INPTR BSTR aName);
-    STDMETHOD(COMGETTER(Description)) (BSTR *aDescription);
-    STDMETHOD(COMSETTER(Description)) (INPTR BSTR aDescription);
-    STDMETHOD(COMGETTER(TimeStamp)) (LONG64 *aTimeStamp);
-    STDMETHOD(COMGETTER(Online)) (BOOL *aOnline);
-    STDMETHOD(COMGETTER(Machine)) (IMachine **aMachine);
-    STDMETHOD(COMGETTER(Parent)) (ISnapshot **aParent);
-    STDMETHOD(COMGETTER(Children)) (ISnapshotCollection **aChildren);
-
-    // ISnapshot methods
+    void i_deparent();
 
     // public methods only for internal purposes
 
-    /** Do |AutoLock alock (this);| before acceessing the returned data! */
-    const Data &data() const { return mData; }
-
-    const Bstr &stateFilePath() const;
-
-    ComObjPtr <Snapshot> parent() const { return (Snapshot *) mParent; }
-
-    /** Shortcut to #dependentChildrenLock() */
-    AutoLock::Handle &childrenLock() const { return dependentChildrenLock(); }
-
     /**
-     *  Shortcut to #dependentChildren().
-     *  Do |AutoLock alock (childrenLock());| before acceessing the returned list!
+     * Override of the default locking class to be used for validating lock
+     * order with the standard member lock handle.
      */
-    const SnapshotList &children() const { return dependentChildren(); }
+    virtual VBoxLockingClass getLockingClass() const
+    {
+        return LOCKCLASS_SNAPSHOTOBJECT;
+    }
 
-    ULONG descendantCount();
-    ComObjPtr <Snapshot> findChildOrSelf (INPTR GUIDPARAM aId);
-    ComObjPtr <Snapshot> findChildOrSelf (INPTR BSTR aName);
+    const ComObjPtr<Snapshot>& i_getParent() const;
+    const ComObjPtr<Snapshot> i_getFirstChild() const;
 
-    void updateSavedStatePaths (const char *aOldPath, const char *aNewPath);
+    const Utf8Str& i_getStateFilePath() const;
 
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"Snapshot"; }
+    uint32_t i_getDepth();
+
+    ULONG i_getChildrenCount();
+    ULONG i_getAllChildrenCount();
+
+    const ComObjPtr<SnapshotMachine>& i_getSnapshotMachine() const;
+
+    Guid i_getId() const;
+    const Utf8Str& i_getName() const;
+    RTTIMESPEC i_getTimeStamp() const;
+
+    ComObjPtr<Snapshot> i_findChildOrSelf(IN_GUID aId);
+    ComObjPtr<Snapshot> i_findChildOrSelf(const com::Utf8Str &aName);
+
+    void i_updateSavedStatePaths(const Utf8Str &strOldPath,
+                                 const Utf8Str &strNewPath);
+    void i_updateSavedStatePathsImpl(const Utf8Str &strOldPath,
+                                     const Utf8Str &strNewPath);
+
+    bool i_sharesSavedStateFile(const Utf8Str &strPath,
+                                Snapshot *pSnapshotToIgnore);
+
+    void i_updateNVRAMPaths(const Utf8Str &strOldPath,
+                            const Utf8Str &strNewPath);
+    void i_updateNVRAMPathsImpl(const Utf8Str &strOldPath,
+                                const Utf8Str &strNewPath);
+
+    HRESULT i_saveSnapshotOne(settings::Snapshot &data) const;
+    HRESULT i_saveSnapshot(settings::Snapshot &data) const;
+
+    HRESULT i_uninitAll(AutoWriteLock &writeLock,
+                        CleanupMode_T cleanupMode,
+                        MediaList &llMedia,
+                        std::list<Utf8Str> &llFilenames);
+
 
 private:
 
-    ComObjPtr <Snapshot, ComWeakRef> mParent;
+    struct Data;            // opaque, defined in SnapshotImpl.cpp
 
-    Data mData;
+    // wrapped ISnapshot properties
+    HRESULT getId(com::Guid &aId);
+    HRESULT getName(com::Utf8Str &aName);
+    HRESULT setName(const com::Utf8Str &aName);
+    HRESULT getDescription(com::Utf8Str &aDescription);
+    HRESULT setDescription(const com::Utf8Str &aDescription);
+    HRESULT getTimeStamp(LONG64 *aTimeStamp);
+    HRESULT getOnline(BOOL *aOnline);
+    HRESULT getMachine(ComPtr<IMachine> &aMachine);
+    HRESULT getParent(ComPtr<ISnapshot> &aParent);
+    HRESULT getChildren(std::vector<ComPtr<ISnapshot> > &aChildren);
+
+    // wrapped ISnapshot methods
+    HRESULT getChildrenCount(ULONG *aChildrenCount);
+
+    Data *m;
 };
 
-COM_DECL_READONLY_ENUM_AND_COLLECTION (Snapshot)
+#endif /* !MAIN_INCLUDED_SnapshotImpl_h */
 
-#endif // ____H_SNAPSHOTIMPL
-
+/* vi: set tabstop=4 shiftwidth=4 expandtab: */

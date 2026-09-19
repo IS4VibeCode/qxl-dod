@@ -1,27 +1,35 @@
+/* $Id: Framebuffer.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox frontends: Framebuffer (FB, DirectFB):
- * Declaration of VBoxDirectFB class
+ * VBoxFB - Declaration of VBoxDirectFB class.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __H_FRAMEBUFFER
-#define __H_FRAMEBUFFER
+#ifndef VBOX_INCLUDED_SRC_VBoxFB_Framebuffer_h
+#define VBOX_INCLUDED_SRC_VBoxFB_Framebuffer_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include "VBoxFB.h"
 
@@ -33,18 +41,37 @@ public:
 
     NS_DECL_ISUPPORTS
 
-    NS_IMETHOD GetWidth(uint32 *width);
-    NS_IMETHOD GetHeight(uint32_t *height);
+    NS_IMETHOD GetWidth(PRUint32 *width);
+    NS_IMETHOD GetHeight(PRUint32 *height);
+    NS_IMETHOD GetBitsPerPixel(PRUint32 *bitsPerPixel);
+    NS_IMETHOD GetBytesPerLine(PRUint32 *bytesPerLine);
+    NS_IMETHOD GetPixelFormat(PRUint32 *pixelFormat);
+    NS_IMETHOD GetHeightReduction(PRUint32 *heightReduction);
+    NS_IMETHOD GetOverlay(IFramebufferOverlay **aOverlay);
+    NS_IMETHOD GetWinId(PRInt64 *winId);
+    NS_IMETHOD GetCapabilities(PRUint32 *pcCapabilites, FramebufferCapabilities_T **ppaenmCapabilities);
+
+    NS_IMETHOD NotifyUpdate(PRUint32 x, PRUint32 y, PRUint32 cx, PRUint32 cy);
+    NS_IMETHOD NotifyUpdateImage(PRUint32 x, PRUint32 y, PRUint32 cx, PRUint32 cy, PRUint32 cbImage, PRUint8 *pbImage);
+    NS_IMETHOD NotifyChange(PRUint32 idScreen, PRUint32 xOrigin, PRUint32 yOrigin, PRUint32 cx, PRUint32 cy);
+    NS_IMETHOD VideoModeSupported(PRUint32 width, PRUint32 height, PRUint32 bpp, PRBool *supported);
+    NS_IMETHOD GetVisibleRegion(PRUint8 *paRectangles, PRUint32 cRectangles, PRUint32 *pcCopied);
+    NS_IMETHOD SetVisibleRegion(PRUint8 *paRectangles, PRUint32 cRectangles);
+
+    NS_IMETHOD ProcessVHWACommand(PRUint8 *pCommand, LONG enmCmd, BOOL fGuestCmd);
+
+    NS_IMETHOD Notify3DEvent(PRUint32 type, PRUint32 cbData, PRUint8 *pbData);
+
+    /// @todo obsolete?
+    NS_IMETHOD GetAddress(PRUint8 **address);
     NS_IMETHOD Lock();
     NS_IMETHOD Unlock();
-    NS_IMETHOD GetAddress(uint32_t *address);
-    NS_IMETHOD GetColorDepth(uint32_t *colorDepth);
-    NS_IMETHOD GetLineSize(uint32_t *lineSize);
-    NS_IMETHOD GetPixelFormat(FramebufferPixelFormat_T *pixelFormat);
-    NS_IMETHOD NotifyUpdate(uint32_t x, uint32_t y,
-                           uint32_t w, uint32_t h, PRBool *finished);
-    NS_IMETHOD RequestResize(FramebufferPixelFormat_T pixelFormat, uint32_t vram, uint32_t lineSize, uint32_t w, uint32_t h,
+    NS_IMETHOD GetUsesGuestVRAM(PRBool *usesGuestVRAM);
+    NS_IMETHOD RequestResize(PRUint32 aScreenId, PRUint32 pixelFormat, PRUint8 *vram,
+                             PRUint32 bitsPerPixel, PRUint32 bytesPerLine,
+                             PRUint32 w, PRUint32 h,
                              PRBool *finished);
+
 private:
     int createSurface(uint32_t w, uint32_t h);
 
@@ -61,5 +88,5 @@ private:
 };
 
 
-#endif // __H_FRAMEBUFFER
+#endif /* !VBOX_INCLUDED_SRC_VBoxFB_Framebuffer_h */
 

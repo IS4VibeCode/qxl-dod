@@ -1,26 +1,45 @@
 /** @file
- *
- * InnoTek Portable Runtime - Parameter Definitions.
+ * IPRT - Parameter Definitions.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __iprt_param_h__
-#define __iprt_param_h__
+#ifndef IPRT_INCLUDED_param_h
+#define IPRT_INCLUDED_param_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
+
+#include <iprt/cdefs.h>
 
 /** @todo Much of the PAGE_* stuff here is obsolete and highly risky to have around.
  * As for component configs (MM_*), either we gather all in here or we move those bits away! */
@@ -30,94 +49,197 @@
  * @{
  */
 
-/**
- * i386 Page size.
- */
-#define PAGE_SIZE           4096
+/* Undefine PAGE_SIZE and PAGE_SHIFT to avoid unnecessary noice when clashing
+ * with system headers. Include system headers before / after iprt depending
+ * on which you wish to take precedence. */
+#undef PAGE_SIZE
+#undef PAGE_SHIFT
+
+/* Undefine PAGE_OFFSET_MASK to avoid the conflict with the-linux-kernel.h */
+#undef PAGE_OFFSET_MASK
 
 /**
- * i386 Page shift.
+ * Page size.
+ */
+#if defined(RT_ARCH_SPARC64)
+# define PAGE_SIZE          8192
+#elif defined(RT_ARCH_ARM64)
+# if defined(RT_OS_DARWIN)
+#  define PAGE_SIZE         16384
+# elif defined(RT_OS_LINUX)
+#  ifdef IN_RING0
+#   ifndef CONFIG_ARM64_PAGE_SHIFT
+#    define PAGE_SIZE        (1 << CONFIG_PAGE_SHIFT)
+#   else
+#    define PAGE_SIZE        (1 << CONFIG_ARM64_PAGE_SHIFT)
+#   endif
+#  elif defined(IPRT_STATIC_ARM64_PAGE_SHIFT)
+#   define PAGE_SIZE        (1 << IPRT_STATIC_ARM64_PAGE_SHIFT)
+#  else
+#   define PAGE_SIZE        RT_DONT_USE_PAGE_SIZE_ON_LINUX_ARM64_IN_USERSPACE_DUE_TO_VARIABLE_PAGE_SIZE
+#  endif
+# elif defined(RT_OS_WINDOWS)
+#  define PAGE_SIZE         4096
+# else
+#  error "This needs porting"
+# endif
+#else
+# define PAGE_SIZE          4096
+#endif
+
+/**
+ * Page shift.
  * This is used to convert between size (in bytes) and page count.
  */
-#define PAGE_SHIFT          12
+#if defined(RT_ARCH_SPARC64)
+# define PAGE_SHIFT         13
+#elif defined(RT_ARCH_ARM64)
+# if defined(RT_OS_DARWIN)
+#  define PAGE_SHIFT        14
+# elif defined(RT_OS_LINUX)
+#  ifdef IN_RING0
+#   ifndef CONFIG_ARM64_PAGE_SHIFT
+#    define PAGE_SHIFT      CONFIG_PAGE_SHIFT
+#   else
+#    define PAGE_SHIFT      CONFIG_ARM64_PAGE_SHIFT
+#   endif
+#  elif defined(IPRT_STATIC_ARM64_PAGE_SHIFT)
+#   define PAGE_SHIFT       IPRT_STATIC_ARM64_PAGE_SHIFT
+#  else
+#   define PAGE_SHIFT       RT_DONT_USE_PAGE_SHIFT_ON_LINUX_ARM64_IN_USERSPACE_DUE_TO_VARIABLE_PAGE_SIZE
+#  endif
+# elif defined(RT_OS_WINDOWS)
+#  define PAGE_SHIFT        12
+# else
+#  error "This needs porting"
+# endif
+#else
+# define PAGE_SHIFT         12
+#endif
 
 /**
- * i386 Page offset mask.
+ * Page offset mask.
  *
- * Do NOT one-complement this for whatever purpose. You may get a 32-bit const when you want a 64-bit one.
- * Use PAGE_BASE_MASK, PAGE_BASE_GC_MASK, PAGE_BASE_HC_MASK, PAGE_ADDRESS() or X86_PTE_PAE_PG_MASK.
+ * @note If you do one-complement this, always insert a target type case after
+ *       the operator!  Otherwise you may end up with weird results.
  */
-#define PAGE_OFFSET_MASK    0xfff
+#if defined(RT_ARCH_SPARC64)
+# define PAGE_OFFSET_MASK    0x1fff
+#elif defined(RT_ARCH_ARM64)
+# if defined(RT_OS_DARWIN)
+#  define PAGE_OFFSET_MASK   0x3fff
+# elif defined(RT_OS_LINUX)
+#  ifdef IN_RING0
+#   define PAGE_OFFSET_MASK  (PAGE_SIZE - 1)
+#  elif defined(IPRT_STATIC_ARM64_PAGE_SHIFT)
+#   define PAGE_OFFSET_MASK  ((1 << IPRT_STATIC_ARM64_PAGE_SHIFT) - 1)
+#  else
+#   define PAGE_OFFSET_MASK  RT_DONT_USE_PAGE_OFFSET_MASK_ON_LINUX_ARM64_IN_USERSPACE_DUE_TO_VARIABLE_PAGE_SIZE
+#  endif
+# elif defined(RT_OS_WINDOWS)
+#  define PAGE_OFFSET_MASK   0xfff
+# else
+#  error "This needs porting"
+# endif
+#else
+# define PAGE_OFFSET_MASK    0xfff
+#endif
 
 /**
- * Page address mask for the guest context POINTERS.
- * @remark  Physical addresses are always masked using X86_PTE_PAE_PG_MASK!
+ * The minimum page size for the architecture.
  */
-#define PAGE_BASE_GC_MASK   (~(RTGCUINTPTR)0xfff)
+#if defined(RT_ARCH_ARM64) || defined(RT_ARCH_X86) || defined(RT_ARCH_AMD64)
+# define RT_MIN_PAGE_SIZE           4096
+#else
+# define RT_MIN_PAGE_SIZE           PAGE_SIZE
+#endif
 
 /**
- * Page address mask for the host context POINTERS.
- * @remark  Physical addresses are always masked using X86_PTE_PAE_PG_MASK!
+ * The shift count corresponding to RT_MIN_PAGE_SIZE.
  */
-#define PAGE_BASE_HC_MASK   (~(RTHCUINTPTR)0xfff)
+#if defined(RT_ARCH_ARM64) || defined(RT_ARCH_X86) || defined(RT_ARCH_AMD64)
+# define RT_MIN_PAGE_SHIFT          12
+#else
+# define RT_MIN_PAGE_SHIFT          PAGE_SHIFT
+#endif
 
 /**
- * Page address mask for the both context POINTERS.
+ * The offset mask corresponding to RT_MIN_PAGE_SIZE.
+ */
+#if defined(RT_ARCH_ARM64) || defined(RT_ARCH_X86) || defined(RT_ARCH_AMD64)
+# define RT_MIN_PAGE_OFFSET_MASK    0xfff
+#else
+# define RT_MIN_PAGE_OFFSET_MASK    PAGE_OFFSET_MASK
+#endif
+
+
+/**
+ * The maximum regular page size for the architecture (excluding huge pages).
+ */
+#if defined(RT_ARCH_ARM64)
+# define RT_MAX_PAGE_SIZE           65536
+#else
+# define RT_MAX_PAGE_SIZE           PAGE_SIZE
+#endif
+
+/**
+ * The shift count corresponding to RT_MAX_PAGE_SIZE.
+ */
+#if defined(RT_ARCH_ARM64)
+# define RT_MAX_PAGE_SHIFT          16
+#else
+# define RT_MAX_PAGE_SHIFT          PAGE_SHIFT
+#endif
+
+/**
+ * The offset mask corresponding to RT_MAX_PAGE_SIZE.
+ */
+#if defined(RT_ARCH_ARM64)
+# define RT_MAX_PAGE_OFFSET_MASK    0xffff
+#else
+# define RT_MAX_PAGE_OFFSET_MASK    PAGE_OFFSET_MASK
+#endif
+
+/**
+ * Page address mask for the uintptr_t sized pointers.
  *
  * Be careful when using this since it may be a size too big!
  * @remark  Physical addresses are always masked using X86_PTE_PAE_PG_MASK!
+ * @deprecated
  */
-#define PAGE_BASE_MASK     (~(RTUINTPTR)0xfff)
+#define PAGE_BASE_MASK      (~(uintptr_t)PAGE_OFFSET_MASK)
 
 /**
  * Get the page aligned address of a POINTER in the CURRENT context.
  *
  * @returns Page aligned address (it's an uintptr_t).
- * @param   pv      The address to align.
+ * @param   pv      The virtual address to align.
  *
- * @remark  Physical addresses are always masked using X86_PTE_PAE_PG_MASK!
+ * @remarks Physical addresses are always masked using X86_PTE_PAE_PG_MASK!
+ * @remarks This only works with POINTERS in the current context.
+ *          Do NOT use on guest address or physical address!
+ * @deprecated
  */
-#define PAGE_ADDRESS(pv)    ((uintptr_t)(pv) & ~(uintptr_t)0xfff)
-
-#if 1 /** @todo remove this! Use X86_PAGE_* defines. */
-/**
- * i386 Page directory shift.
- * This is used to convert between PDR index and virtual address.
- * @deprecated Use X86_*.
- */
-#define PGDIR_SHIFT         22
+#define PAGE_ADDRESS(pv)    ((uintptr_t)(pv) & ~(uintptr_t)PAGE_OFFSET_MASK)
 
 /**
- * i386 Page table mask.
- * This is used together with PAGE_SHIFT to get the page table
- * index from a virtual address.
- * @deprecated Use X86_*.
+ * Get the page aligned address of a physical address
+ *
+ * @returns Page aligned address (it's an RTHCPHYS or RTGCPHYS).
+ * @param   Phys    The physical address to align.
+ * @deprecated
  */
-#define PTE_MASK            0x3ff
-
-/**
- * i386 Page table and page directory entry count for the default
- * paging mode.
- * @deprecated Use X86_*.
- */
-#define PAGE_ENTRIES        1024
-
-/**
- * i386 4MB Page offset mask.
- * @deprecated Use X86_*.
- */
-#define PAGE_OFFSET_MASK_BIG    0x3fffff
-#endif /* obsolete */
+#define PHYS_PAGE_ADDRESS(Phys) ((Phys) & X86_PTE_PAE_PG_MASK)
 
 /**
  * Host max path (the reasonable value).
+ * @remarks defined both by iprt/param.h and iprt/path.h.
  */
-#define RTPATH_MAX   (4096 + 4)      /* (PATH_MAX + 1) on linux w/ some alignment */
-
-/** @} */
-
-
-/** @} */
-
+#if !defined(IPRT_INCLUDED_path_h) || defined(DOXYGEN_RUNNING)
+# define RTPATH_MAX         (4096 + 4)    /* (PATH_MAX + 1) on linux w/ some alignment */
 #endif
+
+/** @} */
+
+#endif /* !IPRT_INCLUDED_param_h */
 

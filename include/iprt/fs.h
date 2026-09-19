@@ -1,33 +1,50 @@
 /** @file
- * InnoTek Portable Runtime - Filesystem.
+ * IPRT - Filesystem.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-
-#ifndef __iprt_fs_h__
-#define __iprt_fs_h__
+#ifndef IPRT_INCLUDED_fs_h
+#define IPRT_INCLUDED_fs_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include <iprt/cdefs.h>
 #include <iprt/types.h>
 #include <iprt/time.h>
 
 
-__BEGIN_DECLS
+RT_C_DECLS_BEGIN
 
 /** @defgroup grp_rt_fs    RTFs - Filesystem and Volume
  * @ingroup grp_rt
@@ -37,18 +54,20 @@ __BEGIN_DECLS
 
 /** @name Filesystem Object Mode Flags.
  *
- * There are two sets of flags: the unix mode flags and the dos
- * attributes.
+ * There are two sets of flags: the unix mode flags and the dos attributes.
  *
  * APIs returning mode flags will provide both sets.
  *
- * When specifying mode flags to any API at least one of
- * them must be given. If one set is missing the API will
- * synthesize it from the one given if it requires it.
+ * When specifying mode flags to any API at least one of them must be given. If
+ * one set is missing the API will synthesize it from the one given if it
+ * requires it.
  *
- * Both sets match their x86 ABIs, the DOS/NT one is simply shifted
- * up 16 bits. The DOS/NT range is bits 16 to 31 inclusivly. The
- * Unix range is bits 0 to 15 (inclusivly).
+ * Both sets match their x86 ABIs, the DOS/NT one is simply shifted up 16 bits.
+ * The DOS/NT range is bits 16 to 31 inclusively. The Unix range is bits 0 to 15
+ * (inclusively).
+ *
+ * @remarks These constants have been comitted to a binary format and must not
+ *          be changed in any incompatible ways.
  *
  * @{
  */
@@ -87,6 +106,11 @@ __BEGIN_DECLS
 /** Other executable (S_IXOTH). */
 #define RTFS_UNIX_IXOTH             0000001U
 
+/** All UNIX access permission bits (0777). */
+#define RTFS_UNIX_ALL_ACCESS_PERMS  0000777U
+/** All UNIX permission bits, including set id and sticky bits.  */
+#define RTFS_UNIX_ALL_PERMS         0007777U
+
 /** Named pipe (fifo) (S_IFIFO). */
 #define RTFS_TYPE_FIFO              0010000U
 /** Character device (S_IFCHR). */
@@ -105,6 +129,8 @@ __BEGIN_DECLS
 #define RTFS_TYPE_WHITEOUT          0160000U
 /** Type mask (S_IFMT). */
 #define RTFS_TYPE_MASK              0170000U
+/** The shift count to convert between RTFS_TYPE_MASK and DIRENTRYTYPE. */
+#define RTFS_TYPE_DIRENTRYTYPE_SHIFT    12
 
 /** Unix attribute mask. */
 #define RTFS_UNIX_MASK              0xffffU
@@ -176,14 +202,105 @@ __BEGIN_DECLS
 
 
 /**
+ * Filesystem type IDs returned by RTFsQueryType.
+ *
+ * This enum is subject to changes and must not be used as part of any ABI or
+ * binary format (file, network, etc).
+ *
+ * @remarks When adding new entries, please update RTFsTypeName().  Also, try
+ *          add them to the most natural group.
+ */
+typedef enum RTFSTYPE
+{
+    /** Unknown file system. */
+    RTFSTYPE_UNKNOWN = 0,
+
+    /** Universal Disk Format. */
+    RTFSTYPE_UDF,
+    /** ISO 9660, aka Compact Disc File System (CDFS). */
+    RTFSTYPE_ISO9660,
+    /** Filesystem in Userspace. */
+    RTFSTYPE_FUSE,
+    /** VirtualBox shared folders.  */
+    RTFSTYPE_VBOXSHF,
+
+    /* Linux: */
+    RTFSTYPE_EXT,
+    RTFSTYPE_EXT2,
+    RTFSTYPE_EXT3,
+    RTFSTYPE_EXT4,
+    RTFSTYPE_XFS,
+    RTFSTYPE_CIFS,
+    RTFSTYPE_SMBFS,
+    RTFSTYPE_TMPFS,
+    RTFSTYPE_SYSFS,
+    RTFSTYPE_PROC,
+    RTFSTYPE_OCFS2,
+    RTFSTYPE_BTRFS,
+    RTFSTYPE_ECRYPTFS,
+
+    /* Windows: */
+    /** New Technology File System. */
+    RTFSTYPE_NTFS,
+    /** FAT12, FAT16 and FAT32 lumped into one basket.
+     * The partition size limit of FAT12 and FAT16 will be the factor
+     * limiting the file size (except, perhaps for the 64KB cluster case on
+     * non-Windows hosts). */
+    RTFSTYPE_FAT,
+    /** Extended File Allocation Table, main target are flash drives. */
+    RTFSTYPE_EXFAT,
+    /** Resilient File System. */
+    RTFSTYPE_REFS,
+
+    /* Solaris: */
+    /** Zettabyte File System.  */
+    RTFSTYPE_ZFS,
+    /** Unix File System. */
+    RTFSTYPE_UFS,
+    /** Network File System. */
+    RTFSTYPE_NFS,
+
+    /* Mac OS X: */
+    /** Hierarchical File System. */
+    RTFSTYPE_HFS,
+    /** @todo RTFSTYPE_HFS_PLUS? */
+    RTFSTYPE_APFS,
+    RTFSTYPE_AUTOFS,
+    RTFSTYPE_DEVFS,
+
+    /* *BSD: */
+
+    /* OS/2: */
+    /** High Performance File System. */
+    RTFSTYPE_HPFS,
+    /** Journaled File System (v2).  */
+    RTFSTYPE_JFS,
+
+    /** The end of valid Filesystem types IDs. */
+    RTFSTYPE_END,
+    /** The usual 32-bit type blow up. */
+    RTFSTYPE_32BIT_HACK = 0x7fffffff
+} RTFSTYPE;
+/** Pointer to a Filesystem type ID. */
+typedef RTFSTYPE *PRTFSTYPE;
+
+
+/**
  * The available additional information in a RTFSOBJATTR object.
  */
 typedef enum RTFSOBJATTRADD
 {
     /** No additional information is available / requested. */
     RTFSOBJATTRADD_NOTHING = 1,
-    /** The additional unix attributes (RTFSOBJATTR::u::Unix) are available / requested. */
+    /** The additional unix attributes (RTFSOBJATTR::u::Unix) are available /
+     *  requested. */
     RTFSOBJATTRADD_UNIX,
+    /** The additional unix attributes (RTFSOBJATTR::u::UnixOwner) are
+     * available / requested. */
+    RTFSOBJATTRADD_UNIX_OWNER,
+    /** The additional unix attributes (RTFSOBJATTR::u::UnixGroup) are
+     * available / requested. */
+    RTFSOBJATTRADD_UNIX_GROUP,
     /** The additional extended attribute size (RTFSOBJATTR::u::EASize) is available / requested. */
     RTFSOBJATTRADD_EASIZE,
     /** The last valid item (inclusive).
@@ -194,11 +311,90 @@ typedef enum RTFSOBJATTRADD
     RTFSOBJATTRADD_32BIT_SIZE_HACK = 0x7fffffff
 } RTFSOBJATTRADD;
 
+/** The number of bytes reserved for the additional attribute union. */
+#define RTFSOBJATTRUNION_MAX_SIZE       128
+
+/**
+ * Additional Unix Attributes (RTFSOBJATTRADD_UNIX).
+ */
+typedef struct RTFSOBJATTRUNIX
+{
+    /** The user owning the filesystem object (st_uid).
+     * This field is NIL_RTUID if not supported. */
+    RTUID           uid;
+
+    /** The group the filesystem object is assigned (st_gid).
+     * This field is NIL_RTGID if not supported. */
+    RTGID           gid;
+
+    /** Number of hard links to this filesystem object (st_nlink).
+     * This field is 1 if the filesystem doesn't support hardlinking or
+     * the information isn't available.
+     */
+    uint32_t        cHardlinks;
+
+    /** The device number of the device which this filesystem object resides on (st_dev).
+     * This field is 0 if this information is not available. */
+    RTDEV           INodeIdDevice;
+
+    /** The unique identifier (within the filesystem) of this filesystem object (st_ino).
+     * Together with INodeIdDevice, this field can be used as a OS wide unique id
+     * when both their values are not 0.
+     * This field is 0 if the information is not available.
+     *
+     * @remarks  The special '..' dir always shows up with 0 on NTFS/Windows. */
+    RTINODE         INodeId;
+
+    /** User flags (st_flags).
+     * This field is 0 if this information is not available. */
+    uint32_t        fFlags;
+
+    /** The current generation number (st_gen).
+     * This field is 0 if this information is not available. */
+    uint32_t        GenerationId;
+
+    /** The device number of a character or block device type object (st_rdev).
+     * This field is 0 if the file isn't of a character or block device type and
+     * when the OS doesn't subscribe to the major+minor device idenfication scheme. */
+    RTDEV           Device;
+} RTFSOBJATTRUNIX;
+
+
+/**
+ * Additional Unix Attributes (RTFSOBJATTRADD_UNIX_OWNER).
+ *
+ * @remarks This interface is mainly for TAR.
+ */
+typedef struct RTFSOBJATTRUNIXOWNER
+{
+    /** The user owning the filesystem object (st_uid).
+     * This field is NIL_UID if not supported. */
+    RTUID           uid;
+    /** The user name.
+     * Empty if not available or not supported, truncated if too long. */
+    char            szName[RTFSOBJATTRUNION_MAX_SIZE - sizeof(RTUID)];
+} RTFSOBJATTRUNIXOWNER;
+
+
+/**
+ * Additional Unix Attributes (RTFSOBJATTRADD_UNIX_GROUP).
+ *
+ * @remarks This interface is mainly for TAR.
+ */
+typedef struct RTFSOBJATTRUNIXGROUP
+{
+    /** The user owning the filesystem object (st_uid).
+     * This field is NIL_GID if not supported. */
+    RTGID           gid;
+    /** The group name.
+     * Empty if not available or not supported, truncated if too long. */
+    char            szName[RTFSOBJATTRUNION_MAX_SIZE - sizeof(RTGID)];
+} RTFSOBJATTRUNIXGROUP;
+
 
 /**
  * Filesystem object attributes.
  */
-#pragma pack(1)
 typedef struct RTFSOBJATTR
 {
     /** Mode flags (st_mode). RTFS_UNIX_*, RTFS_TYPE_*, and RTFS_DOS_*. */
@@ -215,48 +411,12 @@ typedef struct RTFSOBJATTR
      */
     union RTFSOBJATTRUNION
     {
-        /** Additional Unix Attributes
-         * These are available when RTFSOBJATTRADD is set in fUnix.
-         */
-         struct RTFSOBJATTRUNIX
-         {
-            /** The user owning the filesystem object (st_uid).
-             * This field is ~0U if not supported. */
-            RTUID           uid;
-
-            /** The group the filesystem object is assigned (st_gid).
-             * This field is ~0U if not supported. */
-            RTGID           gid;
-
-            /** Number of hard links to this filesystem object (st_nlink).
-             * This field is 1 if the filesystem doesn't support hardlinking or
-             * the information isn't available.
-             */
-            uint32_t        cHardlinks;
-
-            /** The device number of the device which this filesystem object resides on (st_dev).
-             * This field is 0 if this information is not available. */
-            RTDEV           INodeIdDevice;
-
-            /** The unique identifier (within the filesystem) of this filesystem object (st_ino).
-             * Together with INodeIdDevice, this field can be used as a OS wide unique id
-             * when both their values are not 0.
-             * This field is 0 if the information is not available. */
-            RTINODE         INodeId;
-
-            /** User flags (st_flags).
-             * This field is 0 if this information is not available. */
-            uint32_t        fFlags;
-
-            /** The current generation number (st_gen).
-             * This field is 0 if this information is not available. */
-            uint32_t        GenerationId;
-
-            /** The device number of a character or block device type object (st_rdev).
-             * This field is 0 if the file isn't of a character or block device type and
-             * when the OS doesn't subscribe to the major+minor device idenfication scheme. */
-            RTDEV           Device;
-        } Unix;
+        /** Additional Unix Attributes - RTFSOBJATTRADD_UNIX. */
+        RTFSOBJATTRUNIX         Unix;
+        /** Additional Unix Owner Attributes - RTFSOBJATTRADD_UNIX_OWNER. */
+        RTFSOBJATTRUNIXOWNER    UnixOwner;
+        /** Additional Unix Group Attributes - RTFSOBJATTRADD_UNIX_GROUP. */
+        RTFSOBJATTRUNIXGROUP    UnixGroup;
 
         /**
          * Extended attribute size is available when RTFS_DOS_HAVE_EA_SIZE is set.
@@ -266,9 +426,10 @@ typedef struct RTFSOBJATTR
             /** Size of EAs. */
             RTFOFF          cb;
         } EASize;
+        /** Reserved space. */
+        uint8_t         abReserveSpace[128];
     } u;
 } RTFSOBJATTR;
-#pragma pack()
 /** Pointer to a filesystem object attributes structure. */
 typedef RTFSOBJATTR *PRTFSOBJATTR;
 /** Pointer to a const filesystem object attributes structure. */
@@ -280,7 +441,6 @@ typedef const RTFSOBJATTR *PCRTFSOBJATTR;
  *
  * This is returned by the RTPathQueryInfo(), RTFileQueryInfo() and RTDirRead() APIs.
  */
-#pragma pack(1)
 typedef struct RTFSOBJINFO
 {
    /** Logical size (st_size).
@@ -314,7 +474,6 @@ typedef struct RTFSOBJINFO
    RTFSOBJATTR  Attr;
 
 } RTFSOBJINFO;
-#pragma pack()
 /** Pointer to a filesystem object information structure. */
 typedef RTFSOBJINFO *PRTFSOBJINFO;
 /** Pointer to a const filesystem object information structure. */
@@ -332,6 +491,8 @@ typedef const RTFSOBJINFO *PCRTFSOBJINFO;
  * @param   pcbFree         Where to store the remaining free space in the filesystem. (Optional)
  * @param   pcbBlock        Where to store the block size. (Optional)
  * @param   pcbSector       Where to store the sector size. (Optional)
+ *
+ * @sa      RTFileQueryFsSizes
  */
 RTR3DECL(int) RTFsQuerySizes(const char *pszFsPath, PRTFOFF pcbTotal, RTFOFF *pcbFree,
                              uint32_t *pcbBlock, uint32_t *pcbSector);
@@ -378,7 +539,30 @@ RTR3DECL(int) RTFsQuerySerial(const char *pszFsPath, uint32_t *pu32Serial);
  */
 RTR3DECL(int) RTFsQueryDriver(const char *pszFsPath, char *pszFsDriver, size_t cbFsDriver);
 
+/**
+ * Query the name of the filesystem the file is located on.
+ *
+ * @returns iprt status code.
+ * @param   pszFsPath       Path within the mounted filesystem.  It must exist.
+ *                          In case this is a symlink, the file it refers to is
+ *                          evaluated.
+ * @param   penmType        Where to store the filesystem type, this is always
+ *                          set.  See RTFSTYPE for the values.
+ */
+RTR3DECL(int) RTFsQueryType(const char *pszFsPath, PRTFSTYPE penmType);
+
 #endif /* IN_RING3 */
+
+/**
+ * Gets the name of a filesystem type.
+ *
+ * @returns Pointer to a read-only string containing the name.
+ * @param   enmType         A valid filesystem ID.  If outside the valid range,
+ *                          the returned string will be pointing to a static
+ *                          memory buffer which will be changed on subsequent
+ *                          calls to this function by any thread.
+ */
+RTDECL(const char *) RTFsTypeName(RTFSTYPE enmType);
 
 /**
  * Filesystem properties.
@@ -405,7 +589,7 @@ typedef struct RTFSPROPERTIES
      * False if it can't. */
     bool    fSupportsUnicode;
 
-    /** True if the filesystem is compresses.
+    /** True if the filesystem is compressed.
      * False if it isn't or we don't know. */
     bool    fCompressed;
 
@@ -417,6 +601,8 @@ typedef struct RTFSPROPERTIES
 } RTFSPROPERTIES;
 /** Pointer to a filesystem properties structure. */
 typedef RTFSPROPERTIES *PRTFSPROPERTIES;
+/** Pointer to a const filesystem properties structure. */
+typedef RTFSPROPERTIES const *PCRTFSPROPERTIES;
 
 #ifdef IN_RING3
 
@@ -429,6 +615,17 @@ typedef RTFSPROPERTIES *PRTFSPROPERTIES;
  */
 RTR3DECL(int) RTFsQueryProperties(const char *pszFsPath, PRTFSPROPERTIES pProperties);
 
+/**
+ * Checks if the given volume is case sensitive or not.
+ *
+ * This may be misleading in some cases as we lack the necessary APIs to query
+ * the information on some system (or choose not to use them) and are instead
+ * returning the general position on case sensitive file name of the system.
+ *
+ * @returns @c true if case sensitive, @c false if not.
+ * @param   pszFsPath       Path within the mounted file system.
+ */
+RTR3DECL(bool) RTFsIsCaseSensitive(const char *pszFsPath);
 
 /**
  * Mountpoint enumerator callback.
@@ -437,7 +634,7 @@ RTR3DECL(int) RTFsQueryProperties(const char *pszFsPath, PRTFSPROPERTIES pProper
  * @param   pszMountpoint   The mountpoint name.
  * @param   pvUser          The user argument.
  */
-typedef DECLCALLBACK(int) FNRTFSMOUNTPOINTENUM(const char *pszMountpoint, void *pvUser);
+typedef DECLCALLBACKTYPE(int, FNRTFSMOUNTPOINTENUM,(const char *pszMountpoint, void *pvUser));
 /** Pointer to a FNRTFSMOUNTPOINTENUM(). */
 typedef FNRTFSMOUNTPOINTENUM *PFNRTFSMOUNTPOINTENUM;
 
@@ -451,11 +648,22 @@ typedef FNRTFSMOUNTPOINTENUM *PFNRTFSMOUNTPOINTENUM;
 RTR3DECL(int) RTFsMountpointsEnum(PFNRTFSMOUNTPOINTENUM pfnCallback, void *pvUser);
 
 
+/**
+ * A /bin/ls clone.
+ *
+ * @returns Program exit code.
+ *
+ * @param   cArgs               The number of arguments.
+ * @param   papszArgs           The argument vector.  (Note that this may be
+ *                              reordered, so the memory must be writable.)
+ */
+RTR3DECL(RTEXITCODE) RTFsCmdLs(unsigned cArgs, char **papszArgs);
+
 #endif /* IN_RING3 */
 
 /** @} */
 
-__END_DECLS
+RT_C_DECLS_END
 
-#endif /* __iprt_fs_h__ */
+#endif /* !IPRT_INCLUDED_fs_h */
 

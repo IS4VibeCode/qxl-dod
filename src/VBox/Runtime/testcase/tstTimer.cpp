@@ -1,44 +1,88 @@
-/* $Id: tstTimer.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: tstTimer.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime Testcase - Timers.
+ * IPRT Testcase - Timers.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #include <iprt/timer.h>
 #include <iprt/time.h>
 #include <iprt/thread.h>
-#include <iprt/runtime.h>
+#include <iprt/initterm.h>
+#include <iprt/message.h>
 #include <iprt/stream.h>
-#include <iprt/err.h>
+#include <iprt/errcore.h>
+#include <iprt/string.h>
 
 
 
-/*******************************************************************************
-*   Global Variables                                                           *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
 static volatile unsigned gcTicks;
+static volatile uint64_t gu64Min;
+static volatile uint64_t gu64Max;
+static volatile uint64_t gu64Prev;
+static volatile uint64_t gu64Norm;
 
-static DECLCALLBACK(void) TimerCallback(PRTTIMER pTimer, void *pvUser)
+static uint32_t cFrequency[200];
+
+static DECLCALLBACK(void) TimerCallback(PRTTIMER pTimer, void *pvUser, uint64_t iTick)
 {
+    RT_NOREF_PV(pTimer); RT_NOREF_PV(pvUser); RT_NOREF_PV(iTick);
+
     gcTicks++;
+
+    if (iTick != gcTicks)
+        RTPrintf("tstTimer: FAILURE - iTick=%llu expected %u\n", iTick, gcTicks);
+
+    const uint64_t u64Now = RTTimeNanoTS();
+    if (gu64Prev)
+    {
+        const uint64_t u64Delta = u64Now - gu64Prev;
+        if (u64Delta < gu64Min)
+            gu64Min = u64Delta;
+        if (u64Delta > gu64Max)
+            gu64Max = u64Delta;
+        int i = (int)(  RT_ELEMENTS(cFrequency)
+                      - (u64Delta * (RT_ELEMENTS(cFrequency) / 2) / gu64Norm));
+        if (i >= 0 && i < (int)RT_ELEMENTS(cFrequency))
+            cFrequency[i]++;
+    }
+    gu64Prev = u64Now;
 }
 
 
@@ -48,12 +92,9 @@ int main()
      * Init runtime
      */
     unsigned cErrors = 0;
-    int rc = RTR3Init();
+    int rc = RTR3InitExeNoArguments(0);
     if (RT_FAILURE(rc))
-    {
-        RTPrintf("tstTimer: RTR3Init() -> %d\n", rc);
-        return 1;
-    }
+        return RTMsgInitFailure(rc);
 
     /*
      * Check that the clock is reliable.
@@ -96,67 +137,78 @@ int main()
      */
     static struct
     {
-        unsigned uMilliesInterval;
+        unsigned uMicroInterval;
         unsigned uMilliesWait;
         unsigned cLower;
         unsigned cUpper;
     } aTests[] =
     {
-        { 32, 2000, 0, 0 },
-        { 20, 2000, 0, 0 },
-        { 10, 2000, 0, 0 },
-        { 8,  2000, 0, 0 },
-        { 2,  2000, 0, 0 },
-        { 1,  2000, 0, 0 }
+        { 32000, 2000, 0, 0 },
+        { 20000, 2000, 0, 0 },
+        { 10000, 2000, 0, 0 },
+        {  8000, 2000, 0, 0 },
+        {  2000, 2000, 0, 0 },
+        {  1000, 2000, 0, 0 },
+        {   500, 5000, 0, 0 },
+        {   200, 5000, 0, 0 },
+        {   100, 5000, 0, 0 }
     };
 
     unsigned i = 0;
-    for (i = 0; i < ELEMENTS(aTests); i++)
+    for (i = 0; i < RT_ELEMENTS(aTests); i++)
     {
-        aTests[i].cLower = (aTests[i].uMilliesWait - aTests[i].uMilliesWait / 10) / aTests[i].uMilliesInterval;
-        aTests[i].cUpper = (aTests[i].uMilliesWait + aTests[i].uMilliesWait / 10) / aTests[i].uMilliesInterval;
+        aTests[i].cLower = (aTests[i].uMilliesWait*1000 - aTests[i].uMilliesWait*100) / aTests[i].uMicroInterval;
+        aTests[i].cUpper = (aTests[i].uMilliesWait*1000 + aTests[i].uMilliesWait*100) / aTests[i].uMicroInterval;
+        gu64Norm = aTests[i].uMicroInterval*1000;
 
-        RTPrintf("tstTimer: TESTING - %d ms interval, %d ms wait, expects %d-%d ticks.\n",
-                 aTests[i].uMilliesInterval, aTests[i].uMilliesWait, aTests[i].cLower, aTests[i].cUpper);
+        RTPrintf("\n"
+                 "tstTimer: TESTING - %d us interval, %d ms wait, expects %d-%d ticks.\n",
+                 aTests[i].uMicroInterval, aTests[i].uMilliesWait, aTests[i].cLower, aTests[i].cUpper);
 
         /*
          * Start timer which ticks every 10ms.
          */
         gcTicks = 0;
         PRTTIMER pTimer;
-        rc = RTTimerCreate(&pTimer, aTests[i].uMilliesInterval, TimerCallback, NULL);
+        gu64Max = 0;
+        gu64Min = UINT64_MAX;
+        gu64Prev = 0;
+        RT_ZERO(cFrequency);
+        rc = RTTimerCreateEx(&pTimer, aTests[i].uMicroInterval * (uint64_t)1000, 0, TimerCallback, NULL);
         if (RT_FAILURE(rc))
         {
-            RTPrintf("RTTimerCreate(,%d,) -> %d\n", aTests[i].uMilliesInterval, rc);
+            RTPrintf("tstTimer: FAILURE - RTTimerCreateEx(,%u*1M,,,) -> %Rrc\n", aTests[i].uMicroInterval, rc);
             cErrors++;
             continue;
         }
 
         /*
-         * Sleep for a while and then kill it.
+         * Start the timer and active waiting for the requested test period.
          */
-        uint64_t uTSBegin = RTTimeNanoTS();
-#if 1
+        uTSBegin = RTTimeNanoTS();
+        rc = RTTimerStart(pTimer, 0);
+        if (RT_FAILURE(rc))
+        {
+            RTPrintf("tstTimer: FAILURE - RTTimerStart(,0) -> %Rrc\n", rc);
+            cErrors++;
+        }
+
         while (RTTimeNanoTS() - uTSBegin < (uint64_t)aTests[i].uMilliesWait * 1000000)
             /* nothing */;
 
-#else
-        rc = RTThreadSleep(aTests[i].uMilliesWait);
-#endif
+        /* destroy the timer */
         uint64_t uTSEnd = RTTimeNanoTS();
-        uint64_t uTSDiff = uTSEnd - uTSBegin;
-        RTPrintf("uTS=%RI64 (%RU64 - %RU64)\n", uTSDiff, uTSBegin, uTSEnd);
-        if (RT_FAILURE(rc))
-            RTPrintf("warning: RTThreadSleep ended prematurely with %d\n", rc);
+        uTSDiff = uTSEnd - uTSBegin;
         rc = RTTimerDestroy(pTimer);
         if (RT_FAILURE(rc))
         {
             RTPrintf("tstTimer: FAILURE - RTTimerDestroy() -> %d gcTicks=%d\n", rc, gcTicks);
             cErrors++;
-            continue;
         }
+
+        RTPrintf("tstTimer: uTS=%RI64 (%RU64 - %RU64)\n", uTSDiff, uTSBegin, uTSEnd);
         unsigned cTicks = gcTicks;
-        RTThreadSleep(100);
+        RTThreadSleep(aTests[i].uMicroInterval/1000 * 3);
         if (gcTicks != cTicks)
         {
             RTPrintf("tstTimer: FAILURE - RTTimerDestroy() didn't really stop the timer! gcTicks=%d cTicks=%d\n", gcTicks, cTicks);
@@ -169,16 +221,32 @@ int main()
          */
         if (gcTicks < aTests[i].cLower)
         {
-            RTPrintf("tstTimer: FAILURE - Too few ticks gcTicks=%d (expected %d-%d)\n", gcTicks, aTests[i].cUpper, aTests[i].cLower);
+            RTPrintf("tstTimer: FAILURE - Too few ticks gcTicks=%d (expected %d-%d)", gcTicks, aTests[i].cUpper, aTests[i].cLower);
             cErrors++;
         }
         else if (gcTicks > aTests[i].cUpper)
         {
-            RTPrintf("tstTimer: FAILURE - Too many ticks gcTicks=%d (expected %d-%d)\n", gcTicks, aTests[i].cUpper, aTests[i].cLower);
+            RTPrintf("tstTimer: FAILURE - Too many ticks gcTicks=%d (expected %d-%d)", gcTicks, aTests[i].cUpper, aTests[i].cLower);
             cErrors++;
         }
         else
-            RTPrintf("tstTimer: OK      - gcTicks=%d\n",  gcTicks);
+            RTPrintf("tstTimer: OK      - gcTicks=%d",  gcTicks);
+        RTPrintf(" min=%RU64 max=%RU64\n", gu64Min, gu64Max);
+
+        for (int j = 0; j < (int)RT_ELEMENTS(cFrequency); j++)
+        {
+            uint32_t len = cFrequency[j] * 70 / gcTicks;
+            uint32_t deviation = j - RT_ELEMENTS(cFrequency) / 2;
+            uint64_t u64FreqPercent = (uint64_t)cFrequency[j] * 10000 / gcTicks;
+            uint64_t u64FreqPercentFrac = u64FreqPercent % 100;
+            u64FreqPercent = u64FreqPercent / 100;
+            RTPrintf("%+4d%c %6u %3llu.%02llu%% ",
+                    deviation, deviation == 0 ? ' ' : '%', cFrequency[j],
+                    u64FreqPercent, u64FreqPercentFrac);
+            for (unsigned k = 0; k < len; k++)
+                RTPrintf("*");
+            RTPrintf("\n");
+        }
     }
 
     /*
@@ -190,6 +258,4 @@ int main()
         RTPrintf("tstTimer: FAILURE %d errors\n", cErrors);
     return !!cErrors;
 }
-
-
 

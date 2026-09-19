@@ -1,36 +1,60 @@
-/* $Id: memobj-r0drv.cpp 1  klaus.espenlaub@oracle.com $ */
+/* $Id: memobj-r0drv.cpp 112971 2026-02-12 14:02:00Z alexander.eichner@oracle.com $ */
 /** @file
- * InnoTek Portable Runtime - Ring-0 Memory Objects, Common Code.
+ * IPRT - Ring-0 Memory Objects, Common Code.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
-#define LOG_GROUP RTLOGGROUP_DEFAULT ///@todo RTLOGGROUP_MEM
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
+#define LOG_GROUP RTLOGGROUP_DEFAULT /// @todo RTLOGGROUP_MEM
+#define RTMEM_NO_WRAP_TO_EF_APIS /* circular dependency otherwise. */
 #include <iprt/memobj.h>
+#include "internal/iprt.h"
+
 #include <iprt/alloc.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/err.h>
 #include <iprt/log.h>
+#include <iprt/mp.h>
 #include <iprt/param.h>
-#include "r0drv/memobj-r0drv.h"
+#include <iprt/process.h>
+#include <iprt/string.h>
+#include <iprt/thread.h>
+
+#include "internal/memobj.h"
 
 
 /**
@@ -41,8 +65,9 @@
  * @param   enmType     The memory object type.
  * @param   pv          The memory object mapping.
  * @param   cb          The size of the memory object.
+ * @param   pszTag      The tag string.
  */
-PRTR0MEMOBJINTERNAL rtR0MemObjNew(size_t cbSelf, RTR0MEMOBJTYPE enmType, void *pv, size_t cb)
+DECLHIDDEN(PRTR0MEMOBJINTERNAL) rtR0MemObjNew(size_t cbSelf, RTR0MEMOBJTYPE enmType, void *pv, size_t cb, const char *pszTag)
 {
     PRTR0MEMOBJINTERNAL pNew;
 
@@ -50,20 +75,46 @@ PRTR0MEMOBJINTERNAL rtR0MemObjNew(size_t cbSelf, RTR0MEMOBJTYPE enmType, void *p
     if (!cbSelf)
         cbSelf = sizeof(*pNew);
     Assert(cbSelf >= sizeof(*pNew));
+    Assert(cbSelf == (uint32_t)cbSelf);
+    AssertMsg(RT_ALIGN_Z(cb, PAGE_SIZE) == cb, ("%#zx\n", cb));
 
     /*
      * Allocate and initialize the object.
      */
-    pNew = (PRTR0MEMOBJINTERNAL)RTMemAllocZ(cb);
+    pNew = (PRTR0MEMOBJINTERNAL)RTMemAllocZ(cbSelf);
     if (pNew)
     {
         pNew->u32Magic  = RTR0MEMOBJ_MAGIC;
-        pNew->cbSelf    = cbSelf;
+        pNew->cbSelf    = (uint32_t)cbSelf;
         pNew->enmType   = enmType;
+        pNew->fFlags    = 0;
         pNew->cb        = cb;
         pNew->pv        = pv;
+#ifdef DEBUG
+        pNew->pszTag    = pszTag;
+#else
+        RT_NOREF_PV(pszTag);
+#endif
     }
     return pNew;
+}
+
+
+/**
+ * Deletes an incomplete memory object.
+ *
+ * This is for cleaning up after failures during object creation.
+ *
+ * @param   pMem    The incomplete memory object to delete.
+ */
+DECLHIDDEN(void) rtR0MemObjDelete(PRTR0MEMOBJINTERNAL pMem)
+{
+    if (pMem)
+    {
+        ASMAtomicUoWriteU32(&pMem->u32Magic, ~RTR0MEMOBJ_MAGIC);
+        pMem->enmType = RTR0MEMOBJTYPE_END;
+        RTMemFree(pMem);
+    }
 }
 
 
@@ -78,12 +129,14 @@ PRTR0MEMOBJINTERNAL rtR0MemObjNew(size_t cbSelf, RTR0MEMOBJTYPE enmType, void *p
  */
 static int rtR0MemObjLink(PRTR0MEMOBJINTERNAL pParent, PRTR0MEMOBJINTERNAL pChild)
 {
+    uint32_t i;
+
     /* sanity */
     Assert(rtR0MemObjIsMapping(pChild));
     Assert(!rtR0MemObjIsMapping(pParent));
 
     /* expand the array? */
-    const uint32_t i = pParent->uRel.Parent.cMappings;
+    i = pParent->uRel.Parent.cMappings;
     if (i >= pParent->uRel.Parent.cMappingsAllocated)
     {
         void *pv = RTMemRealloc(pParent->uRel.Parent.papMappings,
@@ -91,94 +144,113 @@ static int rtR0MemObjLink(PRTR0MEMOBJINTERNAL pParent, PRTR0MEMOBJINTERNAL pChil
         if (!pv)
             return VERR_NO_MEMORY;
         pParent->uRel.Parent.papMappings = (PPRTR0MEMOBJINTERNAL)pv;
+        pParent->uRel.Parent.cMappingsAllocated = i + 32;
         Assert(i == pParent->uRel.Parent.cMappings);
     }
 
     /* do the linking. */
     pParent->uRel.Parent.papMappings[i] = pChild;
+    pParent->uRel.Parent.cMappings++;
     pChild->uRel.Child.pParent = pParent;
 
     return VINF_SUCCESS;
 }
 
 
-/**
- * Checks if this is mapping or not.
- *
- * @returns true if it's a mapping, otherwise false.
- * @param   MemObj      The ring-0 memory object handle.
- */
 RTR0DECL(bool) RTR0MemObjIsMapping(RTR0MEMOBJ MemObj)
 {
     /* Validate the object handle. */
+    PRTR0MEMOBJINTERNAL pMem;
     AssertPtrReturn(MemObj, false);
-    PRTR0MEMOBJINTERNAL pMem = (PRTR0MEMOBJINTERNAL)MemObj;
-    AssertReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, false);
-    AssertReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, false);
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), false);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), false);
 
     /* hand it on to the inlined worker. */
     return rtR0MemObjIsMapping(pMem);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjIsMapping);
 
 
-/**
- * Gets the address of a ring-0 memory object.
- *
- * @returns The address of the memory object.
- * @returns NULL if the handle is invalid (asserts in strict builds) or if there isn't any mapping.
- * @param   MemObj  The ring-0 memory object handle.
- */
 RTR0DECL(void *) RTR0MemObjAddress(RTR0MEMOBJ MemObj)
 {
     /* Validate the object handle. */
-    AssertPtrReturn(MemObj, 0);
-    PRTR0MEMOBJINTERNAL pMem = (PRTR0MEMOBJINTERNAL)MemObj;
-    AssertReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, 0);
-    AssertReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, 0);
+    PRTR0MEMOBJINTERNAL pMem;
+    if (RT_UNLIKELY(MemObj == NIL_RTR0MEMOBJ))
+        return NULL;
+    AssertPtrReturn(MemObj, NULL);
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), NULL);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), NULL);
 
     /* return the mapping address. */
     return pMem->pv;
 }
+RT_EXPORT_SYMBOL(RTR0MemObjAddress);
 
 
-/**
- * Gets the size of a ring-0 memory object.
- *
- * @returns The address of the memory object.
- * @returns NULL if the handle is invalid (asserts in strict builds) or if there isn't any mapping.
- * @param   MemObj  The ring-0 memory object handle.
- */
+RTR0DECL(RTR3PTR) RTR0MemObjAddressR3(RTR0MEMOBJ MemObj)
+{
+    PRTR0MEMOBJINTERNAL pMem;
+
+    /* Validate the object handle. */
+    if (RT_UNLIKELY(MemObj == NIL_RTR0MEMOBJ))
+        return NIL_RTR3PTR;
+    AssertPtrReturn(MemObj, NIL_RTR3PTR);
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), NIL_RTR3PTR);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), NIL_RTR3PTR);
+    if (RT_UNLIKELY(    (   pMem->enmType != RTR0MEMOBJTYPE_MAPPING
+                         || pMem->u.Mapping.R0Process == NIL_RTR0PROCESS)
+                    &&  (   pMem->enmType != RTR0MEMOBJTYPE_LOCK
+                         || pMem->u.Lock.R0Process == NIL_RTR0PROCESS)
+                    &&  (   pMem->enmType != RTR0MEMOBJTYPE_PHYS_NC
+                         || pMem->u.Lock.R0Process == NIL_RTR0PROCESS)
+                    &&  (   pMem->enmType != RTR0MEMOBJTYPE_RES_VIRT
+                         || pMem->u.ResVirt.R0Process == NIL_RTR0PROCESS)))
+        return NIL_RTR3PTR;
+
+    /* return the mapping address. */
+    return (RTR3PTR)pMem->pv;
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAddressR3);
+
+
 RTR0DECL(size_t) RTR0MemObjSize(RTR0MEMOBJ MemObj)
 {
+    PRTR0MEMOBJINTERNAL pMem;
+
     /* Validate the object handle. */
+    if (RT_UNLIKELY(MemObj == NIL_RTR0MEMOBJ))
+        return 0;
     AssertPtrReturn(MemObj, 0);
-    PRTR0MEMOBJINTERNAL pMem = (PRTR0MEMOBJINTERNAL)MemObj;
-    AssertReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, 0);
-    AssertReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, 0);
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), 0);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), 0);
+    AssertMsg(RT_ALIGN_Z(pMem->cb, PAGE_SIZE) == pMem->cb, ("%#zx\n", pMem->cb));
 
     /* return the size. */
     return pMem->cb;
 }
+RT_EXPORT_SYMBOL(RTR0MemObjSize);
 
 
-/**
- * Get the physical address of an page in the memory object.
- *
- * @returns The physical address.
- * @returns NIL_RTHCPHYS if the object doesn't contain fixed physical pages.
- * @returns NIL_RTHCPHYS if the iPage is out of range.
- * @returns NIL_RTHCPHYS if the object handle isn't valid.
- * @param   MemObj  The ring-0 memory object handle.
- * @param   iPage   The page number within the object.
- */
-RTR0DECL(RTHCPHYS) RTR0MemObjGetPagePhysAddr(RTR0MEMOBJ MemObj, unsigned iPage)
+/* Work around gcc bug 55940 */
+#if defined(__GNUC__) && defined(RT_ARCH_X86) && (__GNUC__ * 100 + __GNUC_MINOR__) == 407
+ __attribute__((__optimize__ ("no-shrink-wrap")))
+#endif
+RTR0DECL(RTHCPHYS) RTR0MemObjGetPagePhysAddr(RTR0MEMOBJ MemObj, size_t iPage)
 {
     /* Validate the object handle. */
+    PRTR0MEMOBJINTERNAL pMem;
+    size_t cPages;
     AssertPtrReturn(MemObj, NIL_RTHCPHYS);
-    PRTR0MEMOBJINTERNAL pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
     AssertReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, NIL_RTHCPHYS);
     AssertReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, NIL_RTHCPHYS);
-    const unsigned cPages = (pMem->cb >> PAGE_SHIFT);
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), NIL_RTHCPHYS);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), NIL_RTHCPHYS);
+    cPages = (pMem->cb >> PAGE_SHIFT);
     if (iPage >= cPages)
     {
         /* permit: while (RTR0MemObjGetPagePhysAddr(pMem, iPage++) != NIL_RTHCPHYS) {} */
@@ -187,33 +259,96 @@ RTR0DECL(RTHCPHYS) RTR0MemObjGetPagePhysAddr(RTR0MEMOBJ MemObj, unsigned iPage)
         AssertReturn(iPage < (pMem->cb >> PAGE_SHIFT), NIL_RTHCPHYS);
     }
 
-    /* return the size. */
+    /*
+     * We know the address of physically contiguous allocations and mappings.
+     */
+    if (pMem->enmType == RTR0MEMOBJTYPE_CONT)
+        return pMem->u.Cont.Phys + iPage * PAGE_SIZE;
+    if (pMem->enmType == RTR0MEMOBJTYPE_PHYS)
+        return pMem->u.Phys.PhysBase + iPage * PAGE_SIZE;
+
+    /*
+     * Do the job.
+     */
     return rtR0MemObjNativeGetPagePhysAddr(pMem, iPage);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjGetPagePhysAddr);
 
 
-/**
- * Frees a ring-0 memory object.
- *
- * @returns IPRT status code.
- * @retval  VERR_INVALID_HANDLE if
- * @param   MemObj          The ring-0 memory object to be freed. NULL is accepted.
- * @param   fFreeMappings   Whether or not to free mappings of the object.
- */
+RTR0DECL(bool) RTR0MemObjWasZeroInitialized(RTR0MEMOBJ hMemObj)
+{
+    PRTR0MEMOBJINTERNAL pMem;
+
+    /* Validate the object handle. */
+    if (RT_UNLIKELY(hMemObj == NIL_RTR0MEMOBJ))
+        return false;
+    AssertPtrReturn(hMemObj, false);
+    pMem = (PRTR0MEMOBJINTERNAL)hMemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), false);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), false);
+    Assert(   (pMem->fFlags & (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC))
+           !=                 (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC));
+
+    /* return the alloc init state. */
+    return (pMem->fFlags & (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC))
+        ==                  RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC;
+}
+RT_EXPORT_SYMBOL(RTR0MemObjWasZeroInitialized);
+
+
+RTR0DECL(int) RTR0MemObjZeroInitialize(RTR0MEMOBJ hMemObj, bool fForce)
+{
+    PRTR0MEMOBJINTERNAL pMem;
+
+    /* Validate the object handle. */
+    AssertReturn(hMemObj != NIL_RTR0MEMOBJ, VERR_INVALID_HANDLE);
+    AssertPtrReturn(hMemObj, VERR_INVALID_HANDLE);
+    pMem = (PRTR0MEMOBJINTERNAL)hMemObj;
+    AssertMsgReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, ("%p: %#x\n", pMem, pMem->u32Magic), VERR_INVALID_HANDLE);
+    AssertMsgReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, ("%p: %d\n", pMem, pMem->enmType), VERR_INVALID_HANDLE);
+    AssertReturn(   (pMem->enmType != RTR0MEMOBJTYPE_MAPPING || pMem->u.Mapping.R0Process == NIL_RTR0PROCESS)
+                 && (pMem->enmType != RTR0MEMOBJTYPE_LOCK    || pMem->u.Lock.R0Process    == NIL_RTR0PROCESS)
+                 && pMem->enmType != RTR0MEMOBJTYPE_RES_VIRT
+                 , VERR_WRONG_TYPE);
+    Assert(   (pMem->fFlags & (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC))
+           !=                 (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC));
+
+    /*
+     * Do we need to do anything?
+     */
+    if (   fForce
+        ||    (pMem->fFlags & (RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC | RTR0MEMOBJ_FLAGS_UNINITIALIZED_AT_ALLOC))
+           !=                  RTR0MEMOBJ_FLAGS_ZERO_AT_ALLOC)
+    {
+        /* This is easy if there is a ring-0 mapping: */
+        if (pMem->pv)
+            RT_BZERO(pMem->pv, pMem->cb);
+        else
+            return rtR0MemObjNativeZeroInitWithoutMapping(pMem);
+    }
+    return VINF_SUCCESS;
+}
+RT_EXPORT_SYMBOL(RTR0MemObjZeroInitialize);
+
+
 RTR0DECL(int) RTR0MemObjFree(RTR0MEMOBJ MemObj, bool fFreeMappings)
 {
     /*
      * Validate the object handle.
      */
+    PRTR0MEMOBJINTERNAL pMem;
+    int rc;
+
     if (MemObj == NIL_RTR0MEMOBJ)
         return VINF_SUCCESS;
     AssertPtrReturn(MemObj, VERR_INVALID_HANDLE);
-    PRTR0MEMOBJINTERNAL pMem = (PRTR0MEMOBJINTERNAL)MemObj;
+    pMem = (PRTR0MEMOBJINTERNAL)MemObj;
     AssertReturn(pMem->u32Magic == RTR0MEMOBJ_MAGIC, VERR_INVALID_HANDLE);
     AssertReturn(pMem->enmType > RTR0MEMOBJTYPE_INVALID && pMem->enmType < RTR0MEMOBJTYPE_END, VERR_INVALID_HANDLE);
+    RT_ASSERT_PREEMPTIBLE();
 
     /*
-     * Deal with mapings according to fFreeMappings.
+     * Deal with mappings according to fFreeMappings.
      */
     if (    !rtR0MemObjIsMapping(pMem)
         &&  pMem->uRel.Parent.cMappings > 0)
@@ -234,20 +369,24 @@ RTR0DECL(int) RTR0MemObjFree(RTR0MEMOBJ MemObj, bool fFreeMappings)
             AssertFatal(rtR0MemObjIsMapping(pChild));
 
             /* free the mapping. */
-            int rc = rtR0MemObjNativeFree(pChild);
+            rc = rtR0MemObjNativeFree(pChild);
             if (RT_FAILURE(rc))
             {
-                Log(("RTR0MemObjFree: failed to free mapping %p: %p %#zx; rc=%Vrc\n", pChild, pChild->pv, pChild->cb, rc));
+                Log(("RTR0MemObjFree: failed to free mapping %p: %p %#zx; rc=%Rrc\n", pChild, pChild->pv, pChild->cb, rc));
                 pMem->uRel.Parent.papMappings[pMem->uRel.Parent.cMappings++] = pChild;
                 return rc;
             }
+
+            pChild->u32Magic++;
+            pChild->enmType = RTR0MEMOBJTYPE_END;
+            RTMemFree(pChild);
         }
     }
 
     /*
      * Free this object.
      */
-    int rc = rtR0MemObjNativeFree(pMem);
+    rc = rtR0MemObjNativeFree(pMem);
     if (RT_SUCCESS(rc))
     {
         /*
@@ -256,15 +395,18 @@ RTR0DECL(int) RTR0MemObjFree(RTR0MEMOBJ MemObj, bool fFreeMappings)
         if (rtR0MemObjIsMapping(pMem))
         {
             PRTR0MEMOBJINTERNAL pParent = pMem->uRel.Child.pParent;
+            uint32_t i;
 
             /* sanity checks */
             AssertPtr(pParent);
             AssertFatal(pParent->u32Magic == RTR0MEMOBJ_MAGIC);
             AssertFatal(pParent->enmType > RTR0MEMOBJTYPE_INVALID && pParent->enmType < RTR0MEMOBJTYPE_END);
             AssertFatal(!rtR0MemObjIsMapping(pParent));
+            AssertFatal(pParent->uRel.Parent.cMappings > 0);
+            AssertPtr(pParent->uRel.Parent.papMappings);
 
             /* locate and remove from the array of mappings. */
-            uint32_t i = pParent->uRel.Parent.cMappings;
+            i = pParent->uRel.Parent.cMappings;
             while (i-- > 0)
             {
                 if (pParent->uRel.Parent.papMappings[i] == pMem)
@@ -288,262 +430,296 @@ RTR0DECL(int) RTR0MemObjFree(RTR0MEMOBJ MemObj, bool fFreeMappings)
         RTMemFree(pMem);
     }
     else
-        Log(("RTR0MemObjFree: failed to free %p: %d %p %#zx; rc=%Vrc\n",
+        Log(("RTR0MemObjFree: failed to free %p: %d %p %#zx; rc=%Rrc\n",
              pMem, pMem->enmType, pMem->pv, pMem->cb, rc));
     return rc;
 }
+RT_EXPORT_SYMBOL(RTR0MemObjFree);
 
 
 
-/**
- * Allocates page aligned virtual kernel memory.
- *
- * The memory is taken from a non paged (= fixed physical memory backing) pool.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   cb              Number of bytes to allocate. This is rounded up to nearest page.
- * @param   fExecutable     Flag indicating whether it should be permitted to executed code in the memory object.
- */
-RTR0DECL(int) RTR0MemObjAllocPage(PRTR0MEMOBJ pMemObj, size_t cb, bool fExecutable)
+RTR0DECL(int) RTR0MemObjAllocPageTag(PRTR0MEMOBJ pMemObj, size_t cb, bool fExecutable, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the allocation. */
-    return rtR0MemObjNativeAllocPage(pMemObj, cbAligned, fExecutable);
+    return rtR0MemObjNativeAllocPage(pMemObj, cbAligned, fExecutable, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAllocPageTag);
+
+
+RTR0DECL(int) RTR0MemObjAllocLargeTag(PRTR0MEMOBJ pMemObj, size_t cb, size_t cbLargePage, uint32_t fFlags, const char *pszTag)
+{
+    /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, cbLargePage);
+    AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
+    *pMemObj = NIL_RTR0MEMOBJ;
+#ifdef RT_ARCH_AMD64
+    AssertReturn(cbLargePage == _2M || cbLargePage == _1G, VERR_OUT_OF_RANGE);
+#elif defined(RT_ARCH_X86)
+    AssertReturn(cbLargePage == _2M || cbLargePage == _4M, VERR_OUT_OF_RANGE);
+#else
+    AssertReturn(RT_IS_POWER_OF_TWO(cbLargePage), VERR_NOT_POWER_OF_TWO);
+    AssertReturn(cbLargePage > PAGE_SIZE, VERR_OUT_OF_RANGE);
+#endif
+    AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    AssertReturn(!(fFlags & ~RTMEMOBJ_ALLOC_LARGE_F_VALID_MASK), VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the allocation. */
+    return rtR0MemObjNativeAllocLarge(pMemObj, cbAligned, cbLargePage, fFlags, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAllocLargeTag);
+
+
+/**
+ * Fallback implementation of rtR0MemObjNativeAllocLarge and implements single
+ * page allocation using rtR0MemObjNativeAllocPhys.
+ */
+DECLHIDDEN(int) rtR0MemObjFallbackAllocLarge(PPRTR0MEMOBJINTERNAL ppMem, size_t cb, size_t cbLargePage, uint32_t fFlags,
+                                             const char *pszTag)
+{
+    RT_NOREF(pszTag, fFlags);
+    if (cb == cbLargePage)
+        return rtR0MemObjNativeAllocPhys(ppMem, cb, NIL_RTHCPHYS, cbLargePage, pszTag);
+    return VERR_NOT_SUPPORTED;
 }
 
 
-/**
- * Allocates page aligned virtual kernel memory with physical backing below 4GB.
- *
- * The physical memory backing the allocation is fixed.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   cb              Number of bytes to allocate. This is rounded up to nearest page.
- * @param   fExecutable     Flag indicating whether it should be permitted to executed code in the memory object.
- */
-RTR0DECL(int) RTR0MemObjAllocLow(PRTR0MEMOBJ pMemObj, size_t cb, bool fExecutable)
+RTR0DECL(int) RTR0MemObjAllocLowTag(PRTR0MEMOBJ pMemObj, size_t cb, bool fExecutable, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the allocation. */
-    return rtR0MemObjNativeAllocLow(pMemObj, cbAligned, fExecutable);
+    return rtR0MemObjNativeAllocLow(pMemObj, cbAligned, fExecutable, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjAllocLowTag);
 
 
-/**
- * Allocates page aligned virtual kernel memory with contiguous physical backing below 4GB.
- *
- * The physical memory backing the allocation is fixed.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   cb              Number of bytes to allocate. This is rounded up to nearest page.
- * @param   fExecutable     Flag indicating whether it should be permitted to executed code in the memory object.
- */
-RTR0DECL(int) RTR0MemObjAllocCont(PRTR0MEMOBJ pMemObj, size_t cb, bool fExecutable)
+RTR0DECL(int) RTR0MemObjAllocContTag(PRTR0MEMOBJ pMemObj, size_t cb, RTHCPHYS PhysHighest, bool fExecutable, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    AssertReturn(PhysHighest >= cb, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the allocation. */
-    return rtR0MemObjNativeAllocCont(pMemObj, cbAligned, fExecutable);
+    return rtR0MemObjNativeAllocCont(pMemObj, cbAligned, PhysHighest, fExecutable, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjAllocContTag);
 
 
-/**
- * Locks a range of user virtual memory.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   pv              User virtual address. This is rounded down to a page boundrary.
- * @param   cb              Number of bytes to lock. This is rounded up to nearest page boundrary.
- *
- * @remark  RTR0MemObjGetAddress() will return the rounded down address.
- */
-RTR0DECL(int) RTR0MemObjLockUser(PRTR0MEMOBJ pMemObj, void *pv, size_t cb)
+RTR0DECL(int) RTR0MemObjLockUserTag(PRTR0MEMOBJ pMemObj, RTR3PTR R3Ptr, size_t cb,
+                                    uint32_t fAccess, uint32_t fFlags,
+                                    RTR0PROCESS R0Process, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb + (R3Ptr & PAGE_OFFSET_MASK), PAGE_SIZE);
+    RTR3PTR const R3PtrAligned = (R3Ptr & ~(RTR3PTR)PAGE_OFFSET_MASK);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    if (R0Process == NIL_RTR0PROCESS)
+        R0Process = RTR0ProcHandleSelf();
+    AssertReturn(!(fAccess & ~(RTMEM_PROT_READ | RTMEM_PROT_WRITE)), VERR_INVALID_PARAMETER);
+    AssertReturn(fAccess, VERR_INVALID_PARAMETER);
+    AssertReturn(!(fFlags & ~RTMEMOBJ_LOCK_USER_F_VALID_MASK), VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the locking. */
+    return rtR0MemObjNativeLockUser(pMemObj, R3PtrAligned, cbAligned, fAccess, fFlags, R0Process, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjLockUserTag);
+
+
+RTR0DECL(int) RTR0MemObjLockKernelTag(PRTR0MEMOBJ pMemObj, void *pv, size_t cb, uint32_t fAccess, const char *pszTag)
+{
+    /* sanity checks. */
     const size_t cbAligned = RT_ALIGN_Z(cb + ((uintptr_t)pv & PAGE_OFFSET_MASK), PAGE_SIZE);
-    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
     void * const pvAligned = (void *)((uintptr_t)pv & ~(uintptr_t)PAGE_OFFSET_MASK);
-
-    /* do the allocation. */
-    return rtR0MemObjNativeLockUser(pMemObj, pvAligned, cbAligned);
-}
-
-
-/**
- * Locks a range of kernel virtual memory.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   pv              Kernel virtual address. This is rounded down to a page boundrary.
- * @param   cb              Number of bytes to lock. This is rounded up to nearest page boundrary.
- *
- * @remark  RTR0MemObjGetAddress() will return the rounded down address.
- */
-RTR0DECL(int) RTR0MemObjLockKernel(PRTR0MEMOBJ pMemObj, void *pv, size_t cb)
-{
-    /* sanity checks. */
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb + ((uintptr_t)pv & PAGE_OFFSET_MASK), PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
-    void * const pvAligned = (void *)((uintptr_t)pv & ~(uintptr_t)PAGE_OFFSET_MASK);
     AssertPtrReturn(pvAligned, VERR_INVALID_POINTER);
+    AssertReturn(!(fAccess & ~(RTMEM_PROT_READ | RTMEM_PROT_WRITE)), VERR_INVALID_PARAMETER);
+    AssertReturn(fAccess, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the allocation. */
-    return rtR0MemObjNativeLockKernel(pMemObj, pvAligned, cbAligned);
+    return rtR0MemObjNativeLockKernel(pMemObj, pvAligned, cbAligned, fAccess, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjLockKernelTag);
 
 
-/**
- * Allocates page aligned physical memory without (necessarily) any kernel mapping.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   cb              Number of bytes to allocate. This is rounded up to nearest page.
- * @param   PhysHighest     The highest permittable address (inclusive).
- *                          Pass NIL_RTHCPHYS if any address is acceptable.
- */
-RTR0DECL(int) RTR0MemObjAllocPhys(PRTR0MEMOBJ pMemObj, size_t cb, RTHCPHYS PhysHighest)
+RTR0DECL(int) RTR0MemObjAllocPhysTag(PRTR0MEMOBJ pMemObj, size_t cb, RTHCPHYS PhysHighest, const char *pszTag)
 {
     /* sanity checks. */
-    AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
-    *pMemObj = NIL_RTR0MEMOBJ;
-    AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
     const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
-    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
-
-    /* do the allocation. */
-    return rtR0MemObjNativeAllocPhys(pMemObj, cbAligned, PhysHighest);
-}
-
-
-/**
- * Creates a page aligned, contiguous, physical memory object.
- *
- * No physical memory is allocated, we trust you do know what you're doing.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   Phys            The physical address to start at. This is rounded down to the
- *                          nearest page boundrary.
- * @param   cb              The size of the object in bytes. This is rounded up to nearest page boundrary.
- */
-RTR0DECL(int) RTR0MemObjEnterPhys(PRTR0MEMOBJ pMemObj, RTHCPHYS Phys, size_t cb)
-{
-    /* sanity checks. */
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    AssertReturn(PhysHighest >= cb, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the allocation. */
+    return rtR0MemObjNativeAllocPhys(pMemObj, cbAligned, PhysHighest, PAGE_SIZE /* page aligned */, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAllocPhysTag);
+
+
+RTR0DECL(int) RTR0MemObjAllocPhysExTag(PRTR0MEMOBJ pMemObj, size_t cb, RTHCPHYS PhysHighest, size_t uAlignment, const char *pszTag)
+{
+    /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
+    AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
+    *pMemObj = NIL_RTR0MEMOBJ;
+    AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    AssertReturn(PhysHighest >= cb, VERR_INVALID_PARAMETER);
+    if (uAlignment == 0)
+        uAlignment = PAGE_SIZE;
+    AssertReturn(    uAlignment == PAGE_SIZE
+                 ||  uAlignment == _2M
+                 ||  uAlignment == _4M
+                 ||  uAlignment == _1G,
+                 VERR_INVALID_PARAMETER);
+#if HC_ARCH_BITS == 32
+    /* Memory allocated in this way is typically mapped into kernel space as well; simply
+       don't allow this on 32 bits hosts as the kernel space is too crowded already. */
+    if (uAlignment != PAGE_SIZE)
+        return VERR_NOT_SUPPORTED;
+#endif
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the allocation. */
+    return rtR0MemObjNativeAllocPhys(pMemObj, cbAligned, PhysHighest, uAlignment, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAllocPhysExTag);
+
+
+RTR0DECL(int) RTR0MemObjAllocPhysNCTag(PRTR0MEMOBJ pMemObj, size_t cb, RTHCPHYS PhysHighest, const char *pszTag)
+{
+    /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
+    AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
+    *pMemObj = NIL_RTR0MEMOBJ;
+    AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
+    AssertReturn(PhysHighest >= cb, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the allocation. */
+    return rtR0MemObjNativeAllocPhysNC(pMemObj, cbAligned, PhysHighest, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjAllocPhysNCTag);
+
+
+RTR0DECL(int) RTR0MemObjEnterPhysTag(PRTR0MEMOBJ pMemObj, RTHCPHYS Phys, size_t cb, uint32_t uCachePolicy, const char *pszTag)
+{
+    /* sanity checks. */
     const size_t cbAligned = RT_ALIGN_Z(cb + (Phys & PAGE_OFFSET_MASK), PAGE_SIZE);
+    const RTHCPHYS PhysAligned = Phys & ~(RTHCPHYS)PAGE_OFFSET_MASK;
+    AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
+    *pMemObj = NIL_RTR0MEMOBJ;
+    AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
     AssertReturn(Phys != NIL_RTHCPHYS, VERR_INVALID_PARAMETER);
-    const RTHCPHYS PhysAligned = Phys & ~(RTHCPHYS)PAGE_OFFSET_MASK;
+    AssertReturn(   uCachePolicy == RTMEM_CACHE_POLICY_DONT_CARE
+                 || uCachePolicy == RTMEM_CACHE_POLICY_MMIO,
+                 VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the allocation. */
-    return rtR0MemObjNativeEnterPhys(pMemObj, PhysAligned, cbAligned);
+    return rtR0MemObjNativeEnterPhys(pMemObj, PhysAligned, cbAligned, uCachePolicy, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjEnterPhysTag);
 
 
-/**
- * Reserves kernel virtual address space.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   pvFixed         Requested address. (void *)-1 means any address. This must match the alignment.
- * @param   cb              The number of bytes to reserve. This is rounded up to nearest page.
- * @param   uAlignment      The alignment of the reserved memory.
- *                          Supported values are 0 (alias for PAGE_SIZE), PAGE_SIZE, _2M and _4M.
- */
-RTR0DECL(int) RTR0MemObjReserveKernel(PRTR0MEMOBJ pMemObj, void *pvFixed, size_t cb, size_t uAlignment)
+RTR0DECL(int) RTR0MemObjReserveKernelTag(PRTR0MEMOBJ pMemObj, void *pvFixed, size_t cb, size_t uAlignment, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     if (uAlignment == 0)
         uAlignment = PAGE_SIZE;
     AssertReturn(uAlignment == PAGE_SIZE || uAlignment == _2M || uAlignment == _4M, VERR_INVALID_PARAMETER);
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
     if (pvFixed != (void *)-1)
         AssertReturn(!((uintptr_t)pvFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the reservation. */
-    return rtR0MemObjNativeReserveKernel(pMemObj, pvFixed, cbAligned, uAlignment);
+    return rtR0MemObjNativeReserveKernel(pMemObj, pvFixed, cbAligned, uAlignment, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjReserveKernelTag);
 
 
-/**
- * Reserves user virtual address space in the current process.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle.
- * @param   pvFixed         Requested address. (void *)-1 means any address. This must match the alignment.
- * @param   cb              The number of bytes to reserve. This is rounded up to nearest PAGE_SIZE.
- * @param   uAlignment      The alignment of the reserved memory.
- *                          Supported values are 0 (alias for PAGE_SIZE), PAGE_SIZE, _2M and _4M.
- */
-RTR0DECL(int) RTR0MemObjReserveUser(PRTR0MEMOBJ pMemObj, void *pvFixed, size_t cb, size_t uAlignment)
+RTR0DECL(int) RTR0MemObjReserveUserTag(PRTR0MEMOBJ pMemObj, RTR3PTR R3PtrFixed, size_t cb,
+                                       size_t uAlignment, RTR0PROCESS R0Process, const char *pszTag)
 {
     /* sanity checks. */
+    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
     if (uAlignment == 0)
         uAlignment = PAGE_SIZE;
     AssertReturn(uAlignment == PAGE_SIZE || uAlignment == _2M || uAlignment == _4M, VERR_INVALID_PARAMETER);
     AssertReturn(cb > 0, VERR_INVALID_PARAMETER);
-    const size_t cbAligned = RT_ALIGN_Z(cb, PAGE_SIZE);
     AssertReturn(cb <= cbAligned, VERR_INVALID_PARAMETER);
-    if (pvFixed != (void *)-1)
-        AssertReturn(!((uintptr_t)pvFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
+    if (R3PtrFixed != (RTR3PTR)-1)
+        AssertReturn(!(R3PtrFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
+    if (R0Process == NIL_RTR0PROCESS)
+        R0Process = RTR0ProcHandleSelf();
+    RT_ASSERT_PREEMPTIBLE();
 
     /* do the reservation. */
-    return rtR0MemObjNativeReserveUser(pMemObj, pvFixed, cbAligned, uAlignment);
+    return rtR0MemObjNativeReserveUser(pMemObj, R3PtrFixed, cbAligned, uAlignment, R0Process, pszTag);
 }
+RT_EXPORT_SYMBOL(RTR0MemObjReserveUserTag);
 
 
-/**
- * Maps a memory object into kernel virtual address space.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle of the mapping object.
- * @param   MemToMap        The object to be map.
- * @param   pvFixed         Requested address. (void *)-1 means any address. This must match the alignment.
- * @param   uAlignment      The alignment of the reserved memory.
- *                          Supported values are 0 (alias for PAGE_SIZE), PAGE_SIZE, _2M and _4M.
- * @param   fProt           Combination of RTMEM_PROT_* flags (except RTMEM_PROT_NONE).
- */
-RTR0DECL(int) RTR0MemObjMapKernel(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, void *pvFixed, size_t uAlignment, unsigned fProt)
+RTR0DECL(int) RTR0MemObjMapKernelTag(PRTR0MEMOBJ pMemObj, RTR0MEMOBJ MemObjToMap, void *pvFixed,
+                                     size_t uAlignment, unsigned fProt, const char *pszTag)
 {
+    return RTR0MemObjMapKernelExTag(pMemObj, MemObjToMap, pvFixed, uAlignment, fProt, 0, 0, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjMapKernelTag);
+
+
+RTR0DECL(int) RTR0MemObjMapKernelExTag(PRTR0MEMOBJ pMemObj, RTR0MEMOBJ MemObjToMap, void *pvFixed, size_t uAlignment,
+                                       unsigned fProt, size_t offSub, size_t cbSub, const char *pszTag)
+{
+    PRTR0MEMOBJINTERNAL pMemToMap;
+    PRTR0MEMOBJINTERNAL pNew;
+    int                 rc;
+
     /* sanity checks. */
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
     *pMemObj = NIL_RTR0MEMOBJ;
-    AssertPtrReturn(MemToMap, VERR_INVALID_HANDLE);
-    PRTR0MEMOBJINTERNAL pMemToMap = (PRTR0MEMOBJINTERNAL)pMemToMap;
+    AssertPtrReturn(MemObjToMap, VERR_INVALID_HANDLE);
+    pMemToMap = (PRTR0MEMOBJINTERNAL)MemObjToMap;
     AssertReturn(pMemToMap->u32Magic == RTR0MEMOBJ_MAGIC, VERR_INVALID_HANDLE);
     AssertReturn(pMemToMap->enmType > RTR0MEMOBJTYPE_INVALID && pMemToMap->enmType < RTR0MEMOBJTYPE_END, VERR_INVALID_HANDLE);
     AssertReturn(!rtR0MemObjIsMapping(pMemToMap), VERR_INVALID_PARAMETER);
@@ -555,11 +731,19 @@ RTR0DECL(int) RTR0MemObjMapKernel(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, voi
         AssertReturn(!((uintptr_t)pvFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
     AssertReturn(fProt != RTMEM_PROT_NONE, VERR_INVALID_PARAMETER);
     AssertReturn(!(fProt & ~(RTMEM_PROT_READ | RTMEM_PROT_WRITE | RTMEM_PROT_EXEC)), VERR_INVALID_PARAMETER);
+    AssertReturn(!(offSub & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(offSub < pMemToMap->cb, VERR_INVALID_PARAMETER);
+    AssertReturn(!(cbSub & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(cbSub <= pMemToMap->cb, VERR_INVALID_PARAMETER);
+    AssertReturn((!offSub && !cbSub) || (offSub + cbSub) <= pMemToMap->cb, VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
 
+    /* adjust the request to simplify the native code. */
+    if (offSub == 0 && cbSub == pMemToMap->cb)
+        cbSub = 0;
 
     /* do the mapping. */
-    PRTR0MEMOBJINTERNAL pNew;
-    int rc = rtR0MemObjNativeMapKernel(&pNew, pMemToMap, pvFixed, uAlignment, fProt);
+    rc = rtR0MemObjNativeMapKernel(&pNew, pMemToMap, pvFixed, uAlignment, fProt, offSub, cbSub, pszTag);
     if (RT_SUCCESS(rc))
     {
         /* link it. */
@@ -579,26 +763,28 @@ RTR0DECL(int) RTR0MemObjMapKernel(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, voi
 
     return rc;
 }
+RT_EXPORT_SYMBOL(RTR0MemObjMapKernelExTag);
 
 
-/**
- * Maps a memory object into user virtual address space in the current process.
- *
- * @returns IPRT status code.
- * @param   pMemObj         Where to store the ring-0 memory object handle of the mapping object.
- * @param   MemToMap        The object to be map.
- * @param   pvFixed         Requested address. (void *)-1 means any address. This must match the alignment.
- * @param   uAlignment      The alignment of the reserved memory.
- *                          Supported values are 0 (alias for PAGE_SIZE), PAGE_SIZE, _2M and _4M.
- * @param   fProt           Combination of RTMEM_PROT_* flags (except RTMEM_PROT_NONE).
- */
-RTR0DECL(int) RTR0MemObjMapUser(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, void *pvFixed, size_t uAlignment, unsigned fProt)
+RTR0DECL(int) RTR0MemObjMapUserTag(PRTR0MEMOBJ pMemObj, RTR0MEMOBJ MemObjToMap, RTR3PTR R3PtrFixed,
+                                   size_t uAlignment, unsigned fProt, RTR0PROCESS R0Process, const char *pszTag)
+{
+    return RTR0MemObjMapUserExTag(pMemObj, MemObjToMap, R3PtrFixed, uAlignment, fProt, R0Process, 0, 0, pszTag);
+}
+RT_EXPORT_SYMBOL(RTR0MemObjMapUserTag);
+
+
+RTR0DECL(int) RTR0MemObjMapUserExTag(PRTR0MEMOBJ pMemObj, RTR0MEMOBJ MemObjToMap, RTR3PTR R3PtrFixed, size_t uAlignment,
+                                     unsigned fProt, RTR0PROCESS R0Process, size_t offSub, size_t cbSub, const char *pszTag)
 {
     /* sanity checks. */
+    PRTR0MEMOBJINTERNAL pMemToMap;
+    PRTR0MEMOBJINTERNAL pNew;
+    int rc;
     AssertPtrReturn(pMemObj, VERR_INVALID_POINTER);
+    pMemToMap = (PRTR0MEMOBJINTERNAL)MemObjToMap;
     *pMemObj = NIL_RTR0MEMOBJ;
-    AssertPtrReturn(MemToMap, VERR_INVALID_HANDLE);
-    PRTR0MEMOBJINTERNAL pMemToMap = (PRTR0MEMOBJINTERNAL)pMemToMap;
+    AssertPtrReturn(MemObjToMap, VERR_INVALID_HANDLE);
     AssertReturn(pMemToMap->u32Magic == RTR0MEMOBJ_MAGIC, VERR_INVALID_HANDLE);
     AssertReturn(pMemToMap->enmType > RTR0MEMOBJTYPE_INVALID && pMemToMap->enmType < RTR0MEMOBJTYPE_END, VERR_INVALID_HANDLE);
     AssertReturn(!rtR0MemObjIsMapping(pMemToMap), VERR_INVALID_PARAMETER);
@@ -606,15 +792,25 @@ RTR0DECL(int) RTR0MemObjMapUser(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, void 
     if (uAlignment == 0)
         uAlignment = PAGE_SIZE;
     AssertReturn(uAlignment == PAGE_SIZE || uAlignment == _2M || uAlignment == _4M, VERR_INVALID_PARAMETER);
-    if (pvFixed != (void *)-1)
-        AssertReturn(!((uintptr_t)pvFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
+    if (R3PtrFixed != (RTR3PTR)-1)
+        AssertReturn(!(R3PtrFixed & (uAlignment - 1)), VERR_INVALID_PARAMETER);
     AssertReturn(fProt != RTMEM_PROT_NONE, VERR_INVALID_PARAMETER);
     AssertReturn(!(fProt & ~(RTMEM_PROT_READ | RTMEM_PROT_WRITE | RTMEM_PROT_EXEC)), VERR_INVALID_PARAMETER);
+    AssertReturn(!(offSub & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(offSub < pMemToMap->cb, VERR_INVALID_PARAMETER);
+    AssertReturn(!(cbSub & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(cbSub <= pMemToMap->cb, VERR_INVALID_PARAMETER);
+    AssertReturn((!offSub && !cbSub) || (offSub + cbSub) <= pMemToMap->cb, VERR_INVALID_PARAMETER);
+    if (R0Process == NIL_RTR0PROCESS)
+        R0Process = RTR0ProcHandleSelf();
+    RT_ASSERT_PREEMPTIBLE();
 
+    /* adjust the request to simplify the native code. */
+    if (offSub == 0 && cbSub == pMemToMap->cb)
+        cbSub = 0;
 
     /* do the mapping. */
-    PRTR0MEMOBJINTERNAL pNew;
-    int rc = rtR0MemObjNativeMapUser(&pNew, pMemToMap, pvFixed, uAlignment, fProt);
+    rc = rtR0MemObjNativeMapUser(&pNew, pMemToMap, R3PtrFixed, uAlignment, fProt, R0Process, offSub, cbSub, pszTag);
     if (RT_SUCCESS(rc))
     {
         /* link it. */
@@ -634,4 +830,34 @@ RTR0DECL(int) RTR0MemObjMapUser(PRTR0MEMOBJ pMemObj, PRTR0MEMOBJ MemToMap, void 
 
     return rc;
 }
+RT_EXPORT_SYMBOL(RTR0MemObjMapUserExTag);
+
+
+RTR0DECL(int) RTR0MemObjProtect(RTR0MEMOBJ hMemObj, size_t offSub, size_t cbSub, uint32_t fProt)
+{
+    PRTR0MEMOBJINTERNAL pMemObj;
+    int                 rc;
+
+    /* sanity checks. */
+    pMemObj = (PRTR0MEMOBJINTERNAL)hMemObj;
+    AssertPtrReturn(pMemObj, VERR_INVALID_HANDLE);
+    AssertReturn(pMemObj->u32Magic == RTR0MEMOBJ_MAGIC, VERR_INVALID_HANDLE);
+    AssertReturn(pMemObj->enmType > RTR0MEMOBJTYPE_INVALID && pMemObj->enmType < RTR0MEMOBJTYPE_END, VERR_INVALID_HANDLE);
+    AssertReturn(rtR0MemObjIsProtectable(pMemObj), VERR_INVALID_PARAMETER);
+    AssertReturn(!(offSub & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(offSub < pMemObj->cb, VERR_INVALID_PARAMETER);
+    AssertReturn(!(cbSub  & PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(cbSub <= pMemObj->cb, VERR_INVALID_PARAMETER);
+    AssertReturn(offSub + cbSub <= pMemObj->cb, VERR_INVALID_PARAMETER);
+    AssertReturn(!(fProt & ~(RTMEM_PROT_NONE | RTMEM_PROT_READ | RTMEM_PROT_WRITE | RTMEM_PROT_EXEC)), VERR_INVALID_PARAMETER);
+    RT_ASSERT_PREEMPTIBLE();
+
+    /* do the job */
+    rc = rtR0MemObjNativeProtect(pMemObj, offSub, cbSub, fProt);
+    if (RT_SUCCESS(rc))
+        pMemObj->fFlags |= RTR0MEMOBJ_FLAGS_PROT_CHANGED; /* record it */
+
+    return rc;
+}
+RT_EXPORT_SYMBOL(RTR0MemObjProtect);
 

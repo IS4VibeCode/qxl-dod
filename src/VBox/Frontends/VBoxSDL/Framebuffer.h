@@ -1,3 +1,4 @@
+/* $Id: Framebuffer.h 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
  *
  * VBox frontends: VBoxSDL (simple frontend based on SDL):
@@ -5,134 +6,135 @@
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef __H_FRAMEBUFFER
-#define __H_FRAMEBUFFER
+#ifndef VBOX_INCLUDED_SRC_VBoxSDL_Framebuffer_h
+#define VBOX_INCLUDED_SRC_VBoxSDL_Framebuffer_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include "VBoxSDL.h"
 #include <iprt/thread.h>
 
 #include <iprt/critsect.h>
 
-#ifdef VBOX_SECURELABEL
-#include <SDL_ttf.h>
-/* function pointers */
-extern "C"
-{
-extern DECLSPEC int (SDLCALL *pTTF_Init)(void);
-extern DECLSPEC TTF_Font* (SDLCALL *pTTF_OpenFont)(const char *file, int ptsize);
-extern DECLSPEC SDL_Surface* (SDLCALL *pTTF_RenderUTF8_Solid)(TTF_Font *font, const char *text, SDL_Color fg);
-extern DECLSPEC void (SDLCALL *pTTF_CloseFont)(TTF_Font *font);
-extern DECLSPEC void (SDLCALL *pTTF_Quit)(void);
-}
-#endif /* VBOX_SECURELABEL */
-
 class VBoxSDLFBOverlay;
 
-class VBoxSDLFB :
-    public IFramebuffer
+class ATL_NO_VTABLE VBoxSDLFB :
+    public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+    VBOX_SCRIPTABLE_IMPL(IFramebuffer)
 {
 public:
-    VBoxSDLFB(bool fFullscreen = false, bool fResizable = true, bool fShowSDLConfig = false,
-              int ulFixedWidth = ~0, int ulFixedHeight = ~0, int ulFixedBPP = ~0);
+    VBoxSDLFB();
     virtual ~VBoxSDLFB();
 
-#ifdef __WIN__
-    STDMETHOD_(ULONG, AddRef)()
-    {
-        return ::InterlockedIncrement (&refcnt);
-    }
-    STDMETHOD_(ULONG, Release)()
-    {
-        long cnt = ::InterlockedDecrement (&refcnt);
-        if (cnt == 0)
-            delete this;
-        return cnt;
-    }
-    STDMETHOD(QueryInterface) (REFIID riid , void **ppObj)
-    {
-        if (riid == IID_IUnknown)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        if (riid == IID_IFramebuffer)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppObj = NULL;
-        return E_NOINTERFACE;
-    }
-#endif
+    HRESULT init(uint32_t uScreenId,
+                 bool fFullscreen, bool fResizable, bool fShowSDLConfig,
+                 bool fKeepHostRes, uint32_t u32FixedWidth,
+                 uint32_t u32FixedHeight, uint32_t u32FixedBPP,
+                 bool fUpdateImage);
 
-    NS_DECL_ISUPPORTS
+    static bool init(bool fShowSDLConfig);
+    static void uninit();
+
+    DECLARE_NOT_AGGREGATABLE(VBoxSDLFB)
+
+    DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+    BEGIN_COM_MAP(VBoxSDLFB)
+        COM_INTERFACE_ENTRY(IFramebuffer)
+        COM_INTERFACE_ENTRY2(IDispatch,IFramebuffer)
+        COM_INTERFACE_ENTRY_AGGREGATE(IID_IMarshal, m_pUnkMarshaler.m_p)
+    END_COM_MAP()
+
+    HRESULT FinalConstruct();
+    void FinalRelease();
 
     STDMETHOD(COMGETTER(Width))(ULONG *width);
     STDMETHOD(COMGETTER(Height))(ULONG *height);
-    STDMETHOD(Lock)();
-    STDMETHOD(Unlock)();
-    STDMETHOD(COMGETTER(Address))(ULONG *address);
-    STDMETHOD(COMGETTER(ColorDepth))(ULONG *colorDepth);
-    STDMETHOD(COMGETTER(LineSize))(ULONG *lineSize);
-    STDMETHOD(COMGETTER(PixelFormat)) (FramebufferPixelFormat_T *pixelFormat);
-    STDMETHOD(COMGETTER(HeightReduction)) (ULONG *heightReduction);
-    STDMETHOD(COMGETTER(Overlay)) (IFramebufferOverlay **aOverlay);
+    STDMETHOD(COMGETTER(BitsPerPixel))(ULONG *bitsPerPixel);
+    STDMETHOD(COMGETTER(BytesPerLine))(ULONG *bytesPerLine);
+    STDMETHOD(COMGETTER(PixelFormat))(BitmapFormat_T *pixelFormat);
+    STDMETHOD(COMGETTER(HeightReduction))(ULONG *heightReduction);
+    STDMETHOD(COMGETTER(Overlay))(IFramebufferOverlay **aOverlay);
+    STDMETHOD(COMGETTER(WinId))(LONG64 *winId);
+    STDMETHOD(COMGETTER(Capabilities))(ComSafeArrayOut(FramebufferCapabilities_T, aCapabilities));
 
-    STDMETHOD(NotifyUpdate)(ULONG x, ULONG y,
-                            ULONG w, ULONG h, BOOL *finished);
-    STDMETHOD(RequestResize)(FramebufferPixelFormat_T pixelFormat, ULONG vram, ULONG lineSize, ULONG w, ULONG h,
-                             BOOL *finished);
-    STDMETHOD(OperationSupported)(FramebufferAccelerationOperation_T operation, BOOL *supported);
+    STDMETHOD(NotifyUpdate)(ULONG x, ULONG y, ULONG w, ULONG h);
+    STDMETHOD(NotifyUpdateImage)(ULONG x, ULONG y, ULONG w, ULONG h, ComSafeArrayIn(BYTE, aImage));
+    STDMETHOD(NotifyChange)(ULONG aScreenId,
+                            ULONG aXOrigin,
+                            ULONG aYOrigin,
+                            ULONG aWidth,
+                            ULONG aHeight);
     STDMETHOD(VideoModeSupported)(ULONG width, ULONG height, ULONG bpp, BOOL *supported);
-    STDMETHOD(SolidFill)(ULONG x, ULONG y, ULONG width, ULONG height,
-                         ULONG color, BOOL *handled);
-    STDMETHOD(CopyScreenBits)(ULONG xDst, ULONG yDst, ULONG xSrc, ULONG ySrc,
-                              ULONG width, ULONG height, BOOL *handled);
+
+    STDMETHOD(GetVisibleRegion)(BYTE *aRectangles, ULONG aCount, ULONG *aCountCopied);
+    STDMETHOD(SetVisibleRegion)(BYTE *aRectangles, ULONG aCount);
+
+    STDMETHOD(ProcessVHWACommand)(BYTE *pCommand, LONG enmCmd, BOOL fGuestCmd);
+
+    STDMETHOD(Notify3DEvent)(ULONG uType, ComSafeArrayIn(BYTE, aData));
 
     // internal public methods
     bool initialized() { return mfInitialized; }
+    void notifyChange(ULONG aScreenId);
     void resizeGuest();
     void resizeSDL();
     void update(int x, int y, int w, int h, bool fGuestRelative);
     void repaint();
-    bool getFullscreen();
     void setFullscreen(bool fFullscreen);
-    int  getXOffset();
-    int  getYOffset();
+    void getFullscreenGeometry(uint32_t *width, uint32_t *height);
+    uint32_t getScreenId() { return mScreenId; }
     uint32_t getGuestXRes() { return mGuestXRes; }
     uint32_t getGuestYRes() { return mGuestYRes; }
-#ifdef VBOX_SECURELABEL
-    int  initSecureLabel(uint32_t height, char *font, uint32_t pointsize);
-    void setSecureLabelText(const char *text);
-    void setSecureLabelColor(uint32_t colorFG, uint32_t colorBG);
-    void paintSecureLabel(int x, int y, int w, int h, bool fForce);
-#endif
-    void uninit();
+    int32_t getOriginX() { return mOriginX; }
+    int32_t getOriginY() { return mOriginY; }
+    int32_t getXOffset() { return mCenterXOffset; }
+    int32_t getYOffset() { return mCenterYOffset; }
+    SDL_Window *getWindow() { return mpWindow; }
+    bool hasWindow(uint32_t id) { return SDL_GetWindowID(mpWindow) == id; }
+    int setWindowTitle(const char *pcszTitle);
+    void setWinId(int64_t winId) { mWinId = winId; }
+    void setOrigin(int32_t axOrigin, int32_t ayOrigin) { mOriginX = axOrigin; mOriginY = ayOrigin; }
+    bool getFullscreen() { return mfFullscreen; }
 
 private:
-    /** the sdl thread */
-    RTNATIVETHREAD mSdlNativeThread;
-    /** current SDL framebuffer pointer (also includes screen width/height) */
-    SDL_Surface *mScreen;
+
+    /** the SDL window */
+    SDL_Window *mpWindow;
+    /** the texture */
+    SDL_Texture *mpTexture;
+    /** renderer */
+    SDL_Renderer *mpRenderer;
+    /** render info */
+    SDL_RendererInfo mRenderInfo;
     /** false if constructor failed */
     bool mfInitialized;
+    /** the screen number of this framebuffer */
+    uint32_t mScreenId;
+    /** use NotifyUpdateImage */
+    bool mfUpdateImage;
     /** maximum possible screen width in pixels (~0 = no restriction) */
     uint32_t mMaxScreenWidth;
     /** maximum possible screen height in pixels (~0 = no restriction) */
@@ -141,6 +143,8 @@ private:
     ULONG mGuestXRes;
     /** current guest screen height in pixels */
     ULONG mGuestYRes;
+    int32_t mOriginX;
+    int32_t mOriginY;
     /** fixed SDL screen width (~0 = not set) */
     uint32_t mFixedSDLWidth;
     /** fixed SDL screen height (~0 = not set) */
@@ -155,36 +159,31 @@ private:
     uint32_t mCenterYOffset;
     /** flag whether we're in fullscreen mode */
     bool  mfFullscreen;
+    /** flag whether we keep the host screen resolution when switching to
+     *  fullscreen or not */
+    bool  mfKeepHostRes;
     /** framebuffer update semaphore */
     RTCRITSECT mUpdateLock;
     /** flag whether the SDL window should be resizable */
     bool mfResizable;
     /** flag whether we print out SDL information */
     bool mfShowSDLConfig;
-#ifdef VBOX_SECURELABEL
-    /** current secure label text */
-    Utf8Str mSecureLabelText;
-    /** current secure label foreground color (RGB) */
-    uint32_t mSecureLabelColorFG;
-    /** current secure label background color (RGB) */
-    uint32_t mSecureLabelColorBG;
-    /** secure label font handle */
-    TTF_Font *mLabelFont;
-    /** secure label height in pixels */
-    uint32_t mLabelHeight;
-#endif
-#ifdef __WIN__
-    long refcnt;
-#endif
+    /** handle to window where framebuffer context is being drawn*/
+    int64_t mWinId;
     SDL_Surface *mSurfVRAM;
 
-    void *mPtrVRAM;
-    ULONG mLineSize;
-    FramebufferPixelFormat_T mPixelFormat;
+    BYTE *mPtrVRAM;
+    ULONG mBitsPerPixel;
+    ULONG mBytesPerLine;
+    BOOL mfSameSizeRequested;
 
-    /** the application Icon */
-    SDL_Surface *mWMIcon;
+    ComPtr<IDisplaySourceBitmap> mpSourceBitmap;
+    ComPtr<IDisplaySourceBitmap> mpPendingSourceBitmap;
+    bool mfUpdates;
 
+#ifdef RT_OS_WINDOWS
+     ComPtr<IUnknown> m_pUnkMarshaler;
+#endif
 };
 
 class VBoxSDLFBOverlay :
@@ -195,36 +194,20 @@ public:
                      VBoxSDLFB *aParent);
     virtual ~VBoxSDLFBOverlay();
 
-#ifdef __WIN__
+#ifdef RT_OS_WINDOWS
     STDMETHOD_(ULONG, AddRef)()
     {
-        return ::InterlockedIncrement (&refcnt);
+        return ::InterlockedIncrement(&refcnt);
     }
     STDMETHOD_(ULONG, Release)()
     {
-        long cnt = ::InterlockedDecrement (&refcnt);
+        long cnt = ::InterlockedDecrement(&refcnt);
         if (cnt == 0)
             delete this;
         return cnt;
     }
-    STDMETHOD(QueryInterface) (REFIID riid , void **ppObj)
-    {
-        if (riid == IID_IUnknown)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        if (riid == IID_IFramebuffer)
-        {
-            *ppObj = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppObj = NULL;
-        return E_NOINTERFACE;
-    }
 #endif
+    VBOX_SCRIPTABLE_DISPATCH_IMPL(IFramebuffer)
 
     NS_DECL_ISUPPORTS
 
@@ -236,29 +219,24 @@ public:
     STDMETHOD(COMSETTER(Visible))(BOOL visible);
     STDMETHOD(COMGETTER(Alpha))(ULONG *alpha);
     STDMETHOD(COMSETTER(Alpha))(ULONG alpha);
-    STDMETHOD(COMGETTER(Address))(ULONG *address);
-    STDMETHOD(COMGETTER(LineSize))(ULONG *lineSize);
+    STDMETHOD(COMGETTER(BytesPerLine))(ULONG *bytesPerLine);
 
     /* These are not used, or return standard values. */
-    STDMETHOD(COMGETTER(ColorDepth))(ULONG *colorDepth);
-    STDMETHOD(COMGETTER(PixelFormat)) (FramebufferPixelFormat_T *pixelFormat);
-    STDMETHOD(COMGETTER(HeightReduction)) (ULONG *heightReduction);
-    STDMETHOD(COMGETTER(Overlay)) (IFramebufferOverlay **aOverlay);
+    STDMETHOD(COMGETTER(BitsPerPixel))(ULONG *bitsPerPixel);
+    STDMETHOD(COMGETTER(PixelFormat))(ULONG *pixelFormat);
+    STDMETHOD(COMGETTER(UsesGuestVRAM))(BOOL *usesGuestVRAM);
+    STDMETHOD(COMGETTER(HeightReduction))(ULONG *heightReduction);
+    STDMETHOD(COMGETTER(Overlay))(IFramebufferOverlay **aOverlay);
+    STDMETHOD(COMGETTER(WinId))(LONG64 *winId);
 
     STDMETHOD(Lock)();
     STDMETHOD(Unlock)();
     STDMETHOD(Move)(ULONG x, ULONG y);
-    STDMETHOD(NotifyUpdate)(ULONG x, ULONG y,
-                            ULONG w, ULONG h, BOOL *finished);
-    STDMETHOD(RequestResize)(FramebufferPixelFormat_T pixelFormat, ULONG vram,
-                             ULONG lineSize, ULONG w, ULONG h, BOOL *finished);
-    STDMETHOD(OperationSupported)(FramebufferAccelerationOperation_T operation,
-                                  BOOL *supported);
+    STDMETHOD(NotifyUpdate)(ULONG x, ULONG y, ULONG w, ULONG h);
+    STDMETHOD(RequestResize)(ULONG aScreenId, ULONG pixelFormat, ULONG vram,
+                             ULONG bitsPerPixel, ULONG bytesPerLine,
+                             ULONG w, ULONG h, BOOL *finished);
     STDMETHOD(VideoModeSupported)(ULONG width, ULONG height, ULONG bpp, BOOL *supported);
-    STDMETHOD(SolidFill)(ULONG x, ULONG y, ULONG width, ULONG height,
-                         ULONG color, BOOL *handled);
-    STDMETHOD(CopyScreenBits)(ULONG xDst, ULONG yDst, ULONG xSrc, ULONG ySrc,
-                              ULONG width, ULONG height, BOOL *handled);
 
     // internal public methods
     HRESULT init();
@@ -280,9 +258,9 @@ private:
     SDL_Surface *mOverlayBits;
     /** Additional SDL surface used for combining the framebuffer and the overlay */
     SDL_Surface *mBlendedBits;
-#ifdef __WIN__
+#ifdef RT_OS_WINDOWS
     long refcnt;
 #endif
 };
 
-#endif // __H_FRAMEBUFFER
+#endif /* !VBOX_INCLUDED_SRC_VBoxSDL_Framebuffer_h */

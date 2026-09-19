@@ -1,26 +1,43 @@
 /** @file
- *
- * InnoTek Portable Runtime - Unicode Code Points.
+ * IPRT - Unicode Code Points.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-#ifndef __iprt_uni_h__
-#define __iprt_uni_h__
+#ifndef IPRT_INCLUDED_uni_h
+#define IPRT_INCLUDED_uni_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 /** @defgroup grp_rt_uni    RTUniCp - Unicode Code Points
  * @ingroup grp_rt
@@ -30,7 +47,7 @@
 /** @def RTUNI_USE_WCTYPE
  * Define RTUNI_USE_WCTYPE to not use the IPRT unicode data but the
  * data which the C runtime library provides. */
-#ifdef __DOXYGEN__
+#ifdef DOXYGEN_RUNNING
 # define RTUNI_USE_WCTYPE
 #endif
 
@@ -39,20 +56,11 @@
 # include <wctype.h>
 #endif
 
-__BEGIN_DECLS
-
-
-/** Max value a RTUNICP type can hold. */
-#define RTUNICP_MAX         ( ~(RTUNICP)0 )
-
-/** Invalid code point.
- * This is returned when encountered invalid encodings or invalid
- * unicode code points. */
-#define RTUNICP_INVALID     ( 0xfffffffe )
-
+RT_C_DECLS_BEGIN
 
 
 #ifndef RTUNI_USE_WCTYPE
+
 /**
  * A unicode flags range.
  * @internal
@@ -96,13 +104,16 @@ typedef const RTUNICASERANGE *PCRTUNICASERANGE;
 /** @name Unicode Code Point Flags.
  * @internal
  * @{ */
-#define RTUNI_UPPER  BIT(0)
-#define RTUNI_LOWER  BIT(1)
-#define RTUNI_ALPHA  BIT(2)
-#define RTUNI_XDIGIT BIT(3)
-#define RTUNI_DDIGIT BIT(4)
-#define RTUNI_WSPACE BIT(5)
-/*#define RTUNI_BSPACE BIT(6) - later */
+#define RTUNI_UPPER         RT_BIT(0)
+#define RTUNI_LOWER         RT_BIT(1)
+#define RTUNI_ALPHA         RT_BIT(2)
+#define RTUNI_XDIGIT        RT_BIT(3)
+#define RTUNI_DDIGIT        RT_BIT(4)
+#define RTUNI_WSPACE        RT_BIT(5)
+/*#define RTUNI_BSPACE RT_BIT(6) - later */
+/** When set, the codepoint requires further checking wrt NFC and NFD
+ * normalization. I.e. set when either of QC_NFD and QC_NFC are not Y. */
+#define RTUNI_QC_NFX        RT_BIT(7)
 /** @} */
 
 
@@ -127,12 +138,12 @@ DECLINLINE(RTUNICP) rtUniCpFlags(RTUNICP CodePoint)
         if (pCur->EndCP > CodePoint)
         {
             if (pCur->BeginCP <= CodePoint)
-                CodePoint = pCur->pafFlags[CodePoint - pCur->BeginCP];
+                return pCur->pafFlags[CodePoint - pCur->BeginCP];
             break;
         }
         pCur++;
     } while (pCur->EndCP != RTUNICP_MAX);
-    return CodePoint;
+    return 0;
 }
 
 
@@ -159,6 +170,20 @@ DECLINLINE(bool) RTUniCpIsUpper(RTUNICP CodePoint)
 DECLINLINE(bool) RTUniCpIsLower(RTUNICP CodePoint)
 {
     return (rtUniCpFlags(CodePoint) & RTUNI_LOWER) != 0;
+}
+
+
+/**
+ * Checks if a unicode code point is case foldable.
+ *
+ * @returns true if it is.
+ * @returns false if it isn't.
+ * @param   CodePoint       The code point.
+ */
+DECLINLINE(bool) RTUniCpIsFoldable(RTUNICP CodePoint)
+{
+    /* Right enough. */
+    return (rtUniCpFlags(CodePoint) & (RTUNI_LOWER | RTUNI_UPPER)) != 0;
 }
 
 
@@ -305,6 +330,20 @@ DECLINLINE(bool) RTUniCpIsLower(RTUNICP CodePoint)
 
 
 /**
+ * Checks if a unicode code point is case foldable.
+ *
+ * @returns true if it is.
+ * @returns false if it isn't.
+ * @param   CodePoint       The code point.
+ */
+DECLINLINE(bool) RTUniCpIsFoldable(RTUNICP CodePoint)
+{
+    /* Right enough. */
+    return iswupper(CodePoint) || iswlower(CodePoint);
+}
+
+
+/**
  * Checks if a unicode code point is alphabetic.
  *
  * @returns true if it is.
@@ -391,9 +430,62 @@ DECLINLINE(RTUNICP) RTUniCpToLower(RTUNICP CodePoint)
 RTDECL(void) RTUniFree(PRTUNICP pusz);
 
 
-__END_DECLS
+/**
+ * Checks if a code point valid.
+ *
+ * Any code point (defined or not) within the 17 unicode planes (0 thru 16),
+ * except surrogates will be considered valid code points by this function.
+ *
+ * @returns true if in range, false if not.
+ * @param   CodePoint       The unicode code point to validate.
+ */
+DECLINLINE(bool) RTUniCpIsValid(RTUNICP CodePoint)
+{
+    return CodePoint <= 0x00d7ff
+        || (   CodePoint <= 0x10ffff
+            && CodePoint >= 0x00e000);
+}
+
+
+/**
+ * Checks if the given code point is in the BMP range.
+ *
+ * Surrogates are not considered in the BMP range by this function.
+ *
+ * @returns true if in BMP, false if not.
+ * @param   CodePoint       The unicode code point to consider.
+ */
+DECLINLINE(bool) RTUniCpIsBMP(RTUNICP CodePoint)
+{
+    return CodePoint <= 0xd7ff
+        || (   CodePoint <= 0xffff
+            && CodePoint >= 0xe000);
+}
+
+
+/**
+ * Folds a unicode code point to lower case.
+ *
+ * @returns Folded code point.
+ * @param   CodePoint       The unicode code point to fold.
+ */
+DECLINLINE(size_t) RTUniCpCalcUtf8Len(RTUNICP CodePoint)
+{
+    if (CodePoint < 0x80)
+        return 1;
+    return 2
+        + (CodePoint >= 0x00000800)
+        + (CodePoint >= 0x00010000)
+        + (CodePoint >= 0x00200000)
+        + (CodePoint >= 0x04000000)
+        + (CodePoint >= 0x80000000) /* illegal */;
+}
+
+
+
+RT_C_DECLS_END
 /** @} */
 
 
-#endif
+#endif /* !IPRT_INCLUDED_uni_h */
 

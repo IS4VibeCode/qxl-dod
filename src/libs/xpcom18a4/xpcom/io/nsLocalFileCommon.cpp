@@ -38,7 +38,6 @@
 #include "nsIServiceManager.h"
 
 #include "nsLocalFile.h" // includes platform-specific headers
-#include "nsLocalFileUnicode.h"
 
 #include "nsString.h"
 #include "nsCOMPtr.h"
@@ -61,35 +60,29 @@ void NS_ShutdownLocalFile()
     nsLocalFile::GlobalShutdown();
 }
 
-#if !defined(XP_MAC) && !defined(XP_MACOSX)
 NS_IMETHODIMP
 nsLocalFile::InitWithFile(nsILocalFile *aFile)
 {
     NS_ENSURE_ARG(aFile);
-    
+
     nsCAutoString path;
     aFile->GetNativePath(path);
     if (path.IsEmpty())
         return NS_ERROR_INVALID_ARG;
-    return InitWithNativePath(path); 
+    return InitWithNativePath(path);
 }
-#endif
 
-#if defined(XP_MAC)
-#define kMaxFilenameLength 31
-#else
 #define kMaxFilenameLength 255
-#endif  
 
 NS_IMETHODIMP
 nsLocalFile::CreateUnique(PRUint32 type, PRUint32 attributes)
 {
     nsresult rv = Create(type, attributes);
-    
+
     if (NS_SUCCEEDED(rv)) return NS_OK;
     if (rv != NS_ERROR_FILE_ALREADY_EXISTS) return rv;
 
-    nsCAutoString leafName; 
+    nsCAutoString leafName;
     rv = GetNativeLeafName(leafName);
 
     if (NS_FAILED(rv)) return rv;
@@ -116,30 +109,21 @@ nsLocalFile::CreateUnique(PRUint32 type, PRUint32 attributes)
                           nsDependentCString(suffix));
 
         rv = Create(type, attributes);
-    
-        if (NS_SUCCEEDED(rv) || rv != NS_ERROR_FILE_ALREADY_EXISTS) 
+
+        if (NS_SUCCEEDED(rv) || rv != NS_ERROR_FILE_ALREADY_EXISTS)
         {
             return rv;
         }
     }
- 
+
     // The disk is full, sort of
     return NS_ERROR_FILE_TOO_BIG;
 }
 
-#if defined(XP_MAC)
-static const PRUnichar kPathSeparatorChar       = ':';
-#elif defined(XP_WIN) || defined(XP_OS2)
-static const PRUnichar kPathSeparatorChar       = '\\';
-#elif defined(XP_UNIX) || defined(XP_BEOS)
+#if defined(XP_UNIX)
 static const PRUnichar kPathSeparatorChar       = '/';
 #else
 #error Need to define file path separator for your platform
-#endif
-
-#if defined(XP_MAC)
-static const char kSlashStr[] = "/";
-static const char kESCSlashStr[] = "%2F";
 #endif
 
 static PRInt32 SplitPath(PRUnichar *path, PRUnichar **nodeArray, PRInt32 arrayLen)
@@ -149,9 +133,9 @@ static PRInt32 SplitPath(PRUnichar *path, PRUnichar **nodeArray, PRInt32 arrayLe
 
     PRUnichar **nodePtr = nodeArray;
     if (*path == kPathSeparatorChar)
-      path++;    
+      path++;
     *nodePtr++ = path;
-    
+
     for (PRUnichar *cp = path; *cp != 0; cp++) {
       if (*cp == kPathSeparatorChar) {
         *cp++ = 0;
@@ -165,7 +149,7 @@ static PRInt32 SplitPath(PRUnichar *path, PRUnichar **nodeArray, PRInt32 arrayLe
     return nodePtr - nodeArray;
 }
 
- 
+
 NS_IMETHODIMP
 nsLocalFile::GetRelativeDescriptor(nsILocalFile *fromFile, nsACString& _retval)
 {
@@ -174,15 +158,15 @@ nsLocalFile::GetRelativeDescriptor(nsILocalFile *fromFile, nsACString& _retval)
 
     //
     // _retval will be UTF-8 encoded
-    // 
-        
+    //
+
     nsresult rv;
     _retval.Truncate(0);
 
     nsAutoString thisPath, fromPath;
     PRUnichar *thisNodes[kMaxNodesInPath], *fromNodes[kMaxNodesInPath];
     PRInt32  thisNodeCnt, fromNodeCnt, nodeIndex;
-    
+
     rv = GetPath(thisPath);
     if (NS_FAILED(rv))
         return rv;
@@ -193,35 +177,27 @@ nsLocalFile::GetRelativeDescriptor(nsILocalFile *fromFile, nsACString& _retval)
     // get raw pointer to mutable string buffer
     PRUnichar *thisPathPtr; thisPath.BeginWriting(thisPathPtr);
     PRUnichar *fromPathPtr; fromPath.BeginWriting(fromPathPtr);
-    
+
     thisNodeCnt = SplitPath(thisPathPtr, thisNodes, kMaxNodesInPath);
     fromNodeCnt = SplitPath(fromPathPtr, fromNodes, kMaxNodesInPath);
     if (thisNodeCnt < 0 || fromNodeCnt < 0)
       return NS_ERROR_FAILURE;
-    
+
     for (nodeIndex = 0; nodeIndex < thisNodeCnt && nodeIndex < fromNodeCnt; ++nodeIndex) {
-#ifdef XP_WIN
-      if (_wcsicmp(thisNodes[nodeIndex], fromNodes[nodeIndex]))
-        break;
-#else
       if (nsCRT::strcmp(thisNodes[nodeIndex], fromNodes[nodeIndex]))
         break;
-#endif
     }
-    
+
     PRInt32 branchIndex = nodeIndex;
-    for (nodeIndex = branchIndex; nodeIndex < fromNodeCnt; nodeIndex++) 
+    for (nodeIndex = branchIndex; nodeIndex < fromNodeCnt; nodeIndex++)
       _retval.AppendLiteral("../");
     for (nodeIndex = branchIndex; nodeIndex < thisNodeCnt; nodeIndex++) {
       NS_ConvertUCS2toUTF8 nodeStr(thisNodes[nodeIndex]);
-#ifdef XP_MAC
-      nodeStr.ReplaceSubstring(kSlashStr, kESCSlashStr);
-#endif
       _retval.Append(nodeStr);
       if (nodeIndex + 1 < thisNodeCnt)
         _retval.Append('/');
     }
-        
+
     return NS_OK;
 }
 
@@ -229,7 +205,7 @@ NS_IMETHODIMP
 nsLocalFile::SetRelativeDescriptor(nsILocalFile *fromFile, const nsACString& relativeDesc)
 {
     NS_NAMED_LITERAL_CSTRING(kParentDirStr, "../");
- 
+
     nsCOMPtr<nsIFile> targetFile;
     nsresult rv = fromFile->Clone(getter_AddRefs(targetFile));
     if (NS_FAILED(rv))
@@ -237,15 +213,15 @@ nsLocalFile::SetRelativeDescriptor(nsILocalFile *fromFile, const nsACString& rel
 
     //
     // relativeDesc is UTF-8 encoded
-    // 
+    //
 
     nsCString::const_iterator strBegin, strEnd;
     relativeDesc.BeginReading(strBegin);
     relativeDesc.EndReading(strEnd);
-    
+
     nsCString::const_iterator nodeBegin(strBegin), nodeEnd(strEnd);
     nsCString::const_iterator pos(strBegin);
-    
+
     nsCOMPtr<nsIFile> parentDir;
     while (FindInReadable(kParentDirStr, nodeBegin, nodeEnd)) {
         rv = targetFile->GetParent(getter_AddRefs(parentDir));
@@ -261,13 +237,7 @@ nsLocalFile::SetRelativeDescriptor(nsILocalFile *fromFile, const nsACString& rel
     nodeBegin = nodeEnd = pos;
     while (nodeEnd != strEnd) {
       FindCharInReadable('/', nodeEnd, strEnd);
-#ifdef XP_MAC
-      nsCAutoString nodeString(Substring(nodeBegin, nodeEnd));      
-      nodeString.ReplaceSubstring(kESCSlashStr, kSlashStr);
-      targetFile->Append(NS_ConvertUTF8toUCS2(nodeString));
-#else
       targetFile->Append(NS_ConvertUTF8toUCS2(Substring(nodeBegin, nodeEnd)));
-#endif
       if (nodeEnd != strEnd) // If there's more left in the string, inc over the '/' nodeEnd is on.
         ++nodeEnd;
       nodeBegin = nodeEnd;

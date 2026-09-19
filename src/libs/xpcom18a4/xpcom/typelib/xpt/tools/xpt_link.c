@@ -59,7 +59,9 @@ typedef struct fixElement fixElement;
 static int compare_IDEs_by_IID(const void *ap, const void *bp);
 static int compare_IDE_with_zero(const void *ap);
 static int compare_IDEs_by_name(const void *ap, const void *bp);
+#if 0 /* unused */
 static int compare_IDEs_by_name_space(const void *ap, const void *bp);
+#endif
 static int compare_strings(const void *ap, const void *bp);
 static int compare_pointers(const void *ap, const void *bp);
 static int compare_fixElements_by_IID(const void *ap, const void *bp);
@@ -211,30 +213,39 @@ main(int argc, char **argv)
             return 1;
         }
 
-        in = fopen(name, "rb");
-        if (!in) {
-            perror("FAILED: fopen");
-            return 1;
-        }
-
         whole = XPT_MALLOC(arena, flen);
         if (!whole) {
             perror("FAILED: XPT_MALLOC for whole");
+            return 1;
+        }
+
+        in = fopen(name, "rb");
+        if (!in) {
+            perror("FAILED: fopen");
+            XPT_FREE(arena, whole);
             return 1;
         }
         
         if (flen > 0) {
             size_t rv = fread(whole, 1, flen, in);
             if (rv < flen) {
-                fprintf(stderr, "short read (%d vs %d)! ouch!\n", rv, flen);
+                fprintf(stderr, "short read (%zd vs %zd)! ouch!\n", rv, flen);
+                fclose(in);
+                XPT_FREE(arena, whole);
                 return 1;
             }
             if (ferror(in) != 0 || fclose(in) != 0) {
                 perror("FAILED: Unable to read typelib file.\n");
+                XPT_FREE(arena, whole);
                 return 1;
             }
             
             state = XPT_NewXDRState(XPT_DECODE, whole, flen);
+            if (!state)
+            {
+                fprintf(stdout, "XPT_NewXDRState failed for %s\n", name);
+                return 1;
+            }
             if (!XPT_MakeCursor(state, XPT_HEADER, 0, cursor)) {
                 fprintf(stdout, "XPT_MakeCursor failed for %s\n", name);
                 return 1;
@@ -488,7 +499,7 @@ main(int argc, char **argv)
             
             /* Fix parent_interface first.
              */
-            if (id->parent_interface && id->parent_interface != 0) {
+            if (id->parent_interface) {
                 id->parent_interface = 
                     get_new_index(fix_array, totalNumberOfInterfaces,
                                   fix_array[i].file_num, id->parent_interface);
@@ -679,6 +690,7 @@ compare_IDEs_by_name(const void *ap,
     return answer;
 }
 
+#if 0 /* unused */
 static int 
 compare_IDEs_by_name_space(const void *ap,
                            const void *bp)
@@ -687,6 +699,7 @@ compare_IDEs_by_name_space(const void *ap,
     
     return compare_strings(ide1->name_space, ide2->name_space);
 }
+#endif
 
 static int 
 compare_strings(const void *ap, const void *bp)

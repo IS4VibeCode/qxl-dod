@@ -48,6 +48,25 @@
 
 #include "nscore.h"
 
+#ifdef VBOX_WITH_XPCOM_NAMESPACE_CLEANUP
+#define NS_CStringContainerInit VBoxNsxpNS_CStringContainerInit
+#define NS_CStringContainerFinish VBoxNsxpNS_CStringContainerFinish
+#define NS_CStringCloneData VBoxNsxpNS_CStringCloneData
+#define NS_CStringCopy VBoxNsxpNS_CStringCopy
+#define NS_CStringGetData VBoxNsxpNS_CStringGetData
+#define NS_CStringSetData VBoxNsxpNS_CStringSetData
+#define NS_CStringSetDataRange VBoxNsxpNS_CStringSetDataRange
+#define NS_UTF16ToCString VBoxNsxpNS_UTF16ToCString
+#define NS_CStringToUTF16 VBoxNsxpNS_CStringToUTF16
+#define NS_StringContainerInit VBoxNsxpNS_StringContainerInit
+#define NS_StringContainerFinish VBoxNsxpNS_StringContainerFinish
+#define NS_StringCloneData VBoxNsxpNS_StringCloneData
+#define NS_StringCopy VBoxNsxpNS_StringCopy
+#define NS_StringGetData VBoxNsxpNS_StringGetData
+#define NS_StringSetData VBoxNsxpNS_StringSetData
+#define NS_StringSetDataRange VBoxNsxpNS_StringSetDataRange
+#endif /* VBOX_WITH_XPCOM_NAMESPACE_CLEANUP */
+
 #define NS_STRINGAPI(x) extern "C" NS_COM x
 
 /* The base string types */
@@ -570,13 +589,7 @@ enum nsCStringEncoding {
   NS_CSTRING_ENCODING_ASCII = 0,
 
   /* Conversion between UTF-8 and UTF-16 is non-lossy. */
-  NS_CSTRING_ENCODING_UTF8 = 1,
-
-  /* Conversion from UTF-16 to the native filesystem charset may result in a
-   * loss of information.  No attempt is made to protect against data loss in
-   * this case.  The native filesystem charset applies to strings passed to
-   * the "Native" method variants on nsIFile and nsILocalFile. */
-  NS_CSTRING_ENCODING_NATIVE_FILESYSTEM = 2
+  NS_CSTRING_ENCODING_UTF8 = 1
 };
 
 /**

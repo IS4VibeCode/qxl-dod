@@ -1,172 +1,230 @@
+/* $Id: HostImpl.h 113422 2026-03-16 14:28:47Z alexander.eichner@oracle.com $ */
 /** @file
- *
- * VirtualBox COM class implementation
+ * Implementation of IHost.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef ____H_HOSTIMPL
-#define ____H_HOSTIMPL
-
-#include "VirtualBoxBase.h"
-#include "HostUSBDeviceImpl.h"
-#include "USBDeviceFilterImpl.h"
-
-#ifdef __WIN__
-#include "win32/svchlp.h"
+#ifndef MAIN_INCLUDED_HostImpl_h
+#define MAIN_INCLUDED_HostImpl_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
 #endif
 
-#include <VBox/cfgldr.h>
+#include "HostWrap.h"
 
-class VirtualBox;
+class HostUSBDeviceFilter;
+class USBProxyService;
 class SessionMachine;
-class HostDVDDrive;
 class Progress;
+class PerformanceCollector;
+class HostDrive;
+class HostDrivePartition;
+class HostPCIDevice;
+
+namespace settings
+{
+    struct Host;
+}
 
 #include <list>
 
 class ATL_NO_VTABLE Host :
-    public VirtualBoxBaseWithChildren,
-    public VirtualBoxSupportErrorInfoImpl <Host, IHost>,
-    public VirtualBoxSupportTranslation <Host>,
-    public IHost
+    public HostWrap
 {
 public:
 
-    DECLARE_NOT_AGGREGATABLE(Host)
-
-    DECLARE_PROTECT_FINAL_CONSTRUCT()
-
-    BEGIN_COM_MAP(Host)
-        COM_INTERFACE_ENTRY(ISupportErrorInfo)
-        COM_INTERFACE_ENTRY(IHost)
-    END_COM_MAP()
-
-    NS_DECL_ISUPPORTS
+    DECLARE_COMMON_CLASS_METHODS(Host)
 
     HRESULT FinalConstruct();
     void FinalRelease();
 
     // public initializer/uninitializer for internal purposes only
-    HRESULT init (VirtualBox *parent);
+    HRESULT init(VirtualBox *aParent);
     void uninit();
-
-    // IHost properties
-    STDMETHOD(COMGETTER(DVDDrives))(IHostDVDDriveCollection **drives);
-    STDMETHOD(COMGETTER(FloppyDrives))(IHostFloppyDriveCollection **drives);
-    STDMETHOD(COMGETTER(USBDevices))(IHostUSBDeviceCollection **aUSBDevices);
-    STDMETHOD(COMGETTER(USBDeviceFilters))(IHostUSBDeviceFilterCollection ** aUSBDeviceFilters);
-#ifdef __WIN__
-    STDMETHOD(COMGETTER(NetworkInterfaces))(IHostNetworkInterfaceCollection **networkInterfaces);
-#endif
-    STDMETHOD(COMGETTER(ProcessorCount))(ULONG *count);
-    STDMETHOD(COMGETTER(ProcessorSpeed))(ULONG *speed);
-    STDMETHOD(COMGETTER(ProcessorDescription))(BSTR *description);
-    STDMETHOD(COMGETTER(MemorySize))(ULONG *size);
-    STDMETHOD(COMGETTER(MemoryAvailable))(ULONG *available);
-    STDMETHOD(COMGETTER(OperatingSystem))(BSTR *os);
-    STDMETHOD(COMGETTER(OSVersion))(BSTR *version);
-    STDMETHOD(COMGETTER(UTCTime))(LONG64 *aUTCTime);
-
-    // IHost methods
-#ifdef __WIN__
-    STDMETHOD(CreateHostNetworkInterface) (INPTR BSTR aName,
-                                           IHostNetworkInterface **aHostNetworkInterface,
-                                           IProgress **aProgress);
-    STDMETHOD(RemoveHostNetworkInterface) (INPTR GUIDPARAM aId,
-                                           IHostNetworkInterface **aHostNetworkInterface,
-                                           IProgress **aProgress);
-#endif
-    STDMETHOD(CreateUSBDeviceFilter) (INPTR BSTR aName, IHostUSBDeviceFilter **aFilter);
-    STDMETHOD(InsertUSBDeviceFilter) (ULONG aPosition, IHostUSBDeviceFilter *aFilter);
-    STDMETHOD(RemoveUSBDeviceFilter) (ULONG aPosition, IHostUSBDeviceFilter **aFilter);
 
     // public methods only for internal purposes
 
-    HRESULT onUSBDeviceFilterChange (HostUSBDeviceFilter *aFilter,
-                                     BOOL aActiveChanged = FALSE);
+    /**
+     * Override of the default locking class to be used for validating lock
+     * order with the standard member lock handle.
+     */
+    virtual VBoxLockingClass getLockingClass() const
+    {
+        return LOCKCLASS_HOSTOBJECT;
+    }
 
-    HRESULT loadSettings (CFGNODE aGlobal);
-    HRESULT saveSettings (CFGNODE aGlobal);
+    HRESULT i_loadSettings(const settings::Host &data);
+    HRESULT i_saveSettings(settings::Host &data);
 
-    HRESULT captureUSBDevice (SessionMachine *aMachine, INPTR GUIDPARAM aId,
-                              IUSBDevice **aHostDevice);
-    HRESULT releaseUSBDevice (SessionMachine *aMachine, INPTR GUIDPARAM aId);
-    HRESULT autoCaptureUSBDevices (SessionMachine *aMachine,
-                                   IUSBDeviceCollection **aHostDevices);
-    HRESULT releaseAllUSBDevices (SessionMachine *aMachine);
+    void    i_updateProcessorFeatures();
 
-    void onUSBDeviceAttached (HostUSBDevice *aDevice);
-    void onUSBDeviceDetached (HostUSBDevice *aDevice);
-    void onUSBDeviceStateChanged (HostUSBDevice *aDevice);
+    HRESULT i_getDrives(DeviceType_T mediumType, bool fRefresh, MediaList *&pll, AutoWriteLock &treeLock);
+    HRESULT i_findHostDriveById(DeviceType_T mediumType, const Guid &uuid, bool fRefresh, ComObjPtr<Medium> &pMedium);
+    HRESULT i_findHostDriveByName(DeviceType_T mediumType, const Utf8Str &strLocationFull, bool fRefresh, ComObjPtr<Medium> &pMedium);
 
-    USBProxyService *usbProxyService() { return mUSBProxyService; }
+#ifdef VBOX_WITH_USB
+    typedef std::list< ComObjPtr<HostUSBDeviceFilter> > USBDeviceFilterList;
 
-#ifdef __WIN__
-    static int networkInterfaceHelperServer (SVCHlpClient *aClient,
-                                             SVCHlpMsg::Code aMsgCode);
-#endif
+    /** Must be called from under this object's lock. */
+    USBProxyService* i_usbProxyService();
 
-    // for VirtualBoxSupportErrorInfoImpl
-    static const wchar_t *getComponentName() { return L"Host"; }
+    HRESULT i_addChild(HostUSBDeviceFilter *pChild);
+    HRESULT i_removeChild(HostUSBDeviceFilter *pChild);
+    VirtualBox* i_parent();
+
+    HRESULT i_onUSBDeviceFilterChange(HostUSBDeviceFilter *aFilter, BOOL aActiveChanged = FALSE);
+    void i_getUSBFilters(USBDeviceFilterList *aGlobalFiltes);
+    HRESULT i_checkUSBProxyService();
+#endif /* !VBOX_WITH_USB */
+
+    static void i_generateMACAddress(Utf8Str &mac);
+    static PlatformArchitecture_T s_getPlatformArchitecture();
+
+#ifdef RT_OS_WINDOWS
+    HRESULT i_updatePersistentConfigForHostOnlyAdapters(void);
+    HRESULT i_removePersistentConfig(const Bstr &bstrGuid);
+#endif /* RT_OS_WINDOWS */
+
 
 private:
 
-#ifdef __LINUX__
-    void parseMountTable(char *mountTable, std::list <ComObjPtr <HostDVDDrive> > &list);
-    bool validateDevice(char *deviceNode, bool isCDROM);
+    // wrapped IHost properties
+    HRESULT getArchitecture(PlatformArchitecture_T *platformArchitecture);
+    HRESULT getDVDDrives(std::vector<ComPtr<IMedium> > &aDVDDrives);
+    HRESULT getFloppyDrives(std::vector<ComPtr<IMedium> > &aFloppyDrives);
+    HRESULT getAudioDevices(std::vector<ComPtr<IHostAudioDevice> > &aAudioDevices);
+    HRESULT getUSBDevices(std::vector<ComPtr<IHostUSBDevice> > &aUSBDevices);
+    HRESULT getUSBDeviceFilters(std::vector<ComPtr<IHostUSBDeviceFilter> > &aUSBDeviceFilters);
+    HRESULT getNetworkInterfaces(std::vector<ComPtr<IHostNetworkInterface> > &aNetworkInterfaces);
+    HRESULT getNameServers(std::vector<com::Utf8Str> &aNameServers);
+    HRESULT getV6NameServers(std::vector<com::Utf8Str> &aNameServers);
+    HRESULT getDomainName(com::Utf8Str &aDomainName);
+    HRESULT getSearchStrings(std::vector<com::Utf8Str> &aSearchStrings);
+    HRESULT getProcessorCount(ULONG *aProcessorCount);
+    HRESULT getProcessorOnlineCount(ULONG *aProcessorOnlineCount);
+    HRESULT getProcessorCoreCount(ULONG *aProcessorCoreCount);
+    HRESULT getProcessorOnlineCoreCount(ULONG *aProcessorOnlineCoreCount);
+    HRESULT getHostDrives(std::vector<ComPtr<IHostDrive> > &aHostDrives);
+    HRESULT getPCIDevices(std::vector<ComPtr<IHostPCIDevice> > &aPCIDevices);
+    HRESULT getMemorySize(ULONG *aMemorySize);
+    HRESULT getMemoryAvailable(ULONG *aMemoryAvailable);
+    HRESULT getOperatingSystem(com::Utf8Str &aOperatingSystem);
+    HRESULT getOSVersion(com::Utf8Str &aOSVersion);
+    HRESULT getUTCTime(LONG64 *aUTCTime);
+    HRESULT getVideoInputDevices(std::vector<ComPtr<IHostVideoInputDevice> > &aVideoInputDevices);
+    HRESULT getUpdateHost(ComPtr<IUpdateAgent> &aUpdate);
+    HRESULT getUpdateExtPack(ComPtr<IUpdateAgent> &aUpdate);
+    HRESULT getUpdateGuestAdditions(ComPtr<IUpdateAgent> &aUpdate);
+    HRESULT getUpdateResponse(BOOL *aUpdateNeeded);
+    HRESULT getUpdateVersion(com::Utf8Str &aUpdateVersion);
+    HRESULT getUpdateURL(com::Utf8Str &aUpdateURL);
+    HRESULT getUpdateCheckNeeded(BOOL *aUpdateCheckNeeded);
+    HRESULT getX86(ComPtr<IHostX86> &aHostX86);
+
+    // wrapped IHost methods
+    HRESULT getProcessorSpeed(ULONG aCpuId,
+                              ULONG *aSpeed);
+    HRESULT getProcessorFeature(ProcessorFeature_T aFeature,
+                                BOOL *aSupported);
+    HRESULT getProcessorDescription(ULONG aCpuId,
+                                    com::Utf8Str &aDescription);
+    HRESULT createHostOnlyNetworkInterface(ComPtr<IHostNetworkInterface> &aHostInterface,
+                                           ComPtr<IProgress> &aProgress);
+    HRESULT removeHostOnlyNetworkInterface(const com::Guid &aId,
+                                           ComPtr<IProgress> &aProgress);
+    HRESULT createUSBDeviceFilter(const com::Utf8Str &aName,
+                                  ComPtr<IHostUSBDeviceFilter> &aFilter);
+    HRESULT insertUSBDeviceFilter(ULONG aPosition,
+                                  const ComPtr<IHostUSBDeviceFilter> &aFilter);
+    HRESULT removeUSBDeviceFilter(ULONG aPosition);
+    HRESULT findHostDVDDrive(const com::Utf8Str &aName,
+                             ComPtr<IMedium> &aDrive);
+    HRESULT findHostFloppyDrive(const com::Utf8Str &aName,
+                                ComPtr<IMedium> &aDrive);
+    HRESULT findHostNetworkInterfaceByName(const com::Utf8Str &aName,
+                                           ComPtr<IHostNetworkInterface> &aNetworkInterface);
+    HRESULT findHostNetworkInterfaceById(const com::Guid &aId,
+                                         ComPtr<IHostNetworkInterface> &aNetworkInterface);
+    HRESULT findHostNetworkInterfacesOfType(HostNetworkInterfaceType_T aType,
+                                            std::vector<ComPtr<IHostNetworkInterface> > &aNetworkInterfaces);
+    HRESULT findUSBDeviceById(const com::Guid &aId,
+                              ComPtr<IHostUSBDevice> &aDevice);
+    HRESULT findUSBDeviceByAddress(const com::Utf8Str &aName,
+                                   ComPtr<IHostUSBDevice> &aDevice);
+    HRESULT generateMACAddress(com::Utf8Str &aAddress);
+
+    HRESULT addUSBDeviceSource(const com::Utf8Str &aBackend, const com::Utf8Str &aId, const com::Utf8Str &aAddress,
+                               const std::vector<com::Utf8Str> &aPropertyNames, const std::vector<com::Utf8Str> &aPropertyValues);
+
+    HRESULT removeUSBDeviceSource(const com::Utf8Str &aId);
+    HRESULT isExecutionEngineSupported(CPUArchitecture_T enmCpuArchitecture, VMExecutionEngine_T enmExecutionEngine, BOOL *pfIsSupported);
+
+    // Internal Methods.
+
+    HRESULT i_buildDVDDrivesList(MediaList &list);
+    HRESULT i_buildFloppyDrivesList(MediaList &list);
+    HRESULT i_findHostDriveByNameOrId(DeviceType_T mediumType, const Utf8Str &strNameOrId, ComObjPtr<Medium> &pMedium);
+
+#if defined(RT_OS_SOLARIS) && defined(VBOX_USE_LIBHAL)
+    bool i_getDVDInfoFromHal(std::list< ComObjPtr<Medium> > &list);
+    bool i_getFloppyInfoFromHal(std::list< ComObjPtr<Medium> > &list);
+    HRESULT i_getFixedDrivesFromHal(std::list<std::pair<com::Utf8Str, com::Utf8Str> > &list) RT_NOEXCEPT;
 #endif
 
-    /** specialization for IHostUSBDeviceFilter */
-    ComObjPtr <HostUSBDeviceFilter> getDependentChild (IHostUSBDeviceFilter *aFilter)
-    {
-        VirtualBoxBase *child = VirtualBoxBaseWithChildren::
-                                getDependentChild (ComPtr <IUnknown> (aFilter));
-        return child ? dynamic_cast <HostUSBDeviceFilter *> (child)
-                     : NULL;
-    }
-
-    HRESULT applyAllUSBFilters (ComObjPtr <HostUSBDevice> &aDevice,
-                                SessionMachine *aMachine = NULL);
-    void applyMachineUSBFilters (SessionMachine *aMachine,
-                                 ComObjPtr <HostUSBDevice> &aDevice);
-
-#ifdef __WIN__
-    static int createNetworkInterface (SVCHlpClient *aClient,
-                                       const Utf8Str &aName,
-                                       Guid &aGUID, Utf8Str &aErrMsg);
-    static int removeNetworkInterface (SVCHlpClient *aClient,
-                                       const Guid &aGUID,
-                                       Utf8Str &aErrMsg);
-    static HRESULT networkInterfaceHelperClient (SVCHlpClient *aClient,
-                                                 Progress *aProgress,
-                                                 void *aUser, int *aVrc);
+#if defined(RT_OS_SOLARIS)
+    void i_getDVDInfoFromDevTree(std::list< ComObjPtr<Medium> > &list);
+    void i_parseMountTable(char *mountTable, std::list< ComObjPtr<Medium> > &list);
+    bool i_validateDevice(const char *deviceNode, bool isCDROM);
+    HRESULT i_getFixedDrivesFromDevTree(std::list<std::pair<com::Utf8Str, com::Utf8Str> > &list) RT_NOEXCEPT;
 #endif
 
-    ComObjPtr <VirtualBox, ComWeakRef> mParent;
+    HRESULT i_updateNetIfList();
 
-    typedef std::list <ComObjPtr <HostUSBDevice> > USBDeviceList;
-    USBDeviceList mUSBDevices;
+#ifndef RT_OS_WINDOWS
+    HRESULT i_parseResolvConf();
+#else
+    HRESULT i_fetchNameResolvingInformation();
+#endif
 
-    typedef std::list <ComObjPtr <HostUSBDeviceFilter> > USBDeviceFilterList;
-    USBDeviceFilterList mUSBDeviceFilters;
+#ifdef VBOX_WITH_RESOURCE_USAGE_API
+    void i_registerMetrics(PerformanceCollector *aCollector);
+    void i_registerDiskMetrics(PerformanceCollector *aCollector);
+    void i_unregisterMetrics(PerformanceCollector *aCollector);
+#endif /* VBOX_WITH_RESOURCE_USAGE_API */
 
-    /** Pointer to the USBProxyService object. */
-    USBProxyService *mUSBProxyService;
+#ifdef RT_OS_WINDOWS
+    HRESULT i_getFixedDrivesFromGlobalNamespace(std::list<std::pair<com::Utf8Str, com::Utf8Str> > &aDriveList) RT_NOEXCEPT;
+#endif
+    HRESULT i_getDrivesPathsList(std::list<std::pair<com::Utf8Str, com::Utf8Str> > &aDriveList) RT_NOEXCEPT;
+
+#ifdef VBOX_WITH_NATIVE_NEM
+    BOOL i_HostIsNativeApiSupported();
+#endif
+
+    struct Data;        // opaque data structure, defined in HostImpl.cpp
+    Data *m;
 };
 
-#endif // ____H_HOSTIMPL
+#endif /* !MAIN_INCLUDED_HostImpl_h */
+

@@ -35,11 +35,10 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef nsProxyRelease_h_
+#ifndef nsProxyRelease_h__
 #define nsProxyRelease_h__
 
 #include "nsIEventQueueService.h"
-#include "pratom.h"
 #include "prmem.h"
 
 /**
@@ -63,7 +62,7 @@ NS_COM nsresult NS_ProxyRelease
 NS_IMETHODIMP_(nsrefcnt) _class::Release(void)                                  \
 {                                                                               \
   NS_PRECONDITION(0 != mRefCnt, "dup release");                                 \
-  nsrefcnt count = PR_AtomicDecrement((PRInt32 *)&mRefCnt);                     \
+  nsrefcnt count = ASMAtomicDecU32((volatile uint32_t *)&mRefCnt);              \
   NS_LOG_RELEASE(this, count, #_class);                                         \
                                                                                 \
   if (count == 0)                                                               \

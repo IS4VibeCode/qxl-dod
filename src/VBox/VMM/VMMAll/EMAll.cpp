@@ -1,142 +1,1009 @@
+/* $Id: EMAll.cpp 112732 2026-01-28 20:22:02Z alexander.eichner@oracle.com $ */
 /** @file
- *
  * EM - Execution Monitor(/Manager) - All contexts
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 
-/*******************************************************************************
-*   Header Files                                                               *
-*******************************************************************************/
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
 #define LOG_GROUP LOG_GROUP_EM
-#include <VBox/em.h>
-#include <VBox/mm.h>
-#include <VBox/selm.h>
-#include <VBox/patm.h>
-#include <VBox/csam.h>
-#include <VBox/pgm.h>
-#include <VBox/iom.h>
-#include <VBox/stam.h>
+#define VMCPU_INCL_CPUM_GST_CTX /* (For use with CPUM_IMPORT_EXTRN_RET in EMHistoryExec.) */
+#include <VBox/vmm/em.h>
+#include <VBox/vmm/mm.h>
+#include <VBox/vmm/selm.h>
+#include <VBox/vmm/pgm.h>
+#include <VBox/vmm/iem.h>
+#include <VBox/vmm/iom.h>
+#include <VBox/vmm/hm.h>
+#include <VBox/vmm/pdmapi.h>
+#include <VBox/vmm/vmm.h>
+#include <VBox/vmm/stam.h>
 #include "EMInternal.h"
-#include <VBox/vm.h>
-#include <VBox/hwaccm.h>
-
+#include <VBox/vmm/vmcc.h>
 #include <VBox/param.h>
 #include <VBox/err.h>
 #include <VBox/dis.h>
-#include <VBox/disopcode.h>
 #include <VBox/log.h>
 #include <iprt/assert.h>
-#include <iprt/asm.h>
 #include <iprt/string.h>
 
 
-/*******************************************************************************
- *   Internal Functions                                                        *
- *******************************************************************************/
-
-DECLINLINE(int) emInterpretInstructionCPU(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize);
 
 
 /**
  * Get the current execution manager status.
  *
  * @returns Current status.
+ * @param   pVCpu         The cross context virtual CPU structure.
  */
-EMDECL(EMSTATE) EMGetState(PVM pVM)
+VMM_INT_DECL(EMSTATE) EMGetState(PVMCPU pVCpu)
 {
-    return pVM->em.s.enmState;
+    return pVCpu->em.s.enmState;
 }
 
 
-#ifndef IN_GC
+#ifdef IN_RING3
 /**
- * Read callback for disassembly function; supports reading bytes that cross a page boundary
+ * Get the previous execution manager status.
  *
- * @returns VBox status code.
- * @param   pSrc        GC source pointer
- * @param   pDest       HC destination pointer
- * @param   size        Number of bytes to read
- * @param   dwUserdata  Callback specific user data (pCpu)
- *
+ * @returns Previous status.
+ * @param   pVCpu         The cross context virtual CPU structure.
  */
-DECLCALLBACK(int32_t) EMReadBytes(RTHCUINTPTR pSrc, uint8_t *pDest, uint32_t size, RTHCUINTPTR dwUserdata)
+VMM_INT_DECL(EMSTATE) EMGetPrevState(PVMCPU pVCpu)
 {
-    DISCPUSTATE  *pCpu     = (DISCPUSTATE *)dwUserdata;
-    PVM           pVM      = (PVM)pCpu->dwUserData[0];
-#ifdef IN_RING0
-    int rc = PGMPhysReadGCPtr(pVM, pDest, pSrc, size);
-    AssertRC(rc);
-#else
-    if (!PATMIsPatchGCAddr(pVM, pSrc))
-    {
-        int rc = PGMPhysReadGCPtr(pVM, pDest, pSrc, size);
-        AssertRC(rc);
-    }
-    else
-    {
-        for (uint32_t i = 0; i < size; i++)
-        {
-            uint8_t opcode;
-            if (VBOX_SUCCESS(PATMR3QueryOpcode(pVM, (RTGCPTR)pSrc + i, &opcode)))
-            {
-                *(pDest+i) = opcode;
-            }
-        }
-    }
-#endif /* IN_RING0 */
-    return VINF_SUCCESS;
+    return pVCpu->em.s.enmPrevState;
 }
 
-inline int emDisCoreOne(PVM pVM, DISCPUSTATE *pCpu, RTGCUINTPTR InstrGC, uint32_t *pOpsize)
+
+/**
+ * Sets the current execution manager status. (use only when you know what you're doing!)
+ *
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @param   enmNewState The new state, EMSTATE_WAIT_SIPI or EMSTATE_HALTED.
+ */
+VMM_INT_DECL(void)    EMSetState(PVMCPU pVCpu, EMSTATE enmNewState)
 {
-    return DISCoreOneEx(InstrGC, pCpu->mode, EMReadBytes, pVM, pCpu, pOpsize);
+    /*
+     * Only allowed combination, except for NEM where we use it to set the
+     * state explicitely for saved state compatibility:
+     */
+    Assert(   VM_IS_NEM_ENABLED(pVCpu->CTX_SUFF(pVM))
+           || (pVCpu->em.s.enmState == EMSTATE_WAIT_SIPI && enmNewState == EMSTATE_HALTED));
+    pVCpu->em.s.enmState = enmNewState;
 }
-
-#else
-
-inline int emDisCoreOne(PVM pVM, DISCPUSTATE *pCpu, RTGCUINTPTR InstrGC, uint32_t *pOpsize)
-{
-    return DISCoreOne(pCpu, InstrGC, pOpsize);
-}
-
 #endif
 
 
 /**
- * Disassembles one instruction.
+ * Enables / disable hypercall instructions.
  *
- * @param   pVM             The VM handle.
- * @param   pCtxCore        The context core (used for both the mode and instruction).
- * @param   pCpu            Where to return the parsed instruction info.
+ * This interface is used by GIM to tell the execution monitors whether the
+ * hypercall instruction (VMMCALL & VMCALL) are allowed or should \#UD.
+ *
+ * @param   pVCpu       The cross context virtual CPU structure this applies to.
+ * @param   fEnabled    Whether hypercall instructions are enabled (true) or not.
+ */
+VMMDECL(void) EMSetHypercallInstructionsEnabled(PVMCPU pVCpu, bool fEnabled)
+{
+    pVCpu->em.s.fHypercallEnabled = fEnabled;
+}
+
+
+/**
+ * Checks if hypercall instructions (VMMCALL & VMCALL) are enabled or not.
+ *
+ * @returns true if enabled, false if not.
+ * @param   pVCpu   The cross context virtual CPU structure.
+ *
+ * @note    If this call becomes a performance factor, we can make the data
+ *          field available thru a read-only view in VMCPU.  See VM::cpum.ro.
+ */
+VMMDECL(bool) EMAreHypercallInstructionsEnabled(PVMCPU pVCpu)
+{
+    return pVCpu->em.s.fHypercallEnabled;
+}
+
+
+#if !defined(VBOX_VMM_TARGET_ARMV8)
+/**
+ * Prepare an MWAIT - essentials of the MONITOR instruction.
+ *
+ * @returns VINF_SUCCESS
+ * @param   pVCpu               The cross context virtual CPU structure of the calling EMT.
+ * @param   rax                 The content of RAX.
+ * @param   rcx                 The content of RCX.
+ * @param   rdx                 The content of RDX.
+ * @param   GCPhys              The physical address corresponding to rax.
+ */
+VMM_INT_DECL(int) EMMonitorWaitPrepare(PVMCPU pVCpu, uint64_t rax, uint64_t rcx, uint64_t rdx, RTGCPHYS GCPhys)
+{
+    pVCpu->em.s.MWait.uMonitorRAX = rax;
+    pVCpu->em.s.MWait.uMonitorRCX = rcx;
+    pVCpu->em.s.MWait.uMonitorRDX = rdx;
+    pVCpu->em.s.MWait.fWait |= EMMWAIT_FLAG_MONITOR_ACTIVE;
+    /** @todo Make use of GCPhys. */
+    NOREF(GCPhys);
+    /** @todo Complete MONITOR implementation.  */
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Checks if the monitor hardware is armed / active.
+ *
+ * @returns true if armed, false otherwise.
+ * @param   pVCpu               The cross context virtual CPU structure of the calling EMT.
+ */
+VMM_INT_DECL(bool) EMMonitorIsArmed(PVMCPU pVCpu)
+{
+    return RT_BOOL(pVCpu->em.s.MWait.fWait & EMMWAIT_FLAG_MONITOR_ACTIVE);
+}
+
+
+/**
+ * Checks if we're in a MWAIT.
+ *
+ * @retval  1 if regular,
+ * @retval  > 1 if MWAIT with EMMWAIT_FLAG_BREAKIRQIF0
+ * @retval  0 if not armed
+ * @param   pVCpu               The cross context virtual CPU structure of the calling EMT.
+ */
+VMM_INT_DECL(unsigned) EMMonitorWaitIsActive(PVMCPU pVCpu)
+{
+    uint32_t fWait = pVCpu->em.s.MWait.fWait;
+    AssertCompile(EMMWAIT_FLAG_ACTIVE == 1);
+    AssertCompile(EMMWAIT_FLAG_BREAKIRQIF0 == 2);
+    AssertCompile((EMMWAIT_FLAG_ACTIVE << 1) == EMMWAIT_FLAG_BREAKIRQIF0);
+    return fWait & (EMMWAIT_FLAG_ACTIVE | ((fWait & EMMWAIT_FLAG_ACTIVE) << 1));
+}
+
+
+/**
+ * Performs an MWAIT.
+ *
+ * @returns VINF_SUCCESS
+ * @param   pVCpu               The cross context virtual CPU structure of the calling EMT.
+ * @param   rax                 The content of RAX.
+ * @param   rcx                 The content of RCX.
+ */
+VMM_INT_DECL(int) EMMonitorWaitPerform(PVMCPU pVCpu, uint64_t rax, uint64_t rcx)
+{
+    pVCpu->em.s.MWait.uMWaitRAX = rax;
+    pVCpu->em.s.MWait.uMWaitRCX = rcx;
+    pVCpu->em.s.MWait.fWait |= EMMWAIT_FLAG_ACTIVE;
+    if (rcx)
+        pVCpu->em.s.MWait.fWait |= EMMWAIT_FLAG_BREAKIRQIF0;
+    else
+        pVCpu->em.s.MWait.fWait &= ~EMMWAIT_FLAG_BREAKIRQIF0;
+    /** @todo not completely correct?? */
+    return VINF_EM_HALT;
+}
+
+
+/**
+ * Clears any address-range monitoring that is active.
+ *
+ * @param   pVCpu   The cross context virtual CPU structure of the calling EMT.
+ */
+VMM_INT_DECL(void) EMMonitorWaitClear(PVMCPU pVCpu)
+{
+    LogFlowFunc(("Clearing MWAIT\n"));
+    pVCpu->em.s.MWait.fWait &= ~(EMMWAIT_FLAG_ACTIVE | EMMWAIT_FLAG_BREAKIRQIF0);
+}
+
+
+/**
+ * Determine if we should continue execution in HM after encountering an mwait
+ * instruction.
+ *
+ * Clears MWAIT flags if returning @c true.
+ *
+ * @returns true if we should continue, false if we should halt.
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   pCtx            Current CPU context.
+ */
+VMM_INT_DECL(bool) EMMonitorWaitShouldContinue(PVMCPU pVCpu, PCPUMCTX pCtx)
+{
+    if (CPUMGetGuestGif(pCtx))
+    {
+        if (   CPUMIsGuestPhysIntrEnabled(pVCpu)
+            || (   CPUMIsGuestInNestedHwvirtMode(pCtx)
+                && CPUMIsGuestVirtIntrEnabled(pVCpu))
+            || (   (pVCpu->em.s.MWait.fWait & (EMMWAIT_FLAG_ACTIVE | EMMWAIT_FLAG_BREAKIRQIF0))
+                ==                            (EMMWAIT_FLAG_ACTIVE | EMMWAIT_FLAG_BREAKIRQIF0)) )
+        {
+            if (VMCPU_FF_IS_ANY_SET(pVCpu, (  VMCPU_FF_UPDATE_APIC | VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_INTERRUPT_PIC
+                                            | VMCPU_FF_INTERRUPT_NESTED_GUEST)))
+            {
+                pVCpu->em.s.MWait.fWait &= ~(EMMWAIT_FLAG_ACTIVE | EMMWAIT_FLAG_BREAKIRQIF0);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+/**
+ * Determine if we should continue execution in HM after encountering a hlt
+ * instruction.
+ *
+ * @returns true if we should continue, false if we should halt.
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   pCtx            Current CPU context.
+ */
+VMM_INT_DECL(bool) EMShouldContinueAfterHalt(PVMCPU pVCpu, PCPUMCTX pCtx)
+{
+    if (CPUMGetGuestGif(pCtx))
+    {
+        if (CPUMIsGuestPhysIntrEnabled(pVCpu))
+            return VMCPU_FF_IS_ANY_SET(pVCpu, (VMCPU_FF_UPDATE_APIC | VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_INTERRUPT_PIC));
+
+        if (   CPUMIsGuestInNestedHwvirtMode(pCtx)
+            && CPUMIsGuestVirtIntrEnabled(pVCpu))
+            return VMCPU_FF_IS_SET(pVCpu, VMCPU_FF_INTERRUPT_NESTED_GUEST);
+    }
+    return false;
+}
+#endif
+
+
+/**
+ * Unhalts and wakes up the given CPU.
+ *
+ * This is an API for assisting the KVM hypercall API in implementing KICK_CPU.
+ * It sets VMCPU_FF_UNHALT for @a pVCpuDst and makes sure it is woken up.   If
+ * the CPU isn't currently in a halt, the next HLT instruction it executes will
+ * be affected.
+ *
+ * @returns GVMMR0SchedWakeUpEx result or VINF_SUCCESS depending on context.
+ * @param   pVM             The cross context VM structure.
+ * @param   pVCpuDst        The cross context virtual CPU structure of the
+ *                          CPU to unhalt and wake up.  This is usually not the
+ *                          same as the caller.
+ * @thread  EMT
+ */
+VMM_INT_DECL(int) EMUnhaltAndWakeUp(PVMCC pVM, PVMCPUCC pVCpuDst)
+{
+    /*
+     * Flag the current(/next) HLT to unhalt immediately.
+     */
+    VMCPU_FF_SET(pVCpuDst, VMCPU_FF_UNHALT);
+
+    /*
+     * Wake up the EMT (technically should be abstracted by VMM/VMEmt, but
+     * just do it here for now).
+     */
+#ifdef IN_RING0
+    /* We might be here with preemption disabled or enabled (i.e. depending on
+       thread-context hooks being used), so don't try obtaining the GVMMR0 used
+       lock here. See @bugref{7270#c148}. */
+    int rc = GVMMR0SchedWakeUpNoGVMNoLock(pVM, pVCpuDst->idCpu);
+    AssertRC(rc);
+
+#elif defined(IN_RING3)
+    VMR3NotifyCpuFFU(pVCpuDst->pUVCpu, 0 /*fFlags*/);
+    int rc = VINF_SUCCESS;
+    RT_NOREF(pVM);
+
+#else
+    /* Nothing to do for raw-mode, shouldn't really be used by raw-mode guests anyway. */
+    Assert(pVM->cCpus == 1); NOREF(pVM);
+    int rc = VINF_SUCCESS;
+#endif
+    return rc;
+}
+
+#ifndef IN_RING3
+
+/**
+ * Makes an I/O port write pending for ring-3 processing.
+ *
+ * @returns VINF_EM_PENDING_R3_IOPORT_READ
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uPort           The I/O port.
+ * @param   cbInstr         The instruction length (for RIP updating).
+ * @param   cbValue         The write size.
+ * @param   uValue          The value being written.
+ * @sa      emR3ExecutePendingIoPortWrite
+ *
+ * @note    Must not be used when I/O port breakpoints are pending or when single stepping.
+ */
+VMMRZ_INT_DECL(VBOXSTRICTRC)
+EMRZSetPendingIoPortWrite(PVMCPU pVCpu, RTIOPORT uPort, uint8_t cbInstr, uint8_t cbValue, uint32_t uValue)
+{
+    Assert(pVCpu->em.s.PendingIoPortAccess.cbValue == 0);
+    pVCpu->em.s.PendingIoPortAccess.uPort     = uPort;
+    pVCpu->em.s.PendingIoPortAccess.cbValue   = cbValue;
+    pVCpu->em.s.PendingIoPortAccess.cbInstr   = cbInstr;
+    pVCpu->em.s.PendingIoPortAccess.uValue    = uValue;
+    return VINF_EM_PENDING_R3_IOPORT_WRITE;
+}
+
+
+/**
+ * Makes an I/O port read pending for ring-3 processing.
+ *
+ * @returns VINF_EM_PENDING_R3_IOPORT_READ
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uPort           The I/O port.
+ * @param   cbInstr         The instruction length (for RIP updating).
+ * @param   cbValue         The read size.
+ * @sa      emR3ExecutePendingIoPortRead
+ *
+ * @note    Must not be used when I/O port breakpoints are pending or when single stepping.
+ */
+VMMRZ_INT_DECL(VBOXSTRICTRC)
+EMRZSetPendingIoPortRead(PVMCPU pVCpu, RTIOPORT uPort, uint8_t cbInstr, uint8_t cbValue)
+{
+    Assert(pVCpu->em.s.PendingIoPortAccess.cbValue == 0);
+    pVCpu->em.s.PendingIoPortAccess.uPort     = uPort;
+    pVCpu->em.s.PendingIoPortAccess.cbValue   = cbValue;
+    pVCpu->em.s.PendingIoPortAccess.cbInstr   = cbInstr;
+    pVCpu->em.s.PendingIoPortAccess.uValue    = UINT32_C(0x52454144); /* 'READ' */
+    return VINF_EM_PENDING_R3_IOPORT_READ;
+}
+
+#endif /* IN_RING3 */
+
+
+/**
+ * Worker for EMHistoryExec that checks for ring-3 returns and flags
+ * continuation of the EMHistoryExec run there.
+ */
+DECL_FORCE_INLINE(void) emHistoryExecSetContinueExitRecIdx(PVMCPU pVCpu, VBOXSTRICTRC rcStrict, PCEMEXITREC pExitRec)
+{
+    pVCpu->em.s.idxContinueExitRec = UINT16_MAX;
+#ifdef IN_RING3
+    RT_NOREF_PV(rcStrict); RT_NOREF_PV(pExitRec);
+#else
+    switch (VBOXSTRICTRC_VAL(rcStrict))
+    {
+        case VINF_SUCCESS:
+        default:
+            break;
+
+        /*
+         * Only status codes that EMHandleRCTmpl.h will resume EMHistoryExec with.
+         */
+        case VINF_IOM_R3_IOPORT_READ:           /* -> emR3ExecuteIOInstruction */
+        case VINF_IOM_R3_IOPORT_WRITE:          /* -> emR3ExecuteIOInstruction */
+        case VINF_IOM_R3_IOPORT_COMMIT_WRITE:   /* -> VMCPU_FF_IOM -> VINF_EM_RESUME_R3_HISTORY_EXEC -> emR3ExecuteIOInstruction */
+        case VINF_IOM_R3_MMIO_READ:             /* -> emR3ExecuteInstruction */
+        case VINF_IOM_R3_MMIO_WRITE:            /* -> emR3ExecuteInstruction */
+        case VINF_IOM_R3_MMIO_READ_WRITE:       /* -> emR3ExecuteInstruction */
+        case VINF_IOM_R3_MMIO_COMMIT_WRITE:     /* -> VMCPU_FF_IOM -> VINF_EM_RESUME_R3_HISTORY_EXEC -> emR3ExecuteIOInstruction */
+        case VINF_CPUM_R3_MSR_READ:             /* -> emR3ExecuteInstruction */
+        case VINF_CPUM_R3_MSR_WRITE:            /* -> emR3ExecuteInstruction */
+        case VINF_GIM_R3_HYPERCALL:             /* -> emR3ExecuteInstruction */
+            pVCpu->em.s.idxContinueExitRec = (uint16_t)(pExitRec - &pVCpu->em.s.aExitRecords[0]);
+            break;
+    }
+#endif /* !IN_RING3 */
+}
+
+
+/**
+ * Execute using history.
+ *
+ * This function will be called when EMHistoryAddExit() and friends returns a
+ * non-NULL result.  This happens in response to probing or when probing has
+ * uncovered adjacent exits which can more effectively be reached by using IEM
+ * than restarting execution using the main execution engine and fielding an
+ * regular exit.
+ *
+ * @returns VBox strict status code, see IEMExecForExits.
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   pExitRec        The exit record return by a previous history add
+ *                          or update call.
+ * @param   fWillExit       Flags indicating to IEM what will cause exits, TBD.
+ */
+VMM_INT_DECL(VBOXSTRICTRC) EMHistoryExec(PVMCPUCC pVCpu, PCEMEXITREC pExitRec, uint32_t fWillExit)
+{
+    Assert(pExitRec);
+    VMCPU_ASSERT_EMT(pVCpu);
+    IEMEXECFOREXITSTATS ExecStats;
+    switch (pExitRec->enmAction)
+    {
+        /*
+         * Executes multiple instruction stopping only when we've gone a given
+         * number without perceived exits.
+         */
+        case EMEXITACTION_EXEC_WITH_MAX:
+        {
+            STAM_REL_PROFILE_START(&pVCpu->em.s.StatHistoryExec, a);
+            LogFlow(("EMHistoryExec/EXEC_WITH_MAX: %RX64, max %u\n", pExitRec->uFlatPC, pExitRec->cMaxInstructionsWithoutExit));
+            IEMTlbInvalidateAll(pVCpu);
+            VBOXSTRICTRC rcStrict;
+#if defined(VBOX_WITH_IEM_RECOMPILER) && defined(IN_RING3)
+            if (pVCpu->em.s.fExitOptimizationRecompilerEnabled)
+            {
+                CPUM_IMPORT_EXTRN_RET(pVCpu, IEM_CPUMCTX_EXTRN_RECOMPILER_MASK);
+                rcStrict = IEMExecRecompilerForExits(pVCpu->CTX_SUFF(pVM), pVCpu, fWillExit,
+                                                     pVCpu->em.s.cHistoryRecompExecMaxInstructions,
+                                                     pExitRec->cMaxInstructionsWithoutExit,
+                                                     &ExecStats);
+            }
+            else
+#endif
+            {
+                CPUM_IMPORT_EXTRN_RET(pVCpu, IEM_CPUMCTX_EXTRN_MUST_MASK);
+                rcStrict = IEMExecForExits(pVCpu, fWillExit,
+                                           pVCpu->em.s.cHistoryIntprExecMaxInstructions,
+                                           pExitRec->cMaxInstructionsWithoutExit,
+                                           &ExecStats);
+            }
+            LogFlow(("EMHistoryExec/EXEC_WITH_MAX: %Rrc cExits=%u cMaxExitDistance=%u cInstructions=%u enmRR=%d fFFs=%#RX64/%#RX32\n",
+                     VBOXSTRICTRC_VAL(rcStrict), ExecStats.cExits, ExecStats.cMaxExitDistance, ExecStats.cInstructions,
+                     ExecStats.enmReturnReason, pVCpu->fLocalForcedActions, pVCpu->CTX_SUFF(pVM)->fGlobalForcedActions));
+            emHistoryExecSetContinueExitRecIdx(pVCpu, rcStrict, pExitRec);
+
+            /* Ignore instructions IEM doesn't know about. */
+            if (   (   rcStrict != VERR_IEM_INSTR_NOT_IMPLEMENTED
+                    && rcStrict != VERR_IEM_ASPECT_NOT_IMPLEMENTED)
+                || ExecStats.cInstructions == 0)
+            { /* likely */ }
+            else
+                rcStrict = VINF_SUCCESS;
+
+            if (ExecStats.cExits > 1)
+                STAM_REL_COUNTER_ADD(&pVCpu->em.s.StatHistoryExecSavedExits, ExecStats.cExits - 1);
+            STAM_REL_COUNTER_ADD(&pVCpu->em.s.StatHistoryExecInstructions, ExecStats.cInstructions);
+            AssertCompile(RT_ELEMENTS(pVCpu->em.s.aStatHistoryExecRetReasons) == kIemExecForExitRetReason_End);
+            STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryExecRetReasons[ExecStats.enmReturnReason
+                                                                         % RT_ELEMENTS(pVCpu->em.s.aStatHistoryExecRetReasons)]);
+            STAM_REL_PROFILE_STOP(&pVCpu->em.s.StatHistoryExec, a);
+            return rcStrict;
+        }
+
+        /*
+         * Probe a exit for close by exits.
+         */
+        case EMEXITACTION_EXEC_PROBE:
+        {
+            STAM_REL_PROFILE_START(&pVCpu->em.s.StatHistoryProbe, b);
+            LogFlow(("EMHistoryExec/EXEC_PROBE: %RX64\n", pExitRec->uFlatPC));
+            PEMEXITREC   pExitRecUnconst = (PEMEXITREC)pExitRec;
+            IEMTlbInvalidateAll(pVCpu);
+            VBOXSTRICTRC rcStrict;
+#if defined(VBOX_WITH_IEM_RECOMPILER) && defined(IN_RING3)
+            if (pVCpu->em.s.fExitOptimizationRecompilerEnabled)
+            {
+                CPUM_IMPORT_EXTRN_RET(pVCpu, IEM_CPUMCTX_EXTRN_RECOMPILER_MASK);
+                rcStrict = IEMExecRecompilerForExits(pVCpu->CTX_SUFF(pVM), pVCpu, fWillExit,
+                                                     pVCpu->em.s.cHistoryRecompExecMaxInstructions,
+                                                     pVCpu->em.s.cHistoryRecompProbeMaxInstructionsWithoutExit,
+                                                     &ExecStats);
+            }
+            else
+#endif
+            {
+                CPUM_IMPORT_EXTRN_RET(pVCpu, IEM_CPUMCTX_EXTRN_MUST_MASK);
+                rcStrict = IEMExecForExits(pVCpu, fWillExit,
+                                           pVCpu->em.s.cHistoryIntprExecMaxInstructions,
+                                           pVCpu->em.s.cHistoryIntprProbeMaxInstructionsWithoutExit,
+                                           &ExecStats);
+            }
+            LogFlow(("EMHistoryExec/EXEC_PROBE: %Rrc cExits=%u cMaxExitDistance=%u cInstructions=%u enmRR=%d fFFs=%#RX64/%#RX32\n",
+                     VBOXSTRICTRC_VAL(rcStrict), ExecStats.cExits, ExecStats.cMaxExitDistance, ExecStats.cInstructions,
+                     ExecStats.enmReturnReason, pVCpu->fLocalForcedActions, pVCpu->CTX_SUFF(pVM)->fGlobalForcedActions));
+            emHistoryExecSetContinueExitRecIdx(pVCpu, rcStrict, pExitRecUnconst);
+
+            if (   (   ExecStats.cExits >= 2
+                    || pExitRecUnconst->cProbeAttempts > 8)
+                && RT_SUCCESS(rcStrict))
+            {
+#if !defined(VBOX_WITH_IEM_RECOMPILER) || !defined(IN_RING3)
+                Assert(   ExecStats.cMaxExitDistance >  0
+                       && ExecStats.cMaxExitDistance <= pVCpu->em.s.cHistoryIntprExecMaxInstructions);
+#else
+                if (pVCpu->em.s.fExitOptimizationRecompilerEnabled)
+                    pExitRecUnconst->cMaxInstructionsWithoutExit = ExecStats.cMaxExitDistance + 8;
+                else
+#endif
+                    pExitRecUnconst->cMaxInstructionsWithoutExit = ExecStats.cMaxExitDistance + 1;
+                pExitRecUnconst->enmAction = EMEXITACTION_EXEC_WITH_MAX;
+                LogFlow(("EMHistoryExec/EXEC_PROBE: -> EXEC_WITH_MAX %u\n", ExecStats.cMaxExitDistance));
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.StatHistoryProbedExecWithMax);
+            }
+#ifndef IN_RING3
+            else if (   pVCpu->em.s.idxContinueExitRec != UINT16_MAX
+                     && RT_SUCCESS(rcStrict))
+            {
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.StatHistoryProbedToRing3);
+                LogFlow(("EMHistoryExec/EXEC_PROBE: -> ring-3\n"));
+            }
+#endif
+            else
+            {
+                pExitRecUnconst->cProbeAttempts += 1;
+                if (   ExecStats.enmReturnReason == kIemExecForExitRetReason_Normal
+                    || ExecStats.enmReturnReason == kIemExecForExitRetReason_LimitMaxDistance
+                    || ExecStats.enmReturnReason == kIemExecForExitRetReason_LimitMaxInstructions)
+                    pExitRecUnconst->enmAction = EMEXITACTION_NORMAL_PROBED;
+                pVCpu->em.s.idxContinueExitRec = UINT16_MAX;
+                LogFlow(("EMHistoryExec/EXEC_PROBE: -> PROBED\n"));
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.StatHistoryProbedNormal);
+                if (   rcStrict == VERR_IEM_INSTR_NOT_IMPLEMENTED
+                    || rcStrict == VERR_IEM_ASPECT_NOT_IMPLEMENTED)
+                    rcStrict = VINF_SUCCESS;
+            }
+            STAM_REL_COUNTER_ADD(&pVCpu->em.s.StatHistoryProbeInstructions, ExecStats.cInstructions);
+            STAM_REL_PROFILE_STOP(&pVCpu->em.s.StatHistoryProbe, b);
+            return rcStrict;
+        }
+
+        /* We shouldn't ever see these here! */
+        case EMEXITACTION_FREE_RECORD:
+        case EMEXITACTION_NORMAL:
+        case EMEXITACTION_NORMAL_PROBED:
+            break;
+
+        /* No default case, want compiler warnings. */
+    }
+    AssertLogRelFailedReturn(VERR_EM_INTERNAL_ERROR);
+}
+
+
+/**
+ * Worker for emHistoryAddOrUpdateRecord.
+ */
+DECL_FORCE_INLINE(PCEMEXITREC) emHistoryRecordInit(PEMEXITREC pExitRec, uint64_t uFlatPC, uint32_t uFlagsAndType, uint64_t uExitNo)
+{
+    pExitRec->uFlatPC                     = uFlatPC;
+    pExitRec->uFlagsAndType               = (uint16_t)uFlagsAndType;
+    pExitRec->enmAction                   = EMEXITACTION_NORMAL;
+    pExitRec->cProbeAttempts              = 0;
+    pExitRec->abUnused[0]                 = 0;
+    pExitRec->abUnused[1]                 = 0;
+    pExitRec->cMaxInstructionsWithoutExit = 64;
+    pExitRec->uLastExitNo                 = uExitNo;
+    pExitRec->cHits                       = 1;
+    return NULL;
+}
+
+
+/**
+ * Worker for emHistoryAddOrUpdateRecord.
+ */
+DECL_FORCE_INLINE(PCEMEXITREC) emHistoryRecordInitNew(PVMCPU pVCpu, PEMEXITENTRY pHistEntry, uintptr_t idxSlot,
+                                                      PEMEXITREC pExitRec, uint64_t uFlatPC,
+                                                      uint32_t uFlagsAndType, uint64_t uExitNo)
+{
+    pHistEntry->idxSlot = (uint16_t)idxSlot;
+    pVCpu->em.s.cExitRecordUsed++;
+    LogFlow(("emHistoryRecordInitNew: [%#zx] = %#07x %016RX64; (%u of %u used)\n", idxSlot, uFlagsAndType, uFlatPC,
+             pVCpu->em.s.cExitRecordUsed, RT_ELEMENTS(pVCpu->em.s.aExitRecords) ));
+    return emHistoryRecordInit(pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+}
+
+
+/**
+ * Worker for emHistoryAddOrUpdateRecord.
+ */
+DECL_FORCE_INLINE(PCEMEXITREC) emHistoryRecordInitReplacement(PEMEXITENTRY pHistEntry, uintptr_t idxSlot,
+                                                              PEMEXITREC pExitRec, uint64_t uFlatPC,
+                                                              uint32_t uFlagsAndType, uint64_t uExitNo)
+{
+    pHistEntry->idxSlot = (uint16_t)idxSlot;
+    LogFlow(("emHistoryRecordInitReplacement: [%#x] = %#07x %016RX64 replacing %#07x %016RX64 with %u hits, %u exits old\n",
+             idxSlot, uFlagsAndType, uFlatPC, pExitRec->uFlagsAndType, pExitRec->uFlatPC, pExitRec->cHits,
+             uExitNo - pExitRec->uLastExitNo));
+    return emHistoryRecordInit(pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+}
+
+
+/**
+ * Adds or updates the EMEXITREC for this PC/type and decide on an action.
+ *
+ * @returns Pointer to an exit record if special action should be taken using
+ *          EMHistoryExec().  Take normal exit action when NULL.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uFlagsAndType   Combined flags and type, EMEXIT_F_KIND_EM set and
+ *                          both EMEXIT_F_CS_EIP and EMEXIT_F_UNFLATTENED_PC are clear.
+ * @param   uFlatPC         The flattened program counter.
+ * @param   pHistEntry      The exit history entry.
+ * @param   uExitNo         The current exit number.
+ */
+static PCEMEXITREC emHistoryAddOrUpdateRecord(PVMCPU pVCpu, uint16_t uFlagsAndType, uint64_t uFlatPC,
+                                              PEMEXITENTRY pHistEntry, uint64_t uExitNo)
+{
+# ifdef IN_RING0
+    /* Disregard the hm flag. */
+    uFlagsAndType &= ~EMEXIT_F_HM;
+# endif
+
+    /*
+     * Work the hash table.
+     */
+    AssertCompile(RT_ELEMENTS(pVCpu->em.s.aExitRecords) == 1024);
+# define EM_EXIT_RECORDS_IDX_MASK 0x3ff
+    uintptr_t  idxSlot  = ((uintptr_t)uFlatPC >> 1) & EM_EXIT_RECORDS_IDX_MASK;
+    PEMEXITREC pExitRec = &pVCpu->em.s.aExitRecords[idxSlot];
+    if (pExitRec->uFlatPC == uFlatPC)
+    {
+        Assert(pExitRec->enmAction != EMEXITACTION_FREE_RECORD);
+        pHistEntry->idxSlot = (uint16_t)idxSlot;
+        if (pExitRec->uFlagsAndType == uFlagsAndType)
+        {
+            pExitRec->uLastExitNo = uExitNo;
+            STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecHits[0]);
+        }
+        else
+        {
+            STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecTypeChanged[0]);
+            return emHistoryRecordInit(pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+        }
+    }
+    else if (pExitRec->enmAction == EMEXITACTION_FREE_RECORD)
+    {
+        STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecNew[0]);
+        return emHistoryRecordInitNew(pVCpu, pHistEntry, idxSlot, pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+    }
+    else
+    {
+        /*
+         * Collision.  We calculate a new hash for stepping away from the first,
+         * doing up to 8 steps away before replacing the least recently used record.
+         */
+        uintptr_t idxOldest     = idxSlot;
+        uint64_t  uOldestExitNo = pExitRec->uLastExitNo;
+        unsigned  iOldestStep   = 0;
+        unsigned  iStep         = 1;
+        uintptr_t const idxAdd  = (uintptr_t)(uFlatPC >> 11) & (EM_EXIT_RECORDS_IDX_MASK / 4);
+        for (;;)
+        {
+            Assert(iStep < RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecHits));
+            AssertCompile(RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecNew)         == RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecHits));
+            AssertCompile(RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecReplaced)    == RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecHits));
+            AssertCompile(RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecTypeChanged) == RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecHits));
+
+            /* Step to the next slot. */
+            idxSlot += idxAdd;
+            idxSlot &= EM_EXIT_RECORDS_IDX_MASK;
+            pExitRec = &pVCpu->em.s.aExitRecords[idxSlot];
+
+            /* Does it match? */
+            if (pExitRec->uFlatPC == uFlatPC)
+            {
+                Assert(pExitRec->enmAction != EMEXITACTION_FREE_RECORD);
+                pHistEntry->idxSlot = (uint16_t)idxSlot;
+                if (pExitRec->uFlagsAndType == uFlagsAndType)
+                {
+                    pExitRec->uLastExitNo = uExitNo;
+                    STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecHits[iStep]);
+                    break;
+                }
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecTypeChanged[iStep]);
+                return emHistoryRecordInit(pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+            }
+
+            /* Is it free? */
+            if (pExitRec->enmAction == EMEXITACTION_FREE_RECORD)
+            {
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecNew[iStep]);
+                return emHistoryRecordInitNew(pVCpu, pHistEntry, idxSlot, pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+            }
+
+            /* Is it the least recently used one? */
+            if (pExitRec->uLastExitNo < uOldestExitNo)
+            {
+                uOldestExitNo = pExitRec->uLastExitNo;
+                idxOldest     = idxSlot;
+                iOldestStep   = iStep;
+            }
+
+            /* Next iteration? */
+            iStep++;
+            Assert(iStep < RT_ELEMENTS(pVCpu->em.s.aStatHistoryRecReplaced));
+            if (RT_LIKELY(iStep < 8 + 1))
+            { /* likely */ }
+            else
+            {
+                /* Replace the least recently used slot. */
+                STAM_REL_COUNTER_INC(&pVCpu->em.s.aStatHistoryRecReplaced[iOldestStep]);
+                pExitRec = &pVCpu->em.s.aExitRecords[idxOldest];
+                return emHistoryRecordInitReplacement(pHistEntry, idxOldest, pExitRec, uFlatPC, uFlagsAndType, uExitNo);
+            }
+        }
+    }
+
+    /*
+     * Found an existing record.
+     */
+    switch (pExitRec->enmAction)
+    {
+        case EMEXITACTION_NORMAL:
+        {
+            uint64_t const cHits = ++pExitRec->cHits;
+            if (cHits < 256)
+                return NULL;
+            LogFlow(("emHistoryAddOrUpdateRecord: [%#x] %#07x %16RX64: -> EXEC_PROBE\n", idxSlot, uFlagsAndType, uFlatPC));
+            pExitRec->enmAction = EMEXITACTION_EXEC_PROBE;
+            return pExitRec;
+        }
+
+        case EMEXITACTION_NORMAL_PROBED:
+            pExitRec->cHits += 1;
+            return NULL;
+
+        default:
+            pExitRec->cHits += 1;
+            return pExitRec;
+
+        /* This will happen if the caller ignores or cannot serve the probe
+           request (forced to ring-3, whatever).  We retry this 256 times. */
+        case EMEXITACTION_EXEC_PROBE:
+        {
+            uint64_t const cHits = ++pExitRec->cHits;
+            if (cHits < 512)
+                return pExitRec;
+            pExitRec->enmAction = EMEXITACTION_NORMAL_PROBED;
+            LogFlow(("emHistoryAddOrUpdateRecord: [%#x] %#07x %16RX64: -> PROBED\n", idxSlot, uFlagsAndType, uFlatPC));
+            return NULL;
+        }
+    }
+}
+
+
+/**
+ * Adds an exit to the history for this CPU.
+ *
+ * @returns Pointer to an exit record if special action should be taken using
+ *          EMHistoryExec().  Take normal exit action when NULL.
+ *
+ * @param   pVCpu                   The cross context virtual CPU structure.
+ * @param   uFlagsAndTypeAndInfo    Combined flags, type and info (see
+ *                                  EMEXIT_MAKE_FT, EMEXIT_MAKE_FT_EX).
+ * @param   uFlatPC                 The flattened program counter (RIP).  UINT64_MAX if not available.
+ * @param   uTimestamp              The TSC value for the exit, 0 if not available.
+ * @thread  EMT(pVCpu)
+ */
+VMM_INT_DECL(PCEMEXITREC) EMHistoryAddExit(PVMCPUCC pVCpu, uint64_t uFlagsAndTypeAndInfo, uint64_t uFlatPC, uint64_t uTimestamp)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+
+    /*
+     * Add the exit history entry.
+     */
+    AssertCompile(RT_ELEMENTS(pVCpu->em.s.aExitHistory) == 256);
+    uint64_t uExitNo = pVCpu->em.s.iNextExit++;
+    PEMEXITENTRY pHistEntry = &pVCpu->em.s.aExitHistory[(uintptr_t)uExitNo & 0xff];
+    pHistEntry->uFlatPC       = uFlatPC;
+    pHistEntry->uTimestamp    = uTimestamp;
+    pHistEntry->uFlagsAndType = (uint16_t)uFlagsAndTypeAndInfo;
+    pHistEntry->idxSlot       = UINT16_MAX;
+    pHistEntry->uInfo         = (uint32_t)(uFlagsAndTypeAndInfo >> 16);
+
+    /*
+     * If common exit type, we will insert/update the exit into the exit record hash table.
+     */
+    if (   (uFlagsAndTypeAndInfo & (EMEXIT_F_KIND_MASK | EMEXIT_F_CS_EIP | EMEXIT_F_UNFLATTENED_PC)) == EMEXIT_F_KIND_EM
+#ifdef IN_RING0
+        && pVCpu->em.s.fExitOptimizationEnabledR0
+        && ( !(uFlagsAndTypeAndInfo & EMEXIT_F_HM) || pVCpu->em.s.fExitOptimizationEnabledR0PreemptDisabled)
+#else
+        && pVCpu->em.s.fExitOptimizationEnabled
+#endif
+        && uFlatPC != UINT64_MAX
+       )
+        return emHistoryAddOrUpdateRecord(pVCpu, (uint16_t)uFlagsAndTypeAndInfo, uFlatPC, pHistEntry, uExitNo);
+    return NULL;
+}
+
+
+/**
+ * Interface that VT-x uses to supply the PC of an exit when CS:RIP is being read.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uFlatPC         The flattened program counter (RIP).
+ * @param   fFlattened      Set if RIP was subjected to CS.BASE, clear if not.
+ */
+VMM_INT_DECL(void) EMHistoryUpdatePC(PVMCPUCC pVCpu, uint64_t uFlatPC, bool fFlattened)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+
+    AssertCompile(RT_ELEMENTS(pVCpu->em.s.aExitHistory) == 256);
+    uint64_t     uExitNo    = pVCpu->em.s.iNextExit - 1;
+    PEMEXITENTRY pHistEntry = &pVCpu->em.s.aExitHistory[(uintptr_t)uExitNo & 0xff];
+    pHistEntry->uFlatPC = uFlatPC;
+    if (fFlattened)
+        pHistEntry->uFlagsAndType &= ~EMEXIT_F_UNFLATTENED_PC;
+    else
+        pHistEntry->uFlagsAndType |= EMEXIT_F_UNFLATTENED_PC;
+}
+
+
+/**
+ * Interface for convering a engine specific exit to a generic one and get guidance.
+ *
+ * @returns Pointer to an exit record if special action should be taken using
+ *          EMHistoryExec().  Take normal exit action when NULL.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uFlagsAndType   Combined flags and type (see EMEXIT_MAKE_FT).
+ * @thread  EMT(pVCpu)
+ */
+VMM_INT_DECL(PCEMEXITREC) EMHistoryUpdateFlagsAndType(PVMCPUCC pVCpu, uint32_t uFlagsAndType)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+    Assert(!((uFlagsAndType) >> 16));
+
+    /*
+     * Do the updating.
+     */
+    AssertCompile(RT_ELEMENTS(pVCpu->em.s.aExitHistory) == 256);
+    uint64_t     uExitNo    = pVCpu->em.s.iNextExit - 1;
+    PEMEXITENTRY pHistEntry = &pVCpu->em.s.aExitHistory[(uintptr_t)uExitNo & 0xff];
+    pHistEntry->uFlagsAndType = (uint16_t)uFlagsAndType
+                              | (pHistEntry->uFlagsAndType & (EMEXIT_F_CS_EIP | EMEXIT_F_UNFLATTENED_PC));
+
+    /*
+     * If common exit type, we will insert/update the exit into the exit record hash table.
+     */
+    if (   (uFlagsAndType & (EMEXIT_F_KIND_MASK | EMEXIT_F_CS_EIP | EMEXIT_F_UNFLATTENED_PC)) == EMEXIT_F_KIND_EM
+#ifdef IN_RING0
+        && pVCpu->em.s.fExitOptimizationEnabledR0
+        && ( !(uFlagsAndType & EMEXIT_F_HM) || pVCpu->em.s.fExitOptimizationEnabledR0PreemptDisabled)
+#else
+        && pVCpu->em.s.fExitOptimizationEnabled
+#endif
+        && pHistEntry->uFlatPC != UINT64_MAX
+       )
+        return emHistoryAddOrUpdateRecord(pVCpu, (uint16_t)uFlagsAndType, pHistEntry->uFlatPC, pHistEntry, uExitNo);
+    return NULL;
+}
+
+
+/**
+ * Interface for convering a engine specific exit to a generic one and get
+ * guidance, supplying flattened PC too.
+ *
+ * @returns Pointer to an exit record if special action should be taken using
+ *          EMHistoryExec().  Take normal exit action when NULL.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   uFlagsAndType   Combined flags and type (see EMEXIT_MAKE_FT).
+ * @param   uFlatPC         The flattened program counter (RIP).
+ * @thread  EMT(pVCpu)
+ */
+VMM_INT_DECL(PCEMEXITREC) EMHistoryUpdateFlagsAndTypeAndPC(PVMCPUCC pVCpu, uint32_t uFlagsAndType, uint64_t uFlatPC)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+    Assert(!((uFlagsAndType) >> 16));
+    //Assert(uFlatPC != UINT64_MAX); - disable to make the pc wrapping tests in bs3-cpu-weird-1 work.
+
+    /*
+     * Do the updating.
+     */
+    AssertCompile(RT_ELEMENTS(pVCpu->em.s.aExitHistory) == 256);
+    uint64_t     uExitNo    = pVCpu->em.s.iNextExit - 1;
+    PEMEXITENTRY pHistEntry = &pVCpu->em.s.aExitHistory[(uintptr_t)uExitNo & 0xff];
+    pHistEntry->uFlagsAndType = (uint16_t)uFlagsAndType;
+    pHistEntry->uFlatPC       = uFlatPC;
+
+    /*
+     * If common exit type, we will insert/update the exit into the exit record hash table.
+     */
+    if (   (uFlagsAndType & (EMEXIT_F_KIND_MASK | EMEXIT_F_CS_EIP | EMEXIT_F_UNFLATTENED_PC)) == EMEXIT_F_KIND_EM
+#ifdef IN_RING0
+        && pVCpu->em.s.fExitOptimizationEnabledR0
+        && ( !(uFlagsAndType & EMEXIT_F_HM) || pVCpu->em.s.fExitOptimizationEnabledR0PreemptDisabled)
+#else
+        && pVCpu->em.s.fExitOptimizationEnabled
+#endif
+       )
+        return emHistoryAddOrUpdateRecord(pVCpu, (uint16_t)uFlagsAndType, uFlatPC, pHistEntry, uExitNo);
+    return NULL;
+}
+
+
+/**
+ * @callback_method_impl{FNDISREADBYTES}
+ */
+static DECLCALLBACK(int) emReadBytes(PDISSTATE pDis, uint8_t offInstr, uint8_t cbMinRead, uint8_t cbMaxRead)
+{
+    PVMCPUCC    pVCpu    = (PVMCPUCC)pDis->pvUser;
+    RTUINTPTR   uSrcAddr = pDis->uInstrAddr + offInstr;
+
+    /*
+     * Figure how much we can or must read.
+     */
+    size_t      cbToRead = GUEST_PAGE_SIZE - (uSrcAddr & (GUEST_PAGE_SIZE - 1));
+    if (cbToRead > cbMaxRead)
+        cbToRead = cbMaxRead;
+    else if (cbToRead < cbMinRead)
+        cbToRead = cbMinRead;
+
+    int rc = PGMPhysSimpleReadGCPtr(pVCpu, &pDis->Instr.ab[offInstr], uSrcAddr, cbToRead);
+    if (RT_FAILURE(rc))
+    {
+        if (cbToRead > cbMinRead)
+        {
+            cbToRead = cbMinRead;
+            rc = PGMPhysSimpleReadGCPtr(pVCpu, &pDis->Instr.ab[offInstr], uSrcAddr, cbToRead);
+        }
+        if (RT_FAILURE(rc))
+        {
+#if defined(VBOX_VMM_TARGET_ARMV8)
+            AssertReleaseFailed();
+#else
+            /*
+             * If we fail to find the page via the guest's page tables
+             * we invalidate the page in the host TLB (pertaining to
+             * the guest in the NestedPaging case). See @bugref{6043}.
+             */
+            if (rc == VERR_PAGE_TABLE_NOT_PRESENT || rc == VERR_PAGE_NOT_PRESENT)
+            {
+                HMInvalidatePage(pVCpu, uSrcAddr);
+                if (((uSrcAddr + cbToRead - 1) >> GUEST_PAGE_SHIFT) != (uSrcAddr >> GUEST_PAGE_SHIFT))
+                    HMInvalidatePage(pVCpu, uSrcAddr + cbToRead - 1);
+            }
+#endif
+        }
+    }
+
+    pDis->cbCachedInstr = offInstr + (uint8_t)cbToRead;
+    return rc;
+}
+
+
+/**
+ * Disassembles the current instruction.
+ *
+ * @returns VBox status code, see SELMToFlatEx and EMInterpretDisasOneEx for
+ *          details.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
+ * @param   pDis            Where to return the parsed instruction info.
  * @param   pcbInstr        Where to return the instruction size. (optional)
  */
-EMDECL(int) EMInterpretDisasOne(PVM pVM, PCCPUMCTXCORE pCtxCore, PDISCPUSTATE pCpu, unsigned *pcbInstr)
+VMM_INT_DECL(int) EMInterpretDisasCurrent(PVMCPUCC pVCpu, PDISSTATE pDis, unsigned *pcbInstr)
 {
-    RTGCPTR GCPtrInstr;
-    int rc = SELMValidateAndConvertCSAddr(pVM, pCtxCore->ss, pCtxCore->cs, (PCPUMSELREGHID)&pCtxCore->csHid, (RTGCPTR)pCtxCore->eip, &GCPtrInstr);
-    if (VBOX_FAILURE(rc))
-    {
-        Log(("EMInterpretDisasOne: Failed to convert %RTsel:%RX32 (cpl=%d) - rc=%Vrc !!\n",
-             pCtxCore->cs, pCtxCore->eip, pCtxCore->ss & X86_SEL_RPL, rc));
-        return rc;
-    }
-    return EMInterpretDisasOneEx(pVM, (RTGCUINTPTR)GCPtrInstr, pCtxCore, pCpu, pcbInstr);
+#if defined(VBOX_VMM_TARGET_ARMV8)
+    return EMInterpretDisasOneEx(pVCpu, (RTGCUINTPTR)CPUMGetGuestFlatPC(pVCpu), pDis, pcbInstr);
+#else
+    PCPUMCTX pCtx = CPUMQueryGuestCtxPtr(pVCpu);
+    RTGCPTR  GCPtrInstr;
+
+# if 0
+    int rc = SELMToFlatEx(pVCpu, DISSELREG_CS, pCtx, pCtx->rip, 0, &GCPtrInstr);
+# else
+/** @todo Get the CPU mode as well while we're at it! */
+    int rc = SELMValidateAndConvertCSAddr(pVCpu, pCtx->eflags.u, pCtx->ss.Sel, pCtx->cs.Sel, &pCtx->cs, pCtx->rip, &GCPtrInstr);
+# endif
+    if (RT_SUCCESS(rc))
+        return EMInterpretDisasOneEx(pVCpu, (RTGCUINTPTR)GCPtrInstr, pDis, pcbInstr);
+
+    Log(("EMInterpretDisasOne: Failed to convert %RTsel:%RGv (cpl=%d) - rc=%Rrc !!\n",
+         pCtx->cs.Sel, (RTGCPTR)pCtx->rip, pCtx->ss.Sel & X86_SEL_RPL, rc));
+    return rc;
+#endif
 }
 
 
@@ -145,25 +1012,23 @@ EMDECL(int) EMInterpretDisasOne(PVM pVM, PCCPUMCTXCORE pCtxCore, PDISCPUSTATE pC
  *
  * This is used by internally by the interpreter and by trap/access handlers.
  *
- * @param   pVM             The VM handle.
+ * @returns VBox status code.
+ *
+ * @param   pVCpu           The cross context virtual CPU structure.
  * @param   GCPtrInstr      The flat address of the instruction.
- * @param   pCtxCore        The context core (used to determin the cpu mode).
- * @param   pCpu            Where to return the parsed instruction info.
+ * @param   pDis            Where to return the parsed instruction info.
  * @param   pcbInstr        Where to return the instruction size. (optional)
  */
-EMDECL(int) EMInterpretDisasOneEx(PVM pVM, RTGCUINTPTR GCPtrInstr, PCCPUMCTXCORE pCtxCore, PDISCPUSTATE pCpu, unsigned *pcbInstr)
+VMM_INT_DECL(int) EMInterpretDisasOneEx(PVMCPUCC pVCpu, RTGCUINTPTR GCPtrInstr, PDISSTATE pDis, unsigned *pcbInstr)
 {
-    int rc = DISCoreOneEx(GCPtrInstr, SELMIsSelector32Bit(pVM, pCtxCore->cs, (PCPUMSELREGHID)&pCtxCore->csHid) ? CPUMODE_32BIT : CPUMODE_16BIT,
-#ifdef IN_GC
-                          NULL, NULL,
-#else
-                          EMReadBytes, pVM,
-#endif
-                          pCpu, pcbInstr);
-    if (VBOX_SUCCESS(rc))
+    DISCPUMODE enmCpuMode = CPUMGetGuestDisMode(pVCpu);
+    /** @todo Deal with too long instruction (=> \#GP), opcode read errors (=>
+     *        \#PF, \#GP, \#??), undefined opcodes (=> \#UD), and such. */
+    int rc = DISInstrWithReader(GCPtrInstr, enmCpuMode, emReadBytes, pVCpu, pDis, pcbInstr);
+    if (RT_SUCCESS(rc))
         return VINF_SUCCESS;
-    AssertMsgFailed(("DISCoreOne failed to GCPtrInstr=%VGv rc=%Vrc\n", GCPtrInstr, rc));
-    return VERR_INTERNAL_ERROR;
+    AssertMsg(rc == VERR_PAGE_NOT_PRESENT || rc == VERR_PAGE_TABLE_NOT_PRESENT, ("DISCoreOne failed to GCPtrInstr=%RGv rc=%Rrc\n", GCPtrInstr, rc));
+    return rc;
 }
 
 
@@ -175,63 +1040,52 @@ EMDECL(int) EMInterpretDisasOneEx(PVM pVM, RTGCUINTPTR GCPtrInstr, PCCPUMCTXCORE
  * @retval  VERR_EM_INTERPRETER     Something we can't cope with.
  * @retval  VERR_*                  Fatal errors.
  *
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- *                      Updates the EIP if an instruction was executed successfully.
- * @param   pvFault     The fault address (CR2).
- * @param   pcbSize     Size of the write (if applicable).
+ * @param   pVCpu       The cross context virtual CPU structure.
  *
- * @remark  Invalid opcode exceptions have a higher priority than GP (see Intel
- *          Architecture System Developers Manual, Vol 3, 5.5) so we don't need
- *          to worry about e.g. invalid modrm combinations (!)
+ * @remark  Invalid opcode exceptions have a higher priority than \#GP (see
+ *          Intel Architecture System Developers Manual, Vol 3, 5.5) so we don't
+ *          need to worry about e.g. invalid modrm combinations (!)
  */
-EMDECL(int) EMInterpretInstruction(PVM pVM, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
+VMM_INT_DECL(VBOXSTRICTRC) EMInterpretInstruction(PVMCPUCC pVCpu)
 {
-    /*
-     * Only allow 32-bit code.
-     */
-    if (SELMIsSelector32Bit(pVM, pRegFrame->cs, &pRegFrame->csHid))
-    {
-        RTGCPTR pbCode;
-        int rc = SELMValidateAndConvertCSAddr(pVM, pRegFrame->ss, pRegFrame->cs, &pRegFrame->csHid, (RTGCPTR)pRegFrame->eip, &pbCode);
-        if (VBOX_SUCCESS(rc))
-        {
-            uint32_t    cbOp;
-            DISCPUSTATE Cpu;
-            Cpu.mode = CPUMODE_32BIT;
-            rc = emDisCoreOne(pVM, &Cpu, (RTGCUINTPTR)pbCode, &cbOp);
-            if (VBOX_SUCCESS(rc))
-            {
-                Assert(cbOp == Cpu.opsize);
-                rc = EMInterpretInstructionCPU(pVM, &Cpu, pRegFrame, pvFault, pcbSize);
-                if (VBOX_SUCCESS(rc))
-                {
-                    pRegFrame->eip += cbOp; /* Move on to the next instruction. */
-                }
-                return rc;
-            }
-        }
-    }
-    return VERR_EM_INTERPRETER;
+#if defined(VBOX_VMM_TARGET_ARMV8)
+    LogFlow(("EMInterpretInstruction %RGv\n", (RTGCPTR)CPUMGetGuestFlatPC(pVCpu)));
+#else
+    LogFlow(("EMInterpretInstruction %RGv\n", (RTGCPTR)CPUMGetGuestRIP(pVCpu)));
+#endif
+
+#ifndef IN_RING0 /* No ring-0 IEM TLB. */
+    PVMCC const pVM = pVCpu->CTX_SUFF(pVM);
+    if (!VM_IS_EXEC_ENGINE_IEM(pVM) && !pVM->em.s.fIemExecutesAll)
+        IEMTlbInvalidateAll(pVCpu);
+#endif
+    VBOXSTRICTRC rc = IEMExecOneBypass(pVCpu);
+    if (RT_UNLIKELY(   rc == VERR_IEM_ASPECT_NOT_IMPLEMENTED
+                    || rc == VERR_IEM_INSTR_NOT_IMPLEMENTED))
+        rc = VERR_EM_INTERPRETER;
+    if (rc != VINF_SUCCESS)
+        Log(("EMInterpretInstruction: returns %Rrc\n", VBOXSTRICTRC_VAL(rc)));
+
+    return rc;
 }
 
+
 /**
- * Interprets the current instruction using the supplied DISCPUSTATE structure.
+ * Interprets the current instruction using the supplied DISSTATE structure.
  *
- * EIP is *NOT* updated!
+ * IP/EIP/RIP *IS* updated!
  *
- * @returns VBox status code.
+ * @returns VBox strict status code.
  * @retval  VINF_*                  Scheduling instructions. When these are returned, it
  *                                  starts to get a bit tricky to know whether code was
  *                                  executed or not... We'll address this when it becomes a problem.
  * @retval  VERR_EM_INTERPRETER     Something we can't cope with.
  * @retval  VERR_*                  Fatal errors.
  *
- * @param   pVM         The VM handle.
- * @param   pCpu        The disassembler cpu state for the instruction to be interpreted.
- * @param   pRegFrame   The register frame. EIP is *NOT* changed!
- * @param   pvFault     The fault address (CR2).
- * @param   pcbSize     Size of the write (if applicable).
+ * @param   pVCpu       The cross context virtual CPU structure of the calling EMT.
+ * @param   pDis        The disassembler cpu state for the instruction to be
+ *                      interpreted.
+ * @param   rip         The instruction pointer value.
  *
  * @remark  Invalid opcode exceptions have a higher priority than GP (see Intel
  *          Architecture System Developers Manual, Vol 3, 5.5) so we don't need
@@ -240,1643 +1094,23 @@ EMDECL(int) EMInterpretInstruction(PVM pVM, PCPUMCTXCORE pRegFrame, RTGCPTR pvFa
  * @todo    At this time we do NOT check if the instruction overwrites vital information.
  *          Make sure this can't happen!! (will add some assertions/checks later)
  */
-EMDECL(int) EMInterpretInstructionCPU(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
+VMM_INT_DECL(VBOXSTRICTRC) EMInterpretInstructionDisasState(PVMCPUCC pVCpu, PDISSTATE pDis, uint64_t rip)
 {
-    STAM_PROFILE_START(&CTXMID(pVM->em.s.CTXSUFF(pStats)->Stat,Emulate), a);
-    int rc = emInterpretInstructionCPU(pVM, pCpu, pRegFrame, pvFault, pcbSize);
-    STAM_PROFILE_STOP(&CTXMID(pVM->em.s.CTXSUFF(pStats)->Stat,Emulate), a);
-    if (VBOX_SUCCESS(rc))
-        STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,InterpretSucceeded));
-    else
-        STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,InterpretFailed));
+    LogFlow(("EMInterpretInstructionDisasState %RGv\n", (RTGCPTR)rip));
+
+#ifndef IN_RING0 /* No ring-0 IEM TLB. */
+    PVMCC const pVM = pVCpu->CTX_SUFF(pVM);
+    if (!VM_IS_EXEC_ENGINE_IEM(pVM) && !pVM->em.s.fIemExecutesAll)
+        IEMTlbInvalidateAll(pVCpu);
+#endif
+    VBOXSTRICTRC rc = IEMExecOneBypassWithPrefetchedByPC(pVCpu, rip, pDis->Instr.ab, pDis->cbCachedInstr);
+    if (RT_UNLIKELY(   rc == VERR_IEM_ASPECT_NOT_IMPLEMENTED
+                    || rc == VERR_IEM_INSTR_NOT_IMPLEMENTED))
+        rc = VERR_EM_INTERPRETER;
+
+    if (rc != VINF_SUCCESS)
+        Log(("EMInterpretInstructionDisasState: returns %Rrc\n", VBOXSTRICTRC_VAL(rc)));
+
     return rc;
 }
 
-
-/**
- * Interpret a port I/O instruction.
- *
- * @returns VBox status code suitable for scheduling.
- * @param   pVM         The VM handle.
- * @param   pCtxCore    The context core. This will be updated on successful return.
- * @param   pCpu        The instruction to interpret.
- * @param   cbOp        The size of the instruction.
- * @remark  This may raise exceptions.
- */
-EMDECL(int) EMInterpretPortIO(PVM pVM, PCPUMCTXCORE pCtxCore, PDISCPUSTATE pCpu, uint32_t cbOp)
-{
-    /*
-     * Hand it on to IOM.
-     */
-#ifdef IN_GC
-    int rc = IOMGCIOPortHandler(pVM, pCtxCore, pCpu);
-    if (rc == VINF_SUCCESS)
-        pCtxCore->eip += cbOp;
-    return rc;
-#else
-    AssertReleaseMsgFailed(("not implemented\n"));
-    return VERR_NOT_IMPLEMENTED;
-#endif
-}
-
-
-inline int emRamRead(PVM pVM, void *pDest, RTGCPTR GCSrc, uint32_t cb)
-{
-#ifdef IN_GC
-    return MMGCRamRead(pVM, pDest, GCSrc, cb);
-#else
-    int         rc;
-    RTGCPHYS    GCPhys;
-    RTGCUINTPTR offset;
-
-    offset = GCSrc & PAGE_OFFSET_MASK;
-
-    rc = PGMPhysGCPtr2GCPhys(pVM, GCSrc, &GCPhys);
-    AssertRCReturn(rc, rc);
-    PGMPhysRead(pVM, GCPhys + offset, pDest, cb);
-    return VINF_SUCCESS;
-#endif
-}
-
-inline int emRamWrite(PVM pVM, RTGCPTR GCDest, void *pSrc, uint32_t cb)
-{
-#ifdef IN_GC
-    return MMGCRamWrite(pVM, GCDest, pSrc, cb);
-#else
-    int         rc;
-    RTGCPHYS    GCPhys;
-    RTGCUINTPTR offset;
-
-    offset = GCDest & PAGE_OFFSET_MASK;
-    rc = PGMPhysGCPtr2GCPhys(pVM, GCDest, &GCPhys);
-    AssertRCReturn(rc, rc);
-    PGMPhysWrite(pVM, GCPhys + offset, pSrc, cb);
-    return VINF_SUCCESS;
-#endif
-}
-
-/**
- * XCHG instruction emulation.
- */
-static int emInterpretXchg(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-
-    /* Source to make DISQueryParamVal read the register value - ugly hack */
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR pParam1 = 0, pParam2 = 0;
-            uint32_t valpar1, valpar2;
-
-            AssertReturn(pCpu->param1.size == pCpu->param2.size, VERR_EM_INTERPRETER);
-            switch(param1.type)
-            {
-            case PARMTYPE_IMMEDIATE: /* register type is translated to this one too */
-                valpar1 = param1.val.val32;
-                break;
-
-            case PARMTYPE_ADDRESS:
-                pParam1 = (RTGCPTR)param1.val.val32;
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("MMGCRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            switch(param2.type)
-            {
-            case PARMTYPE_ADDRESS:
-                pParam2 = (RTGCPTR)param2.val.val32;
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam2 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar2, pParam2, param2.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("MMGCRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                }
-                break;
-
-            case PARMTYPE_IMMEDIATE:
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Write value of parameter 2 to parameter 1 (reg or memory address) */
-            if (pParam1 == 0)
-            {
-                Assert(param1.type == PARMTYPE_IMMEDIATE); /* register actually */
-                switch(param1.size)
-                {
-                case 1: //special case for AH etc
-                        rc = DISWriteReg8(pRegFrame, pCpu->param1.base.reg_gen8, (uint8_t)valpar2); break;
-                case 2: rc = DISWriteReg16(pRegFrame, pCpu->param1.base.reg_gen32, (uint16_t)valpar2); break;
-                case 4: rc = DISWriteReg32(pRegFrame, pCpu->param1.base.reg_gen32, valpar2); break;
-                default: AssertFailedReturn(VERR_EM_INTERPRETER);
-                }
-                if (VBOX_FAILURE(rc))
-                    return VERR_EM_INTERPRETER;
-            }
-            else
-            {
-                rc = emRamWrite(pVM, pParam1, &valpar2, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamWrite %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-
-            /* Write value of parameter 1 to parameter 2 (reg or memory address) */
-            if (pParam2 == 0)
-            {
-                Assert(param2.type == PARMTYPE_IMMEDIATE); /* register actually */
-                switch(param2.size)
-                {
-                case 1: //special case for AH etc
-                        rc = DISWriteReg8(pRegFrame, pCpu->param2.base.reg_gen8, (uint8_t)valpar1); break;
-                case 2: rc = DISWriteReg16(pRegFrame, pCpu->param2.base.reg_gen32, (uint16_t)valpar1); break;
-                case 4: rc = DISWriteReg32(pRegFrame, pCpu->param2.base.reg_gen32, valpar1); break;
-                default: AssertFailedReturn(VERR_EM_INTERPRETER);
-                }
-                if (VBOX_FAILURE(rc))
-                    return VERR_EM_INTERPRETER;
-            }
-            else
-            {
-                rc = emRamWrite(pVM, pParam2, &valpar1, param2.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamWrite %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-
-            *pcbSize = param2.size;
-            return VINF_SUCCESS;
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-
-/**
- * INC and DEC emulation.
- */
-static int emInterpretIncDec(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1;
-
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR pParam1 = 0;
-            uint32_t valpar1;
-
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            uint32_t eflags;
-
-            if (pCpu->pCurInstr->opcode == OP_DEC)
-                eflags = EMEmulateDec(&valpar1, param1.size);
-            else
-                eflags = EMEmulateInc(&valpar1, param1.size);
-
-            /* Write result back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_FAILURE(rc))
-            {
-                AssertMsgFailed(("emRamWrite %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32   & ~(X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags & (X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* All done! */
-            *pcbSize = param1.size;
-            return VINF_SUCCESS;
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * POP Emulation.
- */
-static int emInterpretPop(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR pParam1 = 0;
-            uint32_t valpar1;
-            RTGCPTR pStackVal;
-
-            /* Read stack value first */
-            if (SELMIsSelector32Bit(pVM, pRegFrame->ss, &pRegFrame->ssHid) == false)
-                return VERR_EM_INTERPRETER; /* No legacy 16 bits stuff here, please. */
-
-            /* Convert address; don't bother checking limits etc, as we only read here */
-            pStackVal = SELMToFlat(pVM, pRegFrame->ss, &pRegFrame->ssHid, (RTGCPTR)pRegFrame->esp);
-            if (pStackVal == 0)
-                return VERR_EM_INTERPRETER;
-
-            rc = emRamRead(pVM, &valpar1, pStackVal, param1.size);
-            if (VBOX_FAILURE(rc))
-            {
-                AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                return VERR_EM_INTERPRETER;
-            }
-
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamWrite %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-
-                /* Update ESP as the last step */
-                pRegFrame->esp += param1.size;
-            }
-            else
-            {
-#ifndef DEBUG_bird // annoying assertion.
-                AssertFailed();
-#endif
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* All done! */
-            *pcbSize = param1.size;
-            return VINF_SUCCESS;
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * OR Emulation.
- */
-static int emInterpretOr(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("Or at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate OR. */
-            uint32_t eflags = EMEmulateOr(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags & (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * XOR Emulation.
- */
-static int emInterpretXor(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("Xor at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate XOR. */
-            uint32_t eflags = EMEmulateXor(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags                &  (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * AND Emulation.
- */
-static int emInterpretAnd(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("And at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertMsgReturn(pParam1 == pvFault, ("pParam1 = %VGv pvFault = %VGv\n", pParam1, pvFault), VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-#ifndef DEBUG_bird
-                AssertFailed();
-#endif
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate AND. */
-            uint32_t eflags = EMEmulateAnd(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags                &  (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * ADD Emulation.
- */
-static int emInterpretAdd(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("Add at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-#ifndef DEBUG_bird
-                AssertFailed();
-#endif
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate ADD. */
-            uint32_t eflags = EMEmulateAdd(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags                &  (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * ADC Emulation.
- * @todo combine with add
- */
-static int emInterpretAdc(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("Adc at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-#ifndef DEBUG_bird
-                AssertFailed();
-#endif
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate ADC. */
-            uint32_t eflags;
-
-            if (pRegFrame->eflags.u32 & X86_EFL_CF)
-                eflags = EMEmulateAdcWithCarrySet(&valpar1, valpar2, param2.size);
-            else
-                eflags = EMEmulateAdd(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags                &  (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * SUB Emulation.
- */
-static int emInterpretSub(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#endif
-            RTGCPTR  pParam1;
-            uint32_t valpar1, valpar2;
-
-            if (pCpu->param1.size != pCpu->param2.size)
-            {
-                if (pCpu->param1.size < pCpu->param2.size)
-                {
-                    AssertMsgFailed(("Sub at %VGv parameter mismatch %d vs %d!!\n", pRegFrame->eip, pCpu->param1.size, pCpu->param2.size)); /* should never happen! */
-                    return VERR_EM_INTERPRETER;
-                }
-                /* Or %Ev, Ib -> just a hack to save some space; the data width of the 1st parameter determines the real width */
-                pCpu->param2.size = pCpu->param1.size;
-                param2.size     = param1.size;
-            }
-
-            /* The destination is always a virtual address */
-            if (param1.type == PARMTYPE_ADDRESS)
-            {
-                pParam1 = (RTGCPTR)param1.val.val32;
-
-#ifdef IN_GC
-                /* Safety check (in theory it could cross a page boundary and fault there though) */
-                AssertReturn(pParam1 == (RTGCPTR)pvFault, VERR_EM_INTERPRETER);
-#endif
-                rc = emRamRead(pVM, &valpar1, pParam1, param1.size);
-                if (VBOX_FAILURE(rc))
-                {
-                    AssertMsgFailed(("emRamRead %VGv size=%d failed with %Vrc\n", pParam1, param1.size, rc));
-                    return VERR_EM_INTERPRETER;
-                }
-            }
-            else
-            {
-#ifndef DEBUG_bird
-                AssertFailed();
-#endif
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Register or immediate data */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:    /* both immediate data and register (ugly) */
-                valpar2 = param2.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            /* Data read, emulate SUB. */
-            uint32_t eflags = EMEmulateSub(&valpar1, valpar2, param2.size);
-
-            /* Update guest's eflags and finish. */
-            pRegFrame->eflags.u32 = (pRegFrame->eflags.u32 & ~(X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF))
-                                  | (eflags                &  (X86_EFL_CF | X86_EFL_PF | X86_EFL_AF | X86_EFL_ZF | X86_EFL_SF | X86_EFL_OF));
-
-            /* And write it back */
-            rc = emRamWrite(pVM, pParam1, &valpar1, param1.size);
-            if (VBOX_SUCCESS(rc))
-            {
-                /* All done! */
-                *pcbSize = param2.size;
-                return VINF_SUCCESS;
-            }
-#ifdef IN_GC
-        }
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * MOV emulation.
- */
-static int emInterpretMov(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1, param2;
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_DEST);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param2, &param2, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-#ifdef IN_GC
-    if (TRPMHasTrap(pVM))
-    {
-        if (TRPMGetErrorCode(pVM) & X86_TRAP_PF_RW)
-        {
-#else
-        /** @todo Make this the default and don't rely on TRPM information. */
-        if (param1.type == PARMTYPE_ADDRESS)
-        {
-#endif
-            RTGCPTR pDest;
-            uint32_t val32;
-
-            switch(param1.type)
-            {
-            case PARMTYPE_IMMEDIATE:
-                if(!(param1.flags & PARAM_VAL32))
-                    return VERR_EM_INTERPRETER;
-                /* fallthru */
-
-            case PARMTYPE_ADDRESS:
-                pDest = (RTGCPTR)param1.val.val32;
-                break;
-
-            default:
-                AssertFailed();
-                return VERR_EM_INTERPRETER;
-            }
-
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE: /* register type is translated to this one too */
-                val32 = param2.val.val32;
-                break;
-
-            default:
-                Log(("emInterpretMov: unexpected type=%d eip=%VGv\n", param2.type, pRegFrame->eip));
-                return VERR_EM_INTERPRETER;
-            }
-            LogFlow(("EMInterpretInstruction at %08x: OP_MOV %08X <- %08X (%d) &val32=%08x\n", pRegFrame->eip, pDest, val32, param2.size, &val32));
-
-            Assert(param2.size <= 4 && param2.size > 0);
-
-            rc = emRamWrite(pVM, pDest, &val32, param2.size);
-            if (VBOX_FAILURE(rc))
-                return VERR_EM_INTERPRETER;
-
-            *pcbSize = param2.size;
-        }
-        else
-        { /* read fault */
-            RTGCPTR pSrc;
-            uint32_t val32;
-
-            /* Source */
-            switch(param2.type)
-            {
-            case PARMTYPE_IMMEDIATE:
-                if(!(param2.flags & PARAM_VAL32))
-                    return VERR_EM_INTERPRETER;
-                /* fallthru */
-
-            case PARMTYPE_ADDRESS:
-                pSrc = (RTGCPTR)param2.val.val32;
-                break;
-
-            default:
-                return VERR_EM_INTERPRETER;
-            }
-
-            Assert(param1.size <= 4 && param1.size > 0);
-            rc = emRamRead(pVM, &val32, pSrc, param1.size);
-            if (VBOX_FAILURE(rc))
-                return VERR_EM_INTERPRETER;
-
-            /* Destination */
-            switch(param1.type)
-            {
-            case PARMTYPE_REGISTER:
-                switch(param1.size)
-                {
-                case 1: rc = DISWriteReg8(pRegFrame, pCpu->param1.base.reg_gen8, (uint8_t)val32); break;
-                case 2: rc = DISWriteReg16(pRegFrame, pCpu->param1.base.reg_gen16, (uint16_t)val32); break;
-                case 4: rc = DISWriteReg32(pRegFrame, pCpu->param1.base.reg_gen32, val32); break;
-                default:
-                    return VERR_EM_INTERPRETER;
-                }
-                if (VBOX_FAILURE(rc))
-                    return rc;
-                break;
-
-            default:
-                return VERR_EM_INTERPRETER;
-            }
-            LogFlow(("EMInterpretInstruction: OP_MOV %08X -> %08X (%d)\n", pSrc, val32, param1.size));
-        }
-        return VINF_SUCCESS;
-#ifdef IN_GC
-    }
-#endif
-    return VERR_EM_INTERPRETER;
-}
-
-
-/**
- * INVLPG Emulation.
- */
-
-/**
- * Interpret INVLPG
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- * @param   pAddrGC     Operand address
- *
- */
-EMDECL(int) EMInterpretInvlpg(PVM pVM, PCPUMCTXCORE pRegFrame, RTGCPTR pAddrGC)
-{
-    int rc;
-
-    /** @todo is addr always a flat linear address or ds based
-     * (in absence of segment override prefixes)????
-     */
-#ifdef IN_GC
-    // Note: we could also use PGMFlushPage here, but it currently doesn't always use invlpg!!!!!!!!!!
-    LogFlow(("GC: EMULATE: invlpg %08X\n", pAddrGC));
-    rc = PGMGCInvalidatePage(pVM, pAddrGC);
-#else
-    rc = PGMInvalidatePage(pVM, pAddrGC);
-#endif
-    if (VBOX_SUCCESS(rc))
-        return VINF_SUCCESS;
-    /** @todo r=bird: we shouldn't ignore returns codes like this... I'm 99% sure the error is fatal. */
-    return VERR_EM_INTERPRETER;
-}
-
-static int emInterpretInvlPg(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1;
-    RTGCPTR     addr;
-
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    switch(param1.type)
-    {
-    case PARMTYPE_IMMEDIATE:
-    case PARMTYPE_ADDRESS:
-        if(!(param1.flags & PARAM_VAL32))
-            return VERR_EM_INTERPRETER;
-        addr = (RTGCPTR)param1.val.val32;
-        break;
-
-    default:
-        return VERR_EM_INTERPRETER;
-    }
-
-    /** @todo is addr always a flat linear address or ds based
-     * (in absence of segment override prefixes)????
-     */
-#ifdef IN_GC
-    // Note: we could also use PGMFlushPage here, but it currently doesn't always use invlpg!!!!!!!!!!
-    LogFlow(("GC: EMULATE: invlpg %08X\n", addr));
-    rc = PGMGCInvalidatePage(pVM, addr);
-#else
-    rc = PGMInvalidatePage(pVM, addr);
-#endif
-    if (VBOX_SUCCESS(rc))
-        return VINF_SUCCESS;
-    /** @todo r=bird: we shouldn't ignore returns codes like this... I'm 99% sure the error is fatal. */
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * CPUID Emulation.
- */
-
-/**
- * Interpret CPUID given the parameters in the CPU context
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- *
- */
-EMDECL(int) EMInterpretCpuId(PVM pVM, PCPUMCTXCORE pRegFrame)
-{
-    CPUMGetGuestCpuId(pVM, pRegFrame->eax, &pRegFrame->eax, &pRegFrame->ebx, &pRegFrame->ecx, &pRegFrame->edx);
-    return VINF_SUCCESS;
-}
-
-static int emInterpretCpuId(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    uint32_t iLeaf = pRegFrame->eax; NOREF(iLeaf);
-
-    int rc = EMInterpretCpuId(pVM, pRegFrame);
-    Log(("Emulate: CPUID %x -> %08x %08x %08x %08x\n", iLeaf, pRegFrame->eax, pRegFrame->ebx, pRegFrame->ecx, pRegFrame->edx));
-    return rc;
-}
-
-/**
- * MOV CRx Emulation.
- */
-
-/**
- * Interpret CRx read
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- * @param   DestRegGen  General purpose register index (USE_REG_E**))
- * @param   SrcRegCRx   CRx register index (USE_REG_CR*)
- *
- */
-EMDECL(int) EMInterpretCRxRead(PVM pVM, PCPUMCTXCORE pRegFrame, uint32_t DestRegGen, uint32_t SrcRegCrx)
-{
-    uint32_t val32;
-
-    int rc = CPUMGetGuestCRx(pVM, SrcRegCrx, &val32);
-    AssertMsgRCReturn(rc, ("CPUMGetGuestCRx %d failed\n", SrcRegCrx), VERR_EM_INTERPRETER);
-    rc = DISWriteReg32(pRegFrame, DestRegGen, val32);
-    if(VBOX_SUCCESS(rc))
-    {
-        LogFlow(("MOV_CR: gen32=%d CR=%d val=%08x\n", DestRegGen, SrcRegCrx, val32));
-        return VINF_SUCCESS;
-    }
-    return VERR_EM_INTERPRETER;
-}
-
-
-/**
- * Interpret LMSW
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   u16Data     LMSW source data.
- *
- */
-EMDECL(int) EMInterpretLMSW(PVM pVM, uint16_t u16Data)
-{
-    uint32_t OldCr0 = CPUMGetGuestCR0(pVM);
-
-    /* don't use this path to go into protected mode! */
-    Assert(OldCr0 & X86_CR0_PE);
-    if (!(OldCr0 & X86_CR0_PE))
-        return VERR_EM_INTERPRETER;
-
-    /* Only PE, MP, EM and TS can be changed; note that PE can't be cleared by this instruction. */
-    uint32_t NewCr0 = ( OldCr0 & ~(             X86_CR0_MP | X86_CR0_EM | X86_CR0_TS))
-                    | (u16Data &  (X86_CR0_PE | X86_CR0_MP | X86_CR0_EM | X86_CR0_TS));
-
-#ifdef IN_GC
-    /* Need to change the hyper CR0? Doing it the lazy way then. */
-    if (    (OldCr0 & (X86_CR0_TS | X86_CR0_EM | X86_CR0_MP | X86_CR0_AM | X86_CR0_WP))
-        !=  (NewCr0 & (X86_CR0_TS | X86_CR0_EM | X86_CR0_MP | X86_CR0_AM | X86_CR0_WP)))
-    {
-        Log(("EMInterpretLMSW: CR0: %#x->%#x => R3\n", OldCr0, NewCr0));
-        VM_FF_SET(pVM, VM_FF_TO_R3);
-    }
-#endif
-
-    return CPUMSetGuestCR0(pVM, NewCr0);
-}
-
-
-/**
- * Interpret CLTS
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- *
- */
-EMDECL(int) EMInterpretCLTS(PVM pVM)
-{
-    uint32_t Cr0 = CPUMGetGuestCR0(pVM);
-    if (!(Cr0 & X86_CR0_TS))
-        return VINF_SUCCESS;
-
-#ifdef IN_GC
-    /* Need to change the hyper CR0? Doing it the lazy way then. */
-    Log(("EMInterpretCLTS: CR0: %#x->%#x => R3\n", Cr0, Cr0 & ~X86_CR0_TS));
-    VM_FF_SET(pVM, VM_FF_TO_R3);
-#endif
-    return CPUMSetGuestCR0(pVM, Cr0 & ~X86_CR0_TS);
-}
-
-
-/**
- * Interpret CRx write
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- * @param   DestRegCRx  CRx register index (USE_REG_CR*)
- * @param   SrcRegGen   General purpose register index (USE_REG_E**))
- *
- */
-EMDECL(int) EMInterpretCRxWrite(PVM pVM, PCPUMCTXCORE pRegFrame, uint32_t DestRegCrx, uint32_t SrcRegGen)
-{
-    uint32_t val32;
-    uint32_t oldval;
-/** @todo Clean up this mess. */
-
-    int rc = DISFetchReg32(pRegFrame, SrcRegGen, &val32);
-    if (VBOX_SUCCESS(rc))
-    {
-        switch (DestRegCrx)
-        {
-        case USE_REG_CR0:
-            oldval = CPUMGetGuestCR0(pVM);
-#ifndef IN_RING3
-            /* CR0.WP changes require a reschedule run in ring 3. */
-            if ((val32 & X86_CR0_WP) != (oldval & X86_CR0_WP))
-                return VERR_EM_INTERPRETER;
-#endif
-            rc = CPUMSetGuestCR0(pVM, val32); AssertRC(rc); /** @todo CPUSetGuestCR0 stuff should be void, this is silly. */
-            val32 = CPUMGetGuestCR0(pVM);
-            if (    (oldval & (X86_CR0_PG|X86_CR0_WP|X86_CR0_PE))
-                !=  (val32  & (X86_CR0_PG|X86_CR0_WP|X86_CR0_PE)))
-            {
-                /* global flush */
-                rc = PGMFlushTLB(pVM, CPUMGetGuestCR3(pVM), true /* global */);
-                AssertRCReturn(rc, rc);
-            }
-# ifdef IN_GC
-            /* Feeling extremely lazy. */
-            if (    (oldval & (X86_CR0_TS|X86_CR0_EM|X86_CR0_MP|X86_CR0_AM))
-                !=  (val32  & (X86_CR0_TS|X86_CR0_EM|X86_CR0_MP|X86_CR0_AM)))
-            {
-                Log(("emInterpretMovCRx: CR0: %#x->%#x => R3\n", oldval, val32));
-                VM_FF_SET(pVM, VM_FF_TO_R3);
-            }
-# endif
-            return PGMChangeMode(pVM, CPUMGetGuestCR0(pVM), CPUMGetGuestCR4(pVM), 0);
-
-        case USE_REG_CR2:
-            rc = CPUMSetGuestCR2(pVM, val32); AssertRC(rc);
-            return VINF_SUCCESS;
-
-        case USE_REG_CR3:
-            /* Reloading the current CR3 means the guest just wants to flush the TLBs */
-            rc = CPUMSetGuestCR3(pVM, val32); AssertRC(rc);
-            if (CPUMGetGuestCR0(pVM) & X86_CR0_PG)
-            {
-                /* flush */
-                rc = PGMFlushTLB(pVM, val32, !(CPUMGetGuestCR4(pVM) & X86_CR4_PGE));
-                AssertRCReturn(rc, rc);
-            }
-            return VINF_SUCCESS;
-
-        case USE_REG_CR4:
-            oldval = CPUMGetGuestCR4(pVM);
-#ifndef IN_RING3
-            /** @todo is flipping of the X86_CR4_PAE bit handled correctly here? */
-#endif
-            rc = CPUMSetGuestCR4(pVM, val32); AssertRC(rc);
-            val32 = CPUMGetGuestCR4(pVM);
-            if (    (oldval & (X86_CR4_PGE|X86_CR4_PAE|X86_CR4_PSE))
-                !=  (val32  & (X86_CR4_PGE|X86_CR4_PAE|X86_CR4_PSE)))
-            {
-                /* global flush */
-                rc = PGMFlushTLB(pVM, CPUMGetGuestCR3(pVM), true /* global */);
-                AssertRCReturn(rc, rc);
-            }
-# ifndef IN_RING3 /** @todo check this out IN_RING0! */
-            /* Feeling extremely lazy. */
-            if (    (oldval & (X86_CR4_OSFSXR|X86_CR4_OSXMMEEXCPT|X86_CR4_PCE|X86_CR4_MCE|X86_CR4_PAE|X86_CR4_DE|X86_CR4_TSD|X86_CR4_PVI|X86_CR4_VME))
-                !=  (val32  & (X86_CR4_OSFSXR|X86_CR4_OSXMMEEXCPT|X86_CR4_PCE|X86_CR4_MCE|X86_CR4_PAE|X86_CR4_DE|X86_CR4_TSD|X86_CR4_PVI|X86_CR4_VME)))
-            {
-                Log(("emInterpretMovCRx: CR4: %#x->%#x => R3\n", oldval, val32));
-                VM_FF_SET(pVM, VM_FF_TO_R3);
-            }
-# endif
-            return PGMChangeMode(pVM, CPUMGetGuestCR0(pVM), CPUMGetGuestCR4(pVM), 0);
-
-        default:
-            AssertFailed();
-        case USE_REG_CR1: /* illegal op */
-            break;
-        }
-    }
-    return VERR_EM_INTERPRETER;
-}
-
-static int emInterpretMovCRx(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    if (pCpu->param1.flags == USE_REG_GEN32 && pCpu->param2.flags == USE_REG_CR)
-        return EMInterpretCRxRead(pVM, pRegFrame, pCpu->param1.base.reg_gen32, pCpu->param2.base.reg_ctrl);
-    if (pCpu->param1.flags == USE_REG_CR && pCpu->param2.flags == USE_REG_GEN32)
-        return EMInterpretCRxWrite(pVM, pRegFrame, pCpu->param1.base.reg_ctrl, pCpu->param2.base.reg_gen32);
-    AssertMsgFailedReturn(("Unexpected control register move\n"), VERR_EM_INTERPRETER);
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * MOV DRx
- */
-
-/**
- * Interpret DRx write
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- * @param   DestRegDRx  DRx register index (USE_REG_DR*)
- * @param   SrcRegGen   General purpose register index (USE_REG_E**))
- *
- */
-EMDECL(int) EMInterpretDRxWrite(PVM pVM, PCPUMCTXCORE pRegFrame, uint32_t DestRegDrx, uint32_t SrcRegGen)
-{
-    uint32_t val32;
-
-    int rc = DISFetchReg32(pRegFrame, SrcRegGen, &val32);
-    if (VBOX_SUCCESS(rc))
-    {
-        rc = CPUMSetGuestDRx(pVM, DestRegDrx, val32);
-        if (VBOX_SUCCESS(rc))
-            return rc;
-        AssertMsgFailed(("CPUMSetGuestDRx %d failed\n", DestRegDrx));
-    }
-    return VERR_EM_INTERPRETER;
-}
-
-/**
- * Interpret DRx read
- *
- * @returns VBox status code.
- * @param   pVM         The VM handle.
- * @param   pRegFrame   The register frame.
- * @param   DestRegGen  General purpose register index (USE_REG_E**))
- * @param   SrcRegDRx   DRx register index (USE_REG_DR*)
- *
- */
-EMDECL(int) EMInterpretDRxRead(PVM pVM, PCPUMCTXCORE pRegFrame, uint32_t DestRegGen, uint32_t SrcRegDrx)
-{
-    uint32_t val32;
-
-    int rc = CPUMGetGuestDRx(pVM, SrcRegDrx, &val32);
-    AssertMsgRCReturn(rc, ("CPUMGetGuestDRx %d failed\n", SrcRegDrx), VERR_EM_INTERPRETER);
-    rc = DISWriteReg32(pRegFrame, DestRegGen, val32);
-    if (VBOX_SUCCESS(rc))
-        return VINF_SUCCESS;
-    return VERR_EM_INTERPRETER;
-}
-
-static int emInterpretMovDRx(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    int rc = VERR_EM_INTERPRETER;
-
-    if(pCpu->param1.flags == USE_REG_GEN32 && pCpu->param2.flags == USE_REG_DBG)
-    {
-        rc = EMInterpretDRxRead(pVM, pRegFrame, pCpu->param1.base.reg_gen32, pCpu->param2.base.reg_dbg);
-    }
-    else
-    if(pCpu->param1.flags == USE_REG_DBG && pCpu->param2.flags == USE_REG_GEN32)
-    {
-        rc = EMInterpretDRxWrite(pVM, pRegFrame, pCpu->param1.base.reg_dbg, pCpu->param2.base.reg_gen32);
-    }
-    else
-        AssertMsgFailed(("Unexpected debug register move\n"));
-    return rc;
-}
-
-/**
- * LLDT Emulation.
- */
-static int emInterpretLLdt(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    OP_PARAMVAL param1;
-    RTSEL       sel;
-
-    int rc = DISQueryParamVal(pRegFrame, pCpu, &pCpu->param1, &param1, PARAM_SOURCE);
-    if(VBOX_FAILURE(rc))
-        return VERR_EM_INTERPRETER;
-
-    switch(param1.type)
-    {
-    case PARMTYPE_ADDRESS:
-        return VERR_EM_INTERPRETER; //feeling lazy right now
-
-    case PARMTYPE_IMMEDIATE:
-        if(!(param1.flags & PARAM_VAL16))
-            return VERR_EM_INTERPRETER;
-        sel = (RTSEL)param1.val.val16;
-        break;
-
-    default:
-        return VERR_EM_INTERPRETER;
-    }
-
-    if (sel == 0)
-    {
-        if (CPUMGetHyperLDTR(pVM) == 0)
-        {
-            // this simple case is most frequent in Windows 2000 (31k - boot & shutdown)
-            return VINF_SUCCESS;
-        }
-    }
-    //still feeling lazy
-    return VERR_EM_INTERPRETER;
-}
-
-#ifdef IN_GC
-/**
- * STI Emulation.
- *
- * @remark the instruction following sti is guaranteed to be executed before any interrupts are dispatched
- */
-static int emInterpretSti(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    PPATMGCSTATE pGCState = PATMQueryGCState(pVM);
-
-    if(!pGCState)
-    {
-        Assert(pGCState);
-        return VERR_EM_INTERPRETER;
-    }
-    pGCState->uVMFlags |= X86_EFL_IF;
-
-    Assert(pRegFrame->eflags.u32 & X86_EFL_IF);
-    Assert(pvFault == (RTGCPTR)pRegFrame->eip);
-
-    pVM->em.s.GCPtrInhibitInterrupts = pRegFrame->eip + pCpu->opsize;
-    VM_FF_SET(pVM, VM_FF_INHIBIT_INTERRUPTS);
-
-    return VINF_SUCCESS;
-}
-#endif /* IN_GC */
-
-
-/**
- * HLT Emulation.
- */
-static int emInterpretHlt(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    return VINF_EM_HALT;
-}
-
-
-/**
- * IRET Emulation.
- */
-static int emInterpretIret(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    return VERR_EM_INTERPRETER;
-}
-
-
-/**
- * MONITOR Emulation.
- */
-static int emInterpretMonitor(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    if (pRegFrame->ecx != 0)
-        return VERR_EM_INTERPRETER; /* illegal value. */
-
-#ifdef IN_GC
-    if ((pRegFrame->ss & X86_SEL_RPL) != 1)
-#else
-    if ((pRegFrame->ss & X86_SEL_RPL) != 0)
-#endif
-        return VERR_EM_INTERPRETER; /* supervisor only */
-
-    return VINF_SUCCESS;
-}
-
-
-/**
- * MWAIT Emulation.
- */
-static int emInterpretMWait(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    if (pRegFrame->ecx != 0)
-        return VERR_EM_INTERPRETER; /* illegal value. */
-
-#ifdef IN_GC
-    if ((pRegFrame->ss & X86_SEL_RPL) != 1)
-#else
-    if ((pRegFrame->ss & X86_SEL_RPL) != 0)
-#endif
-        return VERR_EM_INTERPRETER; /* supervisor only */
-
-    /** @todo not completely correct */
-    return VINF_EM_HALT;
-}
-
-
-/**
- * Internal worker.
- * @copydoc EMInterpretInstructionCPU
- */
-DECLINLINE(int) emInterpretInstructionCPU(PVM pVM, PDISCPUSTATE pCpu, PCPUMCTXCORE pRegFrame, RTGCPTR pvFault, uint32_t *pcbSize)
-{
-    Assert(pcbSize);
-    *pcbSize = 0;
-
-    /*
-     * Only supervisor guest code!!
-     * And no complicated prefixes.
-     */
-#ifdef IN_GC
-    if ((pRegFrame->ss & X86_SEL_RPL) != 1)
-#else
-    if ((pRegFrame->ss & X86_SEL_RPL) != 0)
-#endif
-    {
-        Log(("WARNING: refusing instruction emulation for user-mode code!!\n"));
-        STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,FailedUserMode));
-        return VERR_EM_INTERPRETER;
-    }
-
-    /* In HWACCM mode we can execute 16 bits code. Our emulation above can't cope with that yet. */
-    /** @note if not in HWACCM mode, then we will never execute 16 bits code, so don't bother checking. */
-    if (HWACCMIsEnabled(pVM) && !SELMIsSelector32Bit(pVM, pRegFrame->cs, &pRegFrame->csHid))
-        return VERR_EM_INTERPRETER;
-
-    /** @note we could ignore PREFIX_LOCK here. Need to take special precautions when/if we support SMP in the guest.
-     */
-    if (pCpu->prefix & (PREFIX_REPNE | PREFIX_REP | PREFIX_SEG | PREFIX_LOCK))
-    {
-        //Log(("EMInterpretInstruction: wrong prefix!!\n"));
-        STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,FailedPrefix));
-        return VERR_EM_INTERPRETER;
-    }
-
-    int rc;
-    switch (pCpu->pCurInstr->opcode)
-    {
-#define INTERPRET_CASE_EX(opcode,Instr,InstrFn) \
-        case opcode:\
-            rc = emInterpret##InstrFn(pVM, pCpu, pRegFrame, pvFault, pcbSize); \
-            if (VBOX_SUCCESS(rc)) \
-                STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,Instr)); \
-            else \
-                STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,Failed##Instr)); \
-            return rc
-#define INTERPRET_CASE(opcode,Instr) INTERPRET_CASE_EX(opcode,Instr,Instr)
-#define INTERPRET_STAT_CASE(opcode,Instr) \
-        case opcode: STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,Failed##Instr)); return VERR_EM_INTERPRETER;
-
-        INTERPRET_CASE(OP_XCHG,Xchg);
-        INTERPRET_CASE_EX(OP_DEC,Dec,IncDec);
-        INTERPRET_CASE_EX(OP_INC,Inc,IncDec);
-        INTERPRET_CASE(OP_POP,Pop);
-        INTERPRET_CASE(OP_OR,Or);
-        INTERPRET_CASE(OP_XOR,Xor);
-        INTERPRET_CASE(OP_MOV,Mov);
-        INTERPRET_CASE(OP_AND,And);
-        INTERPRET_CASE(OP_INVLPG,InvlPg);
-        INTERPRET_CASE(OP_CPUID,CpuId);
-        INTERPRET_CASE(OP_MOV_CR,MovCRx);
-        INTERPRET_CASE(OP_MOV_DR,MovDRx);
-        INTERPRET_CASE(OP_LLDT,LLdt);
-        INTERPRET_CASE(OP_MONITOR, Monitor);
-        INTERPRET_CASE(OP_MWAIT, MWait);
-        INTERPRET_CASE(OP_ADD,Add);
-        INTERPRET_CASE(OP_ADC,Adc);
-        INTERPRET_CASE(OP_SUB,Sub);
-#ifdef IN_GC
-        INTERPRET_CASE(OP_STI,Sti);
-#endif
-        INTERPRET_CASE(OP_HLT,Hlt);
-        INTERPRET_CASE(OP_IRET,Iret);
-#ifdef VBOX_WITH_STATISTICS
-        INTERPRET_STAT_CASE(OP_BTR,Btr);
-        INTERPRET_STAT_CASE(OP_BTS,Bts);
-        INTERPRET_STAT_CASE(OP_CMPXCHG,CmpXchg);
-        INTERPRET_STAT_CASE(OP_MOVNTPS,MovNTPS);
-        INTERPRET_STAT_CASE(OP_STOSWD,StosWD);
-        INTERPRET_STAT_CASE(OP_WBINVD,WbInvd);
-#endif
-        default:
-            Log3(("emInterpretInstructionCPU: opcode=%d\n", pCpu->pCurInstr->opcode));
-            STAM_COUNTER_INC(&pVM->em.s.CTXSUFF(pStats)->CTXMID(Stat,FailedMisc));
-            return VERR_EM_INTERPRETER;
-#undef INTERPRET_STAT_CASE
-#undef INTERPRET_CASE
-    }
-    AssertFailed();
-    return VERR_INTERNAL_ERROR;
-}
-
-
-/**
- * Sets the PC for which interrupts should be inhibited.
- *
- * @param   pVM         The VM handle.
- * @param   PC          The PC.
- */
-EMDECL(void) EMSetInhibitInterruptsPC(PVM pVM, RTGCUINTPTR PC)
-{
-    pVM->em.s.GCPtrInhibitInterrupts = PC;
-    VM_FF_SET(pVM, VM_FF_INHIBIT_INTERRUPTS);
-}
-
-
-/**
- * Gets the PC for which interrupts should be inhibited.
- *
- * There are a few instructions which inhibits or delays interrupts
- * for the instruction following them. These instructions are:
- *      - STI
- *      - MOV SS, r/m16
- *      - POP SS
- *
- * @returns The PC for which interrupts should be inhibited.
- * @param   pVM         VM handle.
- *
- */
-EMDECL(RTGCUINTPTR) EMGetInhibitInterruptsPC(PVM pVM)
-{
-    return pVM->em.s.GCPtrInhibitInterrupts;
-}

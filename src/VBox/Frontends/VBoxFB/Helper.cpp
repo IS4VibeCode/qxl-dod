@@ -1,23 +1,28 @@
+/* $Id: Helper.cpp 112403 2026-01-11 19:29:08Z knut.osmundsen@oracle.com $ */
 /** @file
- *
- * VBox frontends: Framebuffer (FB, DirectFB):
- * Helper routines
+ * VBoxFB - Helper routines.
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 #include "VBoxFB.h"
@@ -26,8 +31,8 @@
 /**
  * Globals
  */
-videoMode videoModes[MAX_VIDEOMODES] = {0};
-uint32_t numVideoModes = 0;
+videoMode g_videoModes[MAX_VIDEOMODES] = {{0}};
+uint32_t g_numVideoModes = 0;
 
 /**
  * callback handler for populating the supported video modes
@@ -40,7 +45,8 @@ uint32_t numVideoModes = 0;
  */
 DFBEnumerationResult enumVideoModesHandler(int width, int height, int bpp, void *callbackdata)
 {
-    if (numVideoModes >= MAX_VIDEOMODES)
+    RT_NOREF(callbackdata);
+    if (g_numVideoModes >= MAX_VIDEOMODES)
     {
         return DFENUM_CANCEL;
     }
@@ -50,15 +56,15 @@ DFBEnumerationResult enumVideoModesHandler(int width, int height, int bpp, void 
         // don't take modes we already have (I have seen many cases where
         // DirectFB returns the same modes several times)
         int32_t existingMode = getBestVideoMode(width, height, bpp);
-        if ((existingMode == -1) ||
-            ((videoModes[existingMode].width != (uint32_t)width) ||
-             (videoModes[existingMode].height != (uint32_t)height) ||
-             (videoModes[existingMode].bpp != (uint32_t)bpp)))
+        if (   existingMode == -1
+            || g_videoModes[existingMode].width  != (uint32_t)width
+            || g_videoModes[existingMode].height != (uint32_t)height
+            || g_videoModes[existingMode].bpp    != (uint32_t)bpp)
         {
-            videoModes[numVideoModes].width  = (uint32_t)width;
-            videoModes[numVideoModes].height = (uint32_t)height;
-            videoModes[numVideoModes].bpp    = (uint32_t)bpp;
-            numVideoModes++;
+            g_videoModes[g_numVideoModes].width  = (uint32_t)width;
+            g_videoModes[g_numVideoModes].height = (uint32_t)height;
+            g_videoModes[g_numVideoModes].bpp    = (uint32_t)bpp;
+            g_numVideoModes++;
         }
     }
     return DFENUM_OK;
@@ -76,22 +82,20 @@ int32_t getBestVideoMode(uint32_t width, uint32_t height, uint32_t bpp)
 {
     int32_t bestMode = -1;
 
-    for (uint32_t i = 0; i < numVideoModes; i++)
+    for (uint32_t i = 0; i < g_numVideoModes; i++)
     {
         // is this mode compatible?
-        if ((videoModes[i].width >= width) && (videoModes[i].height >= height) &&
-            (videoModes[i].bpp >= bpp))
+        if (g_videoModes[i].width >= width && g_videoModes[i].height >= height && g_videoModes[i].bpp >= bpp)
         {
             // first suitable mode?
             if (bestMode == -1)
-            {
                 bestMode = i;
-            } else
+            else
             {
                 // is it better than the one we got before?
-                if ((videoModes[i].width  < videoModes[bestMode].width) ||
-                    (videoModes[i].height < videoModes[bestMode].height) ||
-                    (videoModes[i].bpp    < videoModes[bestMode].bpp))
+                if (   g_videoModes[i].width  < g_videoModes[bestMode].width
+                    || g_videoModes[i].height < g_videoModes[bestMode].height
+                    || g_videoModes[i].bpp    < g_videoModes[bestMode].bpp)
                 {
                     bestMode = i;
                 }

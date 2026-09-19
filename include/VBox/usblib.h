@@ -1,259 +1,196 @@
 /** @file
- * USBLIB - USB Support Library:
- * This module implements the basic low-level OS interfaces for Windows hosts.
+ * USBLib - Library for wrapping up the VBoxUSB functionality. (DEV,HDrv,Main)
  */
 
 /*
- * Copyright (C) 2006 InnoTek Systemberatung GmbH
+ * Copyright (C) 2006-2026 Oracle and/or its affiliates.
  *
- * This file is part of VirtualBox Open Source Edition (OSE), as
- * available from http://www.virtualbox.org. This file is free software;
- * you can redistribute it and/or modify it under the terms of the GNU
- * General Public License as published by the Free Software Foundation,
- * in version 2 as it comes in the "COPYING" file of the VirtualBox OSE
- * distribution. VirtualBox OSE is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY of any kind.
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
  *
- * If you received this file as part of a commercial VirtualBox
- * distribution, then only the terms of your commercial VirtualBox
- * license agreement apply instead of the previous paragraph.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * The contents of this file may alternatively be used under the terms
+ * of the Common Development and Distribution License Version 1.0
+ * (CDDL), a copy of it is provided in the "COPYING.CDDL" file included
+ * in the VirtualBox distribution, in which case the provisions of the
+ * CDDL are applicable instead of those of the GPL.
+ *
+ * You may elect to license modified versions of this file under the
+ * terms and conditions of either the GPL or the CDDL or both.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only OR CDDL-1.0
  */
 
-
-#ifndef __VBox_usblib_h__
-#define __VBox_usblib_h__
+#ifndef VBOX_INCLUDED_usblib_h
+#define VBOX_INCLUDED_usblib_h
+#ifndef RT_WITHOUT_PRAGMA_ONCE
+# pragma once
+#endif
 
 #include <VBox/cdefs.h>
 #include <VBox/types.h>
 #include <VBox/usb.h>
+#include <VBox/usbfilter.h>
+#include <iprt/ctype.h>
+#include <iprt/string.h>
 
-#include <initguid.h>
-// {6068EB61-98E7-4c98-9E20-1F068295909A}
-DEFINE_GUID(GUID_CLASS_VBOXUSB, 0x873fdf, 0xCAFE, 0x80EE, 0xaa, 0x5e, 0x0, 0xc0, 0x4f, 0xb1, 0x72, 0xb);
-
-#define USBFLT_SERVICE_NAME              "\\\\.\\VBoxUSBFlt"
-#define USBFLT_NTDEVICE_NAME_STRING      L"\\Device\\VBoxUSBFlt"
-#define USBFLT_SYMBOLIC_NAME_STRING      L"\\DosDevices\\VBoxUSBFlt"
-
-/*
- * IOCtl numbers.
- * We're using the Win32 type of numbers here, thus the macros below.
- */
-
-#ifndef CTL_CODE
-# if defined(__WIN__)
-#  define CTL_CODE(DeviceType, Function, Method, Access) \
-    ( ((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
-#else /* unix: */
-#  define CTL_CODE(DeviceType, Function, Method_ignored, Access_ignored) \
-    ( (3 << 30) | ((DeviceType) << 8) | (Function) | (sizeof(SUPDRVIOCTLDATA) << 16) )
-# endif
+#ifdef RT_OS_WINDOWS
+# include <VBox/usblib-win.h>
 #endif
-#ifndef METHOD_BUFFERED
-# define METHOD_BUFFERED        0
+#ifdef RT_OS_SOLARIS
+# include <VBox/usblib-solaris.h>
 #endif
-#ifndef FILE_WRITE_ACCESS
-# define FILE_WRITE_ACCESS      0x0002
+#ifdef RT_OS_DARWIN
+# include <VBox/usblib-darwin.h>
 #endif
-#ifndef FILE_DEVICE_UNKNOWN
-# define FILE_DEVICE_UNKNOWN    0x00000022
-#endif
+/** @todo merge the usblib-win.h interface into the darwin and linux ports where suitable. */
 
-#define USBFLT_MAJOR_VERSION              1
-#define USBFLT_MINOR_VERSION              1
-
-#define USBDRV_MAJOR_VERSION              1
-#define USBDRV_MINOR_VERSION              2
-
-#define SUPUSB_IOCTL_TEST                 CTL_CODE(FILE_DEVICE_UNKNOWN, 0x601, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_GET_DEVICE           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x603, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_SEND_URB             CTL_CODE(FILE_DEVICE_UNKNOWN, 0x607, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_RESET            CTL_CODE(FILE_DEVICE_UNKNOWN, 0x608, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_SELECT_INTERFACE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x609, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_SET_CONFIG       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60A, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_CLAIM_DEVICE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60B, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_RELEASE_DEVICE   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60C, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_IS_OPERATIONAL       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60D, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_USB_CLEAR_ENDPOINT   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60E, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSB_IOCTL_GET_VERSION          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60F, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-
-#define SUPUSBFLT_IOCTL_GET_NUM_DEVICES   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x602, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_USB_CHANGE        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x604, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_DISABLE_CAPTURE   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x605, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_ENABLE_CAPTURE    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x606, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_IGNORE_DEVICE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x60F, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_GET_VERSION       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x610, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_ADD_FILTER        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x611, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define SUPUSBFLT_IOCTL_REMOVE_FILTER     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x612, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-
-#pragma pack(4)
-
-#define MAX_FILTER_NAME                 128
-#define MAX_USB_SERIAL_STRING           64
-
-typedef struct
-{
-    uint16_t        vid, did, rev;
-    char            serial_hash[MAX_USB_SERIAL_STRING];
-
-    uint8_t         fAttached;
-} USBSUP_GETDEV, *PUSBSUP_GETDEV;
-
-typedef struct
-{
-    uint32_t        u32Major;
-    uint32_t        u32Minor;
-} USBSUP_VERSION, *PUSBSUP_VERSION;
-
-#define MAX_VENDOR_NAME    16
-#define MAX_PRODUCT_NAME   MAX_VENDOR_NAME
-#define MAX_REVISION_NAME  MAX_VENDOR_NAME
-
-typedef struct
-{
-    char            szVendor[MAX_VENDOR_NAME];
-    char            szProduct[MAX_PRODUCT_NAME];
-    char            szRevision[MAX_REVISION_NAME];
-    uintptr_t       id;
-} USBSUP_FILTER, *PUSBSUP_FILTER;
-
-typedef struct
-{
-    uint8_t         bInterfaceNumber;
-    uint8_t         fClaimed;
-} USBSUP_CLAIMDEV, *PUSBSUP_CLAIMDEV;
-
-typedef USBSUP_CLAIMDEV  USBSUP_RELEASEDEV;
-typedef PUSBSUP_CLAIMDEV PUSBSUP_RELEASEDEV;
-
-typedef struct
-{
-    uint32_t         cUSBDevices;
-} USBSUP_GETNUMDEV, *PUSBSUP_GETNUMDEV;
-
-typedef struct
-{
-    uint8_t          fUSBChange;
-} USBSUP_USB_CHANGE, *PUSBSUP_USB_CHANGE;
-
-typedef struct
-{
-    uint8_t         bConfigurationValue;
-} USBSUP_SET_CONFIG, *PUSBSUP_SET_CONFIG;
-
-typedef struct
-{
-    uint8_t         bInterfaceNumber;
-    uint8_t         bAlternateSetting;
-} USBSUP_SELECT_INTERFACE, *PUSBSUP_SELECT_INTERFACE;
-
-typedef struct
-{
-    uint8_t         bEndpoint;
-} USBSUP_CLEAR_ENDPOINT, *PUSBSUP_CLEAR_ENDPOINT;
-
-typedef enum
-{
-    USBSUP_TRANSFER_TYPE_CTRL = 0,
-    USBSUP_TRANSFER_TYPE_ISOC = 1,
-    USBSUP_TRANSFER_TYPE_BULK = 2,
-    USBSUP_TRANSFER_TYPE_INTR = 3,
-    USBSUP_TRANSFER_TYPE_MSG  = 4
-} USBSUP_TRANSFER_TYPE;
-
-typedef enum
-{
-    USBSUP_DIRECTION_SETUP = 0,
-    USBSUP_DIRECTION_IN    = 1,
-    USBSUP_DIRECTION_OUT   = 2
-} USBSUP_DIRECTION;
-
-
-typedef enum
-{
-    USBSUP_XFER_OK         = 0,
-    USBSUP_XFER_STALL      = 1,
-    USBSUP_XFER_DNR        = 2,
-    USBSUP_XFER_CRC        = 3
-} USBSUP_ERROR;
-
-typedef struct
-{
-    USBSUP_TRANSFER_TYPE type; /* [in] QUSB_TRANSFER_TYPE_XXX */
-    uint32_t ep;               /* [in] index to dev->pipe */
-    USBSUP_DIRECTION     dir;  /* [in] QUSB_DIRECTION_XXX */
-    uint32_t error;            /* [out] QUSB_XFER_XXX */
-    size_t len;                /* [in/out] may change */
-    void *buf;                 /* [in/out] depends on dir */
-} USBSUP_URB, *PUSBSUP_URB;
-
-#pragma pack()                          /* paranoia */
-
-
-__BEGIN_DECLS
-
-#ifdef IN_RING3
-
-/** @defgroup   grp_usblib_r3     USBLIB Host Context Ring 3 API
+RT_C_DECLS_BEGIN
+/** @defgroup grp_usblib    USBLib - USB Support Library
+ * This module implements the basic low-level OS interfaces and common USB code.
  * @{
  */
 
-/*
- * Initialize the USB library
+#ifdef IN_RING3
+/**
+ * Initializes the USBLib component.
+ *
+ * The USBLib keeps a per process connection to the kernel driver
+ * and all USBLib users within a process will share the same
+ * connection. USBLib does reference counting to make sure that
+ * the connection remains open until all users has called USBLibTerm().
+ *
+ * @returns VBox status code.
+ *
+ * @remark  The users within the process are responsible for not calling
+ *          this function at the same time (because I'm lazy).
+ */
+USBLIB_DECL(int) USBLibInit(void);
+
+/**
+ * Terminates the USBLib component.
+ *
+ * Must match successful USBLibInit calls.
  *
  * @returns VBox status code.
  */
-USBR3DECL(int) usbLibInit();
+USBLIB_DECL(int) USBLibTerm(void);
 
-/*
- * Terminate the USB library
+/**
+ * Adds a filter.
  *
- * @returns VBox status code.
+ * This function will validate and transfer the specified filter
+ * to the kernel driver and make it start using it. The kernel
+ * driver will return a filter id that this function passes on
+ * to its caller.
+ *
+ * The kernel driver will associate the added filter with the
+ * calling process and automatically remove all filters when
+ * the process terminates the connection to it or dies.
+ *
+ * @returns Filter id for passing to USBLibRemoveFilter on success.
+ * @returns NULL on failure.
+ *
+ * @param   pFilter     The filter to add.
  */
-USBR3DECL(int) usbLibTerm();
+USBLIB_DECL(void *) USBLibAddFilter(PCUSBFILTER pFilter);
 
-/*
- * Add USB device filter
+/**
+ * Removes a filter.
  *
- * @returns VBox status code.
- * @param   pszVendor       Vendor filter string
- * @param   pszProduct      Product filter string
- * @param   pszRevision     Revision filter string
- * @param   ppID            Pointer to filter id
+ * @param   pvId        The ID returned by USBLibAddFilter.
  */
-USBR3DECL(int) usbLibInsertFilter(const char *pszVendor, const char *pszProduct, const char *pszRevision, void **ppID);
+USBLIB_DECL(void) USBLibRemoveFilter(void *pvId);
 
-/*
- * Remove USB device filter
+/**
+ * Calculate the hash of the serial string.
  *
- * @returns VBox status code.
- * @param   aID             Filter id
+ * 64bit FNV1a, chosen because it is designed to hash in to a power of two
+ * space, and is much quicker and simpler than, say, a half MD4.
+ *
+ * @returns the hash.
+ * @param   pszSerial       The serial string.
  */
-USBR3DECL(int) usbLibRemoveFilter (void *aID);
+USBLIB_DECL(uint64_t) USBLibHashSerial(const char *pszSerial);
 
-/*
- * Return all attached USB devices.
- *
- * @returns VBox status code
- * @param ppDevices         Receives pointer to list of devices
- * @param pcbNumDevices     Number of USB devices in the list
- */
-USBR3DECL(int) usbLibGetDevices(PUSBDEVICE *ppDevices,  uint32_t *pcbNumDevices);
+#endif /* IN_RING3 */
 
-/*
- * Check for USB device arrivals or removals
+/**
+ * Purge string of non-UTF-8 encodings and control characters.
  *
- * @returns boolean
+ * Control characters creates problems when presented to the user and currently
+ * also when used in XML settings.  So, we must purge them in the USB vendor,
+ * product, and serial number strings.
+ *
+ * @returns String length (excluding terminator).
+ * @param   psz                 The string to purge.
+ *
+ * @remarks The return string may be shorter than the input, left over space
+ *          after the end of the string will be filled with zeros.
  */
-USBR3DECL(bool) usbLibHasPendingDeviceChanges();
+DECLINLINE(size_t) USBLibPurgeEncoding(char *psz)
+{
+    if (psz)
+    {
+        size_t offSrc;
+
+        /* Beat it into valid UTF-8 encoding. */
+        RTStrPurgeEncoding(psz);
+
+        /* Look for control characters. */
+        for (offSrc = 0; ; offSrc++)
+        {
+            char ch = psz[offSrc];
+            if (RT_UNLIKELY(RT_C_IS_CNTRL(ch) && ch != '\0'))
+            {
+                /* Found a control character! Replace tab by space and remove all others. */
+                size_t offDst = offSrc;
+                for (;; offSrc++)
+                {
+                    ch = psz[offSrc];
+                    if (RT_C_IS_CNTRL(ch) && ch != '\0')
+                    {
+                        if (ch == '\t')
+                            ch = ' ';
+                        else
+                            continue;
+                    }
+                    psz[offDst++] = ch;
+                    if (ch == '\0')
+                        break;
+                }
+
+                /* Wind back to the zero terminator and zero fill any gap to make
+                   USBFilterValidate happy.  (offSrc is at zero terminator too.) */
+                offDst--;
+                while (offSrc > offDst)
+                    psz[offSrc--] = '\0';
+
+                return offDst;
+            }
+            if (ch == '\0')
+                break;
+        }
+        return offSrc;
+    }
+    return 0;
+}
+
 
 /** @} */
-#endif
+RT_C_DECLS_END
 
-/** @} */
-
-__END_DECLS
-
-
-#endif
+#endif /* !VBOX_INCLUDED_usblib_h */
 
